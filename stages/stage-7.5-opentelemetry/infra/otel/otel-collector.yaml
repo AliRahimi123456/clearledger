@@ -1,0 +1,126 @@
+# INTRODUCED: Stage 7.5 — OpenTelemetry Collector
+# PURPOSE: Receive traces/metrics from ClearLedger services and route to Tempo/Prometheus
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: monitoring
+data:
+  collector.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+
+    processors:
+      batch:
+        # Batch spans before export to reduce network overhead
+        timeout: 1s
+        send_batch_size: 1024
+
+      resource:
+        # Add Kubernetes metadata to every span
+        attributes:
+          - action: insert
+            key: k8s.cluster.name
+            value: clearledger
+
+      memory_limiter:
+        # Prevent OOM if collector receives a spike
+        check_interval: 1s
+        limit_mib: 256
+
+    exporters:
+      otlp/tempo:
+        # Grafana Tempo for distributed traces
+        endpoint: http://tempo.monitoring.svc.cluster.local:4317
+        tls:
+          insecure: true
+
+      prometheusremotewrite:
+        # Export OTel metrics to existing Prometheus
+        endpoint: http://kube-prometheus-stack-prometheus.monitoring.svc:9090/api/v1/write
+
+      logging:
+        # Debug: print spans to collector logs
+        verbosity: normal
+
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, resource, batch]
+          exporters: [otlp/tempo, logging]
+
+        metrics:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [prometheusremotewrite]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+  namespace: monitoring
+  labels:
+    app: otel-collector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: otel-collector
+  template:
+    metadata:
+      labels:
+        app: otel-collector
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+        - name: otel-collector
+          image: otel/opentelemetry-collector-contrib:0.104.0
+          args: ["--config=/etc/otel/collector.yaml"]
+          ports:
+            - name: otlp-grpc
+              containerPort: 4317
+            - name: otlp-http
+              containerPort: 4318
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otel
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+      volumes:
+        - name: config
+          configMap:
+            name: otel-collector-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  namespace: monitoring
+spec:
+  selector:
+    app: otel-collector
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318

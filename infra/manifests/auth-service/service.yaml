@@ -1,0 +1,14 @@
+# INTRODUCED: Stage 0 — Raw Kubernetes
+# PURPOSE: Exposes auth-service pods internally for ingress routing
+#          and inter-service communication (ledger-service calls /verify here)
+apiVersion: v1
+kind: Service
+metadata:
+  name: auth-service
+  namespace: clearledger
+spec:
+  selector:
+    app: auth-service
+  ports:
+    - port: 80
+      targetPort: 8000

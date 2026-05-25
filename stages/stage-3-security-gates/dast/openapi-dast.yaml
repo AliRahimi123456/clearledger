@@ -1,0 +1,89 @@
+openapi: 3.0.3
+info:
+  title: ClearLedger DAST surface
+  version: "1.0"
+servers:
+  - url: http://clearledger.local
+paths:
+  /auth/register:
+    post:
+      summary: Register (no auth)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+                password:
+                  type: string
+      responses:
+        "201":
+          description: Created
+  /auth/login:
+    post:
+      summary: Login (no auth)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+                password:
+                  type: string
+      responses:
+        "200":
+          description: OK
+  /auth/verify:
+    get:
+      security:
+        - bearerAuth: []
+      summary: Verify JWT
+      responses:
+        "200":
+          description: OK
+  /ledger/balance:
+    get:
+      security:
+        - bearerAuth: []
+      summary: Balance
+      responses:
+        "200":
+          description: OK
+  /ledger/transactions:
+    get:
+      security:
+        - bearerAuth: []
+      summary: List transactions
+      responses:
+        "200":
+          description: OK
+  /ledger/transactions/{transaction_id}:
+    get:
+      security:
+        - bearerAuth: []
+      summary: Single transaction (BOLA-sensitive)
+      parameters:
+        - name: transaction_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: OK
+        "403":
+          description: Forbidden
+        "404":
+          description: Not found
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT

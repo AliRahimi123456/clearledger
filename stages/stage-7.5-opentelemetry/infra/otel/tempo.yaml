@@ -1,0 +1,24 @@
+# INTRODUCED: Stage 7.5 — Grafana Tempo (distributed tracing backend)
+#
+# Tempo is deployed via Helm — see Stage 7.5 README for install:
+#
+#   helm repo add grafana https://grafana.github.io/helm-charts
+#   helm install tempo grafana/tempo \
+#     --namespace monitoring \
+#     --set tempo.storage.trace.backend=local \
+#     --set tempo.storage.trace.local.path=/var/tempo \
+#     --set persistence.enabled=true \
+#     --set persistence.size=5Gi
+#
+# Tempo stores traces for 24h by default. For longer retention change the
+# --set tempo.retention flag on the Helm install command.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: tempo-pvc
+  namespace: monitoring
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 5Gi

@@ -1,0 +1,14 @@
+# INTRODUCED: Stage 0 — Raw Kubernetes
+# PURPOSE: Exposes notification-service pods internally for ingress routing.
+#          The /alerts endpoint is reachable via the ingress at /notifications/alerts.
+apiVersion: v1
+kind: Service
+metadata:
+  name: notification-service
+  namespace: clearledger
+spec:
+  selector:
+    app: notification-service
+  ports:
+    - port: 80
+      targetPort: 8000

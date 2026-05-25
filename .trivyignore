@@ -1,0 +1,24 @@
+# .trivyignore — CVE suppression file for ClearLedger
+#
+# PURPOSE: Explicitly suppress CVEs that have been reviewed and accepted.
+#          Each entry requires a documented justification.
+#          This file is code-reviewed and committed to Git — it is an
+#          explicit decision, not a silent suppression.
+#
+# RULE: Never add a CVE here to make a build go green without review.
+#       If you are adding a CVE, the PR description must include:
+#         - Why the CVE does not apply or is not exploitable in this context
+#         - Who approved the risk acceptance
+#         - The date it was reviewed and when to re-evaluate
+#
+# FORMAT:
+#   CVE-YYYY-NNNNN  # justification
+#
+# EXAMPLE (remove and replace with real entries as needed):
+#
+# CVE-2023-12345  # only exploitable via local console access — our containers
+#                  # have no console. Reviewed 2026-01-15. Re-evaluate 2026-07-15.
+#                  # Approved by: platform-lead
+#
+# When a fix becomes available, remove the entry and let Trivy catch the
+# updated version requirement naturally.

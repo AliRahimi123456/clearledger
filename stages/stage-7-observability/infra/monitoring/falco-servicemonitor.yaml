@@ -1,0 +1,16 @@
+# INTRODUCED: Stage 7 — Observability
+# PURPOSE: Tell Prometheus to scrape Falco's metrics endpoint
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: falco-metrics
+  namespace: falco
+  labels:
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: falco
+  endpoints:
+    - port: metrics
+      interval: 30s

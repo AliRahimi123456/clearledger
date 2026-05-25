@@ -1,0 +1,9 @@
+# INTRODUCED: Stage 0 — Raw Kubernetes
+# PURPOSE: Isolate all ClearLedger workloads in a dedicated namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: clearledger
+  labels:
+    environment: production
+    team: platform

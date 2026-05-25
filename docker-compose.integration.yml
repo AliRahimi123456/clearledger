@@ -1,0 +1,85 @@
+# Local integration stack — mirrors ingress path routing for frontend E2E tests.
+# Usage: docker compose -f docker-compose.integration.yml up --build -d
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: clearledger
+      POSTGRES_PASSWORD: clearledger
+      POSTGRES_DB: clearledger
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U clearledger"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  auth:
+    build: ./app/auth-service
+    environment:
+      DATABASE_URL: postgresql://clearledger:clearledger@postgres:5432/clearledger
+      JWT_SECRET: test-jwt-secret-key-for-local-integration
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health').raise_for_status()"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  ledger:
+    build: ./app/ledger-service
+    environment:
+      DATABASE_URL: postgresql://clearledger:clearledger@postgres:5432/clearledger
+      AUTH_SERVICE_URL: http://auth:8000
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      auth:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health').raise_for_status()"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  notification:
+    build: ./app/notification-service
+    environment:
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health').raise_for_status()"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  frontend:
+    build:
+      context: ./app/frontend
+      dockerfile: Dockerfile.dev
+    ports:
+      - "3000:8080"
+    depends_on:
+      auth:
+        condition: service_healthy
+      ledger:
+        condition: service_healthy
+      notification:
+        condition: service_healthy

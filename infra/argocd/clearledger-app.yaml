@@ -1,0 +1,37 @@
+# INTRODUCED: Stage 2 — GitOps with ArgoCD
+# PURPOSE: Declare ClearLedger as an ArgoCD Application — the GitOps contract
+# FRAMEWORK: GitOps / DORA metrics — deployment frequency and change failure rate
+#
+# Apply this once. ArgoCD handles all future deployments automatically.
+#   kubectl apply -f infra/argocd/clearledger-app.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: clearledger
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/YOUR_USERNAME/clearledger-infra.git
+    targetRevision: main
+    path: manifests
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: clearledger
+  syncPolicy:
+    automated:
+      prune: true      # remove resources deleted from Git
+      selfHeal: true   # revert any manual kubectl changes — the GitOps contract
+    syncOptions:
+      - CreateNamespace=true
+      - PrunePropagationPolicy=foreground
+      - PruneLast=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+  revisionHistoryLimit: 10

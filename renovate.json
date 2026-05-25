@@ -1,0 +1,76 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Renovate Bot configuration for ClearLedger. Automatically raises PRs when dependencies have updates or CVE fixes.",
+  "extends": [
+    "config:base",
+    ":dependencyDashboard",
+    ":semanticCommits",
+    ":separatePatchReleases"
+  ],
+  "timezone": "UTC",
+  "schedule": ["before 6am on monday"],
+  "labels": ["dependencies", "security"],
+  "reviewers": ["admin"],
+  "packageRules": [
+    {
+      "description": "Auto-merge patch updates for Python packages (low risk)",
+      "matchLanguages": ["python"],
+      "matchUpdateTypes": ["patch"],
+      "automerge": false,
+      "automergeType": "pr",
+      "labels": ["dependencies", "python", "patch"]
+    },
+    {
+      "description": "Security updates — raise PR immediately regardless of schedule",
+      "matchCategories": ["security"],
+      "schedule": ["at any time"],
+      "prPriority": 10,
+      "labels": ["dependencies", "security", "URGENT"],
+      "additionalBranchPrefix": "security/"
+    },
+    {
+      "description": "Kubernetes manifests — raise PR for any image tag update",
+      "matchFileNames": ["infra/manifests/**", "stages/**/infra/**/*.yaml"],
+      "matchUpdateTypes": ["major", "minor", "patch"],
+      "labels": ["dependencies", "kubernetes"]
+    },
+    {
+      "description": "Terraform — raise PR for provider and module updates",
+      "matchManagers": ["terraform"],
+      "labels": ["dependencies", "terraform"]
+    },
+    {
+      "description": "Docker base images — raise PR when new digest available",
+      "matchManagers": ["dockerfile"],
+      "labels": ["dependencies", "docker"],
+      "pinDigests": true
+    }
+  ],
+  "python": {
+    "enabled": true
+  },
+  "kubernetes": {
+    "fileMatch": [
+      "infra/manifests/.+\\.yaml$",
+      "stages/.+/infra/.+\\.yaml$"
+    ]
+  },
+  "terraform": {
+    "enabled": true,
+    "fileMatch": [
+      "stages/stage-8-aws-migration/terraform/.+\\.tf$"
+    ]
+  },
+  "dockerfile": {
+    "enabled": true,
+    "fileMatch": [
+      "app/.+/Dockerfile$"
+    ]
+  },
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "schedule": ["at any time"],
+    "labels": ["security", "vulnerability", "URGENT"]
+  },
+  "osvVulnerabilityAlerts": true
+}

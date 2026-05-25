@@ -1,0 +1,20 @@
+# INTRODUCED: Stage 6.5 — LitmusChaos RBAC for clearledger namespace
+# PURPOSE: Service account used by ChaosEngine resources in clearledger
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: litmus-admin
+  namespace: clearledger
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: litmus-admin-clearledger
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - kind: ServiceAccount
+    name: litmus-admin
+    namespace: clearledger

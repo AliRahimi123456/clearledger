@@ -1,0 +1,49 @@
+# ClearLedger Kubernetes API audit policy (MicroK8s)
+#
+# IMPORTANT: Audit policies are evaluated in first-match order.
+# Place high-volume "None" rules BEFORE catch-all rules, or they will never apply.
+#
+# Audit levels:
+# - None: drop the event (reduces volume; removes noise)
+# - Metadata: who/what/when (no request/response body)
+# - Request: includes request body (useful for write operations)
+# - RequestResponse: full request AND response (most expensive but complete)
+#
+# Principle: log what matters, don't log what doesn't.
+apiVersion: audit.k8s.io/v1
+kind: Policy
+rules:
+  # Rule 1: Drop read-only noise on non-sensitive resources
+  - level: None
+    verbs: ["get", "list", "watch"]
+    resources:
+      - group: ""
+        resources: ["nodes", "pods", "services", "endpoints", "configmaps"]
+
+  # Rule 2: Keep metadata for common read requests on higher-level objects
+  - level: Metadata
+    verbs: ["get", "list", "watch"]
+    resources:
+      - group: ""
+        resources: ["namespaces"]
+      - group: "apps"
+        resources: ["deployments"]
+
+  # Rule 3: Fully audit secrets (PCI-DSS 10.2.1: secret access must be fully audited)
+  - level: RequestResponse
+    resources:
+      - group: ""
+        resources: ["secrets"]
+
+  # Rule 4: Fully audit service account token creation (lateral-movement indicator)
+  - level: RequestResponse
+    resources:
+      - group: ""
+        resources: ["serviceaccounts/token"]
+
+  # Rule 5: Fully audit all write operations (mutations must be auditable)
+  - level: RequestResponse
+    verbs: ["create", "update", "patch", "delete"]
+
+  # Rule 6: Catch-all
+  - level: Metadata

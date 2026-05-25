@@ -1,0 +1,15 @@
+# Terraform local state and cache — never commit these
+.terraform/
+.terraform.lock.hcl
+terraform.tfstate
+terraform.tfstate.backup
+*.tfplan
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# tfvars may contain sensitive values — keep out of Git
+*.tfvars
+!terraform.tfvars.example

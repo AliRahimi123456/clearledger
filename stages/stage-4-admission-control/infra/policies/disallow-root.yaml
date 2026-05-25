@@ -1,0 +1,34 @@
+# INTRODUCED: Stage 4 — Admission Control
+# PURPOSE: Block root containers cluster-wide in the clearledger namespace
+# FRAMEWORK: CIS Kubernetes 5.2.6 / PCI-DSS 6.5
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-root-containers
+  annotations:
+    policies.kyverno.io/title: Disallow Root Containers
+    policies.kyverno.io/category: Pod Security
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >
+      Containers must not run as root. Running as root gives a container
+      unnecessary access to the host system and violates fintech compliance
+      requirements under PCI-DSS and SOC2.
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: check-runAsNonRoot
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [clearledger]
+      validate:
+        message: >
+          Root containers are blocked in the clearledger namespace.
+          Set securityContext.runAsNonRoot: true on the pod or container.
+        pattern:
+          spec:
+            containers:
+              - securityContext:
+                  runAsNonRoot: true

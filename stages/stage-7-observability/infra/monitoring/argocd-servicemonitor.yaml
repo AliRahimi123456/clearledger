@@ -1,0 +1,38 @@
+# INTRODUCED: Stage 7 — DORA Metrics (ArgoCD metrics scraping)
+# PURPOSE: Tells Prometheus to scrape ArgoCD's built-in metrics endpoint.
+#          ArgoCD exposes deployment data at /metrics — Prometheus needs
+#          to know to collect it. Without this, the DORA dashboard has no data.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: argocd-metrics
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: argocd-metrics
+  namespaceSelector:
+    matchNames: [argocd]
+  endpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: argocd-server-metrics
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: argocd-server-metrics
+  namespaceSelector:
+    matchNames: [argocd]
+  endpoints:
+    - port: metrics
+      interval: 30s

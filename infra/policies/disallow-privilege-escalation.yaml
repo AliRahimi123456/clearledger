@@ -1,0 +1,31 @@
+# INTRODUCED: Stage 4 — Admission Control
+# PURPOSE: Prevent containers from gaining additional privileges at runtime
+# FRAMEWORK: CIS Kubernetes 5.2.5
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-privilege-escalation
+  annotations:
+    policies.kyverno.io/title: Disallow Privilege Escalation
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >
+      allowPrivilegeEscalation must be false on all containers.
+      This prevents a compromised container from gaining elevated privileges
+      via setuid binaries or sudo — a critical fintech isolation control.
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: check-allowPrivilegeEscalation
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [clearledger]
+      validate:
+        message: "allowPrivilegeEscalation must be set to false."
+        pattern:
+          spec:
+            containers:
+              - securityContext:
+                  allowPrivilegeEscalation: false

@@ -1,0 +1,26 @@
+# Experiment 1 only — used by run-chaos.sh (never run all experiments at once)
+apiVersion: litmuschaos.io/v1alpha1
+kind: ChaosEngine
+metadata:
+  name: auth-service-pod-delete
+  namespace: clearledger
+spec:
+  appinfo:
+    appns: clearledger
+    applabel: app=auth-service
+    appkind: deployment
+  engineState: active
+  chaosServiceAccount: litmus-admin
+  experiments:
+    - name: pod-delete
+      spec:
+        components:
+          env:
+            - name: TOTAL_CHAOS_DURATION
+              value: "30"
+            - name: CHAOS_INTERVAL
+              value: "10"
+            - name: FORCE
+              value: "false"
+            - name: PODS_AFFECTED_PERC
+              value: "50"

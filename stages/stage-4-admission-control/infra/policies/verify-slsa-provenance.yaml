@@ -1,0 +1,63 @@
+# INTRODUCED: Stage 4 (enhanced) — SLSA Provenance Verification
+# PURPOSE: Verify that images have valid SLSA provenance attestations,
+#          not just signatures. This is SLSA Level 2.
+#          Signatures prove WHO signed. Attestations prove HOW it was built.
+# FRAMEWORK: SLSA Level 2, EO 14028, EU CRA Article 13
+#
+# SETUP: Replace the placeholder below with your actual cosign.pub content.
+# Run: cat infra/cosign.pub
+# Then paste the public key block into the publicKeys field.
+#
+# SLSA Level 3 would require a hermetic build environment (reproducible,
+# isolated builds). That is not practical with a self-hosted runner homelab.
+# Level 2 — signed provenance from a known CI pipeline — is the practical
+# target for most organizations.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: verify-slsa-provenance
+  annotations:
+    policies.kyverno.io/title: Verify SLSA Provenance
+    policies.kyverno.io/category: Supply Chain Security
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >
+      Verifies that container images have a valid SLSA provenance
+      attestation signed with the ClearLedger Cosign key. The attestation
+      proves the image was built from the clearledger source repository
+      by the ClearLedger CI pipeline — not just that it was signed.
+spec:
+  validationFailureAction: Audit
+  # Start in Audit mode — verify it works before switching to Enforce.
+  # Switch to Enforce after confirming attestations are generated correctly:
+  #   kubectl edit clusterpolicy verify-slsa-provenance
+  #   Change Audit → Enforce
+  background: false
+  rules:
+    - name: verify-provenance-attestation
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [clearledger]
+      verifyImages:
+        - imageReferences:
+            - "index.docker.io/*/clearledger-auth-service*"
+            - "index.docker.io/*/clearledger-ledger-service*"
+            - "index.docker.io/*/clearledger-notification-service*"
+          attestations:
+            - predicateType: https://slsa.dev/provenance/v0.2
+              attestors:
+                - count: 1
+                  entries:
+                    - keys:
+                        publicKeys: |-
+                          PASTE_YOUR_COSIGN_PUBLIC_KEY_HERE
+              conditions:
+                - all:
+                    - key: "{{ predicate.builder.id }}"
+                      operator: AnyIn
+                      value:
+                        - "https://github.com/*/clearledger/actions"
+                      message: >
+                        Image was not built by the ClearLedger CI pipeline.
+                        builder.id must match the GitHub Actions URL.

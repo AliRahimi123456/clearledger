@@ -1,0 +1,24 @@
+# INTRODUCED: Stage 3 — Security Gates
+# PURPOSE: Placeholder showing where your Cosign public key belongs.
+#
+# SETUP:
+#   1. Generate your keypair on your host machine (Stage 3, Step 1):
+#        cosign generate-key-pair
+#      This creates cosign.key (NEVER commit this) and cosign.pub
+#
+#   2. Replace this file with your actual cosign.pub:
+#        cp cosign.pub infra/cosign.pub
+#
+#   3. Paste the key content into infra/policies/require-signed-images.yaml
+#      in the publicKeys field
+#
+#   4. Commit infra/cosign.pub to the infra repo — it is a public key,
+#      safe to commit. The private key (cosign.key) must NEVER be committed.
+#
+# The cosign.key is added to GitHub Secrets as COSIGN_PRIVATE_KEY.
+# The cosign.pub lives here in Git so Kyverno can verify signatures.
+#
+# Example public key format (yours will look like this):
+-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE<YOUR_KEY_CONTENT_HERE>
+-----END PUBLIC KEY-----

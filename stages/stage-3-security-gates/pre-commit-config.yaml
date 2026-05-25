@@ -1,0 +1,74 @@
+# INTRODUCED: Stage 3 — Security Gates
+# PURPOSE: Local pre-commit hooks that catch issues before they reach CI.
+#          The CI scan is the safety net. This is the first line of defense.
+#          If Gitleaks catches a secret here, it never touches the git history.
+#
+# SETUP (run once, all platforms):
+#   pip install pre-commit
+#   pre-commit install
+#
+# After installation, these hooks run automatically on every git commit.
+# To run manually against all files:
+#   pre-commit run --all-files
+#
+# Windows: Run in Git Bash or WSL2 where pip is available.
+
+repos:
+  # ── Secrets Detection ───────────────────────────────────────────────────────
+  # Catches hardcoded credentials, API keys, and tokens before commit.
+  # Same tool as the CI pipeline — same rules, same results.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.4
+    hooks:
+      - id: gitleaks
+        name: "🔑 Secrets scan (Gitleaks)"
+        description: "Detect hardcoded secrets before they reach git history"
+
+  # ── General Code Quality ────────────────────────────────────────────────────
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        name: "📋 Validate YAML syntax"
+        args: [--allow-multiple-documents]
+      - id: check-json
+        name: "📋 Validate JSON syntax"
+      - id: check-merge-conflict
+        name: "🔀 Check for merge conflict markers"
+      - id: detect-private-key
+        name: "🔑 Detect private keys"
+        description: "Blocks commits containing RSA/EC private keys"
+      - id: check-added-large-files
+        name: "📦 Block large file commits"
+        args: [--maxkb=500]
+
+  # ── Python ──────────────────────────────────────────────────────────────────
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.4.4
+    hooks:
+      - id: ruff
+        name: "🐍 Python linter (Ruff)"
+        args: [--fix]
+        files: ^app/
+
+  # ── Dockerfile Linting ──────────────────────────────────────────────────────
+  - repo: https://github.com/hadolint/hadolint
+    rev: v2.12.0
+    hooks:
+      - id: hadolint-docker
+        name: "🐳 Dockerfile lint (Hadolint)"
+        description: "Catches Dockerfile anti-patterns before the IaC scan in CI"
+
+  # ── Terraform ───────────────────────────────────────────────────────────────
+  # Only runs if you have Terraform files (Stage 8)
+  - repo: https://github.com/antonbabenko/pre-commit-terraform
+    rev: v1.88.0
+    hooks:
+      - id: terraform_fmt
+        name: "🏗️  Terraform format"
+        files: stages/stage-8-aws-migration/terraform/
+      - id: terraform_validate
+        name: "🏗️  Terraform validate"
+        files: stages/stage-8-aws-migration/terraform/

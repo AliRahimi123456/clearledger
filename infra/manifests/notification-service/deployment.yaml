@@ -1,0 +1,69 @@
+# INTRODUCED: Stage 0 — Raw Kubernetes
+# PURPOSE: Notification service — subscribes to Redis pub/sub for large transaction alerts
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notification-service
+  namespace: clearledger
+  labels:
+    app: notification-service
+    version: v0.1.0
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: notification-service
+  template:
+    metadata:
+      labels:
+        app: notification-service
+        version: v0.1.0
+    spec:
+      serviceAccountName: notification-service
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+      containers:
+        - name: notification-service
+          # Replace veeno with your Docker Hub username.
+          # This is updated automatically by the CI pipeline after Stage 1.
+          image: veeno/clearledger-notification-service:v0.1.0
+          ports:
+            - containerPort: 8000
+          env:
+            - name: REDIS_URL
+              value: "redis://redis.clearledger.svc.cluster.local:6379"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://otel-collector.monitoring.svc.cluster.local:4317"
+            - name: OTEL_SERVICE_NAME
+              value: "notification-service"
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: "k8s.namespace=clearledger,k8s.deployment.name=notification-service"
+            - name: ENV
+              value: "production"
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "200m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]

@@ -1,0 +1,69 @@
+# INTRODUCED: Stage 8 — AWS Migration
+# PURPOSE: Production-grade ALB Ingress with HTTPS and a real domain.
+#
+# REFERENCE ONLY — not applied by aws-spinup.sh
+# This is the production-grade version with HTTPS and a real domain.
+# The lab uses manifests/ingress-aws.yaml (HTTP, no domain required).
+# When you are ready for production: swap to this file, add your ACM cert ARN,
+# and update the host to your Route53 domain.
+#
+# Steps to go production:
+#   1. Register a domain in Route53 (or delegate an existing domain)
+#   2. Request a certificate in ACM: AWS Console → Certificate Manager → Request
+#      Select DNS validation. ACM gives you a CNAME record to add to Route53.
+#   3. Replace ACCOUNT and YOUR-CERT-ID below with the real ARN
+#   4. Replace api.clearledger.io with your actual domain
+#   5. kubectl apply -f stages/stage-8-aws-migration/infra/ingress-alb.yaml
+#   6. Add a Route53 A record (Alias) pointing your domain at the ALB DNS name:
+#      kubectl get ingress clearledger-ingress -n clearledger \
+#        -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: clearledger-ingress
+  namespace: clearledger
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+
+    # HTTPS listener — replace with your actual ACM certificate ARN
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS": 443}, {"HTTP": 80}]'
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:eu-west-1:ACCOUNT:certificate/YOUR-CERT-ID
+
+    # Redirect HTTP → HTTPS so every request is encrypted
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+
+    alb.ingress.kubernetes.io/healthcheck-path: /health
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/load-balancer-name: clearledger-prod
+    alb.ingress.kubernetes.io/tags: Project=clearledger,Stage=8,ManagedBy=terraform
+
+spec:
+  ingressClassName: alb
+  rules:
+    - host: api.clearledger.io  # replace with your Route53 domain
+      http:
+        paths:
+          - path: /auth
+            pathType: Prefix
+            backend:
+              service:
+                name: auth-service
+                port:
+                  number: 80
+          - path: /ledger
+            pathType: Prefix
+            backend:
+              service:
+                name: ledger-service
+                port:
+                  number: 80
+          - path: /notifications
+            pathType: Prefix
+            backend:
+              service:
+                name: notification-service
+                port:
+                  number: 80

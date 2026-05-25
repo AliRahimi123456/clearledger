@@ -1,0 +1,78 @@
+# INTRODUCED: Stage 0 — Raw Kubernetes
+# UPDATED:    Stage 5 — copy stages/stage-5-secrets-management/infra/manifests/ledger-service/deployment.yaml
+#             over this file to add Vault agent injection and remove secretKeyRef
+# PURPOSE: Ledger service deployment with security context hardening
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ledger-service
+  namespace: clearledger
+  labels:
+    app: ledger-service
+    version: v0.1.0
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ledger-service
+  template:
+    metadata:
+      labels:
+        app: ledger-service
+        version: v0.1.0
+    spec:
+      serviceAccountName: ledger-service
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+      containers:
+        - name: ledger-service
+          # Replace veeno with your Docker Hub username.
+          # This is updated automatically by the CI pipeline after Stage 1.
+          image: veeno/clearledger-ledger-service:v0.1.0
+          ports:
+            - containerPort: 8000
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: ledger-service-secret
+                  key: database_url
+            - name: AUTH_SERVICE_URL
+              value: "http://auth-service.clearledger.svc.cluster.local"
+            - name: REDIS_URL
+              value: "redis://redis.clearledger.svc.cluster.local:6379"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://otel-collector.monitoring.svc.cluster.local:4317"
+            - name: OTEL_SERVICE_NAME
+              value: "ledger-service"
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: "k8s.namespace=clearledger,k8s.deployment.name=ledger-service"
+            - name: ENV
+              value: "production"
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]

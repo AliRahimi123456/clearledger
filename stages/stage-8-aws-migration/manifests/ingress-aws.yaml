@@ -1,0 +1,74 @@
+# INTRODUCED: Stage 8 — AWS Migration
+# PURPOSE: AWS ALB Ingress — replaces infra/manifests/ingress.yaml when on EKS.
+#          Use this file instead of ingress.yaml for the AWS deployment:
+#            kubectl apply -f infra/manifests/ingress-aws.yaml
+#
+# The ALB DNS name is printed by aws-spinup.sh and available via:
+#   terraform output alb_dns_name
+# (which shows the kubectl command to retrieve the actual hostname)
+#
+# Path routing note:
+#   Unlike nginx (which strips path prefixes via rewrite-target), ALB forwards
+#   the full path to the backend. A request to /auth/register is forwarded to
+#   auth-service as /auth/register. Configure your app with a root_path or
+#   use ALB action-based routing for production. For this lab, use direct
+#   service health checks: curl http://ALB_DNS/auth/health
+#   (requires the app to respond at its mounted path prefix).
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: clearledger-ingress
+  namespace: clearledger
+  annotations:
+    # ALB controller annotation — selects this controller over nginx
+    kubernetes.io/ingress.class: alb
+
+    # internet-facing: ALB provisioned in public subnets, reachable from the internet.
+    # Use "internal" for VPN-only access.
+    alb.ingress.kubernetes.io/scheme: internet-facing
+
+    # ip target type: routes directly to pod IPs, bypassing kube-proxy.
+    # Why: better performance and enables ALB health checks per pod.
+    alb.ingress.kubernetes.io/target-type: ip
+
+    # Health check path applied to all target groups.
+    # All three ClearLedger services expose GET /health.
+    alb.ingress.kubernetes.io/healthcheck-path: /health
+
+    # HTTP only — no TLS in this lab.
+    # To add HTTPS: set alb.ingress.kubernetes.io/certificate-arn and change to 443.
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
+
+    # Give the ALB a predictable name for easy identification in the AWS console.
+    alb.ingress.kubernetes.io/load-balancer-name: clearledger
+
+    # Tag the ALB for cost tracking (supplements Terraform default_tags).
+    alb.ingress.kubernetes.io/tags: Project=clearledger,Stage=8,ManagedBy=terraform
+
+spec:
+  ingressClassName: alb
+  rules:
+    - http:
+        paths:
+          - path: /auth
+            pathType: Prefix
+            backend:
+              service:
+                name: auth-service
+                port:
+                  number: 80
+          - path: /ledger
+            pathType: Prefix
+            backend:
+              service:
+                name: ledger-service
+                port:
+                  number: 80
+          - path: /notifications
+            pathType: Prefix
+            backend:
+              service:
+                name: notification-service
+                port:
+                  number: 80

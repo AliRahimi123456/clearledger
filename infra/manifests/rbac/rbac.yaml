@@ -1,0 +1,213 @@
+# =============================================================================
+# RBAC — Role-Based Access Control
+# =============================================================================
+# This file controls security permissions: who is allowed to do what.
+#
+# Think of it like access cards in a building:
+#   - ServiceAccount = an employee ID card (identity for an app)
+#   - Role           = what doors that card can open (permissions)
+#   - RoleBinding    = assigning the card to a specific person (connecting identity → permissions)
+#
+# The principle: LEAST PRIVILEGE
+#   Each app gets the minimum access it needs. Nothing more.
+#   If auth-service only needs to look up service addresses, it cannot
+#   read secrets, delete pods, or access anything else.
+#
+# What is in this file:
+#   1. ServiceAccounts — one identity per service (auth, ledger, notification, viewer)
+#   2. Roles — minimal permissions (read-only access to endpoints)
+#   3. RoleBindings — connect each identity to its permissions
+#   4. Viewer role — read-only access for monitoring/debugging (no secrets)
+#   5. Deny-secrets — the default account gets zero permissions
+#
+# Compliance: CIS Kubernetes Benchmark 5.1.5, 5.1.6 / SOC2 CC6.3
+# =============================================================================
+
+# --- ServiceAccount: auth-service ---
+# Creates an identity for the auth service. Kubernetes uses this to know
+# "which app is making this request?"
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: auth-service
+  namespace: clearledger
+---
+# --- ServiceAccount: ledger-service ---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ledger-service
+  namespace: clearledger
+---
+# --- ServiceAccount: notification-service ---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: notification-service
+  namespace: clearledger
+---
+# --- ServiceAccount: clearledger-viewer ---
+# A read-only identity for monitoring, debugging, or auditing.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: clearledger-viewer
+  namespace: clearledger
+---
+# --- Role: auth-service ---
+# Permissions: can only "get" and "list" endpoints.
+# Endpoints are internal service addresses (e.g. "where does the database live?").
+# Notice: NO access to secrets, NO ability to delete or create anything.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: auth-service
+  namespace: clearledger
+rules:
+  - apiGroups: [""]
+    resources: ["endpoints"]
+    verbs: ["get", "list"]
+---
+# --- RoleBinding: auth-service ---
+# Connects the auth-service identity (ServiceAccount) to its permissions (Role).
+# Without this binding, the Role exists but nobody uses it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: auth-service
+  namespace: clearledger
+subjects:
+  - kind: ServiceAccount
+    name: auth-service
+    namespace: clearledger
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: auth-service
+---
+# --- Role: ledger-service ---
+# Same minimal permissions as auth-service: endpoints only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ledger-service
+  namespace: clearledger
+rules:
+  - apiGroups: [""]
+    resources: ["endpoints"]
+    verbs: ["get", "list"]
+---
+# --- RoleBinding: ledger-service ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ledger-service
+  namespace: clearledger
+subjects:
+  - kind: ServiceAccount
+    name: ledger-service
+    namespace: clearledger
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ledger-service
+---
+# --- Role: notification-service ---
+# Same minimal permissions as the other services.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: notification-service
+  namespace: clearledger
+rules:
+  - apiGroups: [""]
+    resources: ["endpoints"]
+    verbs: ["get", "list"]
+---
+# --- RoleBinding: notification-service ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: notification-service
+  namespace: clearledger
+subjects:
+  - kind: ServiceAccount
+    name: notification-service
+    namespace: clearledger
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: notification-service
+---
+# --- Role: clearledger-viewer ---
+# A read-only role for monitoring, debugging, or audits.
+# Can see pods, services, endpoints, events, and configmaps.
+# CANNOT see secrets — that is intentional. Secrets contain passwords and API keys.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: clearledger-viewer
+  namespace: clearledger
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["endpoints"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list"]
+---
+# --- RoleBinding: clearledger-viewer ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: clearledger-viewer
+  namespace: clearledger
+subjects:
+  - kind: ServiceAccount
+    name: clearledger-viewer
+    namespace: clearledger
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: clearledger-viewer
+---
+# --- ClusterRole: clearledger-deny-secrets ---
+# This role has ZERO permissions (rules: []).
+#
+# Why? Kubernetes RBAC is allow-only — you cannot write a rule that says "deny."
+# Instead, you create a role with no permissions and bind it to the default
+# ServiceAccount. This way, if someone forgets to assign a ServiceAccount to a
+# pod, it falls back to the default account which can do nothing.
+#
+# For hard denial of specific API calls (e.g. blocking secret access entirely),
+# use admission control (Kyverno, Stage 4).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: clearledger-deny-secrets
+rules: []
+---
+# --- RoleBinding: default account → zero permissions ---
+# Binds the "do nothing" role above to the default ServiceAccount.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: clearledger-default-deny-secrets
+  namespace: clearledger
+subjects:
+  - kind: ServiceAccount
+    name: default
+    namespace: clearledger
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: clearledger-deny-secrets

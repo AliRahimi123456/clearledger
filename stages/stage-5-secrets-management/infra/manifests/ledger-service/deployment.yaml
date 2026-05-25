@@ -1,0 +1,84 @@
+# Stage 5 version of ledger-service deployment
+# Changes from Stage 0:
+#   - Vault agent annotations added
+#   - DATABASE_URL secretKeyRef removed
+#   - serviceAccountName set
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ledger-service
+  namespace: clearledger
+  labels:
+    app: ledger-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ledger-service
+  template:
+    metadata:
+      labels:
+        app: ledger-service
+      annotations:
+        vault.hashicorp.com/agent-inject: "true"
+        vault.hashicorp.com/role: "ledger-service"
+        vault.hashicorp.com/agent-inject-secret-database_url: "clearledger/data/ledger-service"
+        vault.hashicorp.com/agent-inject-template-database_url: |
+          {{- with secret "clearledger/data/ledger-service" -}}
+          {{ .Data.data.database_url }}
+          {{- end }}
+    spec:
+      serviceAccountName: ledger-service
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+      containers:
+        - name: ledger-service
+          # Replace DOCKER_USERNAME with your Docker Hub username.
+          # This is updated automatically by the CI pipeline after Stage 1.
+          image: DOCKER_USERNAME/clearledger-ledger-service:latest
+          ports:
+            - containerPort: 8000
+          env:
+            - name: AUTH_SERVICE_URL
+              value: "http://auth-service.clearledger.svc.cluster.local"
+            - name: REDIS_URL
+              value: "redis://redis.clearledger.svc.cluster.local:6379"
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ledger-service
+  namespace: clearledger
+spec:
+  selector:
+    app: ledger-service
+  ports:
+    - port: 80
+      targetPort: 8000

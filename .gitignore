@@ -1,0 +1,40 @@
+# Cosign private key — NEVER commit this
+cosign.key
+
+# Public key — safe to commit, but exclude from repo so learners explicitly add their own
+infra/cosign.pub
+
+# Environment files with local credentials
+.env
+*.env.local
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+
+# macOS
+.DS_Store
+.AppleDouble
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Kubernetes kubeconfig — use KUBECONFIG env var instead
+kubeconfig
+*.kubeconfig
+
+# Codacy CLI — local analysis tooling, not part of the product
+.codacy/
+.codacy.yaml
+
+# Ignore cursor AI rules
+.cursor/rules/codacy.mdc
+.cursor/
+
+stages/stage-3-security-gates/dast/__pycache__/

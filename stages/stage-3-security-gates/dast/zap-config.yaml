@@ -1,0 +1,82 @@
+# OWASP ZAP Automation Framework — ClearLedger API DAST
+# CI replaces ZAP_ACCESS_TOKEN_PLACEHOLDER with a JWT from /auth/login before running.
+# Mount this directory to /zap/wrk in the ZAP container and run:
+#   zap.sh -cmd -autorun /zap/wrk/zap-config.yaml
+#
+# Target host defaults to http://clearledger.local (override via ZAP_TARGET_URL in CI sed).
+
+env:
+  contexts:
+    - name: "ClearLedger"
+      urls:
+        - "http://clearledger.local"
+  vars:
+    targetHost: "http://clearledger.local"
+
+jobs:
+  - type: parameters
+    parameters:
+      failOnError: true
+      progressToStdout: true
+
+  # Seed auth + JWT-authenticated API calls (ZAP site tree + session context for active scan).
+  - type: requestor
+    parameters:
+      requests:
+        - url: "http://clearledger.local/auth/register"
+          method: POST
+          headers:
+            - "Content-Type: application/json"
+          body: '{"email":"zap-dast@clearledger.local","password":"ZapDastPass123!"}'
+        - url: "http://clearledger.local/auth/login"
+          method: POST
+          headers:
+            - "Content-Type: application/json"
+          body: '{"email":"zap-dast@clearledger.local","password":"ZapDastPass123!"}'
+        - url: "http://clearledger.local/auth/verify"
+          method: GET
+          headers:
+            - "Authorization: Bearer ZAP_ACCESS_TOKEN_PLACEHOLDER"
+        - url: "http://clearledger.local/ledger/balance"
+          method: GET
+          headers:
+            - "Authorization: Bearer ZAP_ACCESS_TOKEN_PLACEHOLDER"
+        - url: "http://clearledger.local/ledger/transactions"
+          method: GET
+          headers:
+            - "Authorization: Bearer ZAP_ACCESS_TOKEN_PLACEHOLDER"
+
+  - type: openapi
+    parameters:
+      apiFile: "/zap/wrk/openapi-dast.yaml"
+      context: "ClearLedger"
+      targetUrl: "http://clearledger.local"
+
+  - type: passiveScan-wait
+    parameters:
+      maxDuration: 45
+
+  # API-oriented active scan (not the HTML spider).
+  - type: activeScan
+    parameters:
+      context: "ClearLedger"
+      policy: "API"
+      maxScanDurationInMins: 20
+      maxRuleDurationInMins: 3
+      threadPerHost: 4
+
+  - type: report
+    parameters:
+      template: traditional-json
+      reportDir: "/zap/wrk"
+      reportFile: "zap-report.json"
+      display: true
+
+  # Fail the plan on HIGH or CRITICAL findings (maps to ZAP exit handling).
+  - type: exitStatus
+    parameters:
+      errorLevel: "High"
+      warnLevel: "Medium"
+      errorExitValue: 1
+      warnExitValue: 2
+      okExitValue: 0

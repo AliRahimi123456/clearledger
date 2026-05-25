@@ -1,0 +1,20 @@
+# INTRODUCED: Stage 5 — Secrets Management (Vault)
+# PURPOSE: Expose Vault UI at http://vault.local
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: vault-ingress
+  namespace: vault
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: vault.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: vault
+                port:
+                  number: 8200

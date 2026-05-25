@@ -1,0 +1,27 @@
+# INTRODUCED: Stage 7.5 — Grafana Tempo data source (auto-provisioned)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasource-tempo
+  namespace: monitoring
+  labels:
+    # Grafana sidecar picks this up automatically
+    grafana_datasource: "1"
+data:
+  tempo-datasource.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Tempo
+        type: tempo
+        access: proxy
+        url: http://tempo.monitoring.svc.cluster.local:3100
+        isDefault: false
+        jsonData:
+          tracesToLogsV2:
+            datasourceUid: loki
+            spanStartTimeShift: "-1m"
+            spanEndTimeShift: "1m"
+          serviceMap:
+            datasourceUid: prometheus
+        # Link traces to logs: clicking a trace span jumps to the
+        # corresponding Loki logs for that pod at that timestamp.

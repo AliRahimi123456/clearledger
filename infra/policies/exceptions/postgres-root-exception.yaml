@@ -1,0 +1,67 @@
+# INTRODUCED: Stage 4 — Admission Control
+#
+# WHAT THIS FILE DOES:
+#   Grants a special permission exception to the Postgres pods.
+#   Normally, Kyverno (our admission controller) enforces a cluster-wide rule:
+#     "Every container must set runAsNonRoot: true."
+#   That is good security — it blocks containers from running as the root user.
+#
+#   But Postgres needs a specific internal user (UID 70 in the Alpine image) to own
+#   and manage its data directory. If Kyverno blocks the pod because it does not
+#   recognise that UID configuration, Postgres cannot start at all.
+#
+#   This file tells Kyverno:
+#     "If the pod is named postgres-* in the clearledger namespace,
+#      skip the check-runAsNonRoot rule from the disallow-root-containers policy."
+#
+# WHY AN EXCEPTION AND NOT A POLICY CHANGE:
+#   Weakening the policy cluster-wide would let every pod bypass the rule.
+#   An exception keeps the rule strict for everything else — only Postgres gets
+#   the exemption, only in this namespace, only for pods matching the name pattern.
+#
+# SAFETY RULES FOR EXCEPTIONS:
+#   1. Scope narrowly — this targets only postgres-* pods in clearledger
+#   2. Commit to Git — so the exception is reviewed, tracked, and auditable
+#   3. Never weaken the policy itself — everything else still enforces the rule
+#   4. Review periodically — the review-date annotation reminds the team to check
+#      whether this exception is still needed
+#
+# Apply this file only if Kyverno blocks your postgres pods.
+
+apiVersion: kyverno.io/v2beta1
+kind: PolicyException
+metadata:
+  name: postgres-root-exception
+  namespace: clearledger
+  annotations:
+    # These annotations are documentation for your team and auditors.
+    # reason:      why this exception exists
+    # approved-by: who authorised it
+    # review-date: when someone should revisit whether it is still needed
+    reason: "Postgres alpine image requires UID 70 for data directory ownership"
+    approved-by: "platform-team"
+    review-date: "2026-01-01"
+
+spec:
+  exceptions:
+    # Which policy and rule to bypass for matched resources.
+    # policyName must match an existing ClusterPolicy (kubectl get clusterpolicy).
+    # ruleNames lists the specific rules inside that policy to skip.
+    - policyName: disallow-root-containers
+      ruleNames:
+        - check-runAsNonRoot
+
+  match:
+    any:
+      # Only pods matching ALL of these conditions get the exception:
+      #   kind: Pod
+      #   namespace: clearledger
+      #   name pattern: postgres-*  (matches postgres-0, postgres-1, etc.)
+      # Everything else in the cluster still follows the strict policy.
+      - resources:
+          kinds:
+            - Pod
+          namespaces:
+            - clearledger
+          names:
+            - postgres-*

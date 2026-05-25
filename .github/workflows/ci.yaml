@@ -1,0 +1,614 @@
+name: ClearLedger DevSecOps Pipeline (GitHub)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Compliance scans (kube-bench) run weekly, not per commit.
+    - cron: "0 6 * * 1"  # every Monday 6am
+
+# Cancels redundant runs — only the latest push matters.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: docker.io/${{ secrets.DOCKER_USERNAME }}
+  # Why IMAGE_TAG: immutable traceability (each image maps to one commit).
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  # ───────────────────────────────────────────────────────────────────────────
+  # GATE 1: SECRETS SCAN
+  # Catch hardcoded secrets before anything else runs.
+  # A leaked secret is a breach. Stop everything if one is found.
+  # ───────────────────────────────────────────────────────────────────────────
+  secrets-scan:
+    name: "Secrets Scan (Gitleaks)"
+    # Self-hosted runner — GitHub cloud runners cannot reach
+    # clearledger.local or the local MicroK8s cluster.
+    runs-on: [self-hosted, clearledger]
+    # Weekly scheduled runs are reserved for compliance scanning (kube-bench).
+    if: github.event_name != 'schedule'
+    steps:
+      - name: Checkout code (full history for secrets scan)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history — scan every commit, not just HEAD
+
+      - name: Install Gitleaks (secrets detection engine)
+        run: |
+          curl -sSL https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_linux_x64.tar.gz \
+            | tar -xz
+          sudo mv gitleaks /usr/local/bin/
+
+      - name: Run Gitleaks (fail if any secret found)
+        run: |
+          gitleaks detect \
+            --source . \
+            --verbose \
+            --report-format json \
+            --report-path gitleaks-report.json
+
+      - name: Upload Gitleaks report (evidence)
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: gitleaks-report
+          path: gitleaks-report.json
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # GATE 2: SAST
+  # Static analysis — find security issues in Python code.
+  # Runs in parallel with IaC scan — both require secrets-scan to pass.
+  # ───────────────────────────────────────────────────────────────────────────
+  sast:
+    name: "SAST (Semgrep)"
+    # Self-hosted runner — GitHub cloud runners cannot reach
+    # clearledger.local or the local MicroK8s cluster.
+    runs-on: [self-hosted, clearledger]
+    needs: secrets-scan
+    steps:
+      - name: Checkout code (SAST runs on source)
+        uses: actions/checkout@v4
+
+      - name: Install Semgrep (OWASP-focused rulesets)
+        run: pip install semgrep
+
+      - name: Run Semgrep (fail on findings)
+        run: |
+          semgrep \
+            --config=p/python \
+            --config=p/security-audit \
+            --config=p/secrets \
+            --config=p/owasp-top-ten \
+            --error \
+            --json \
+            --output semgrep-results.json \
+            app/auth-service/ app/ledger-service/ app/notification-service/
+
+      - name: Upload Semgrep results (evidence)
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: semgrep-results
+          path: semgrep-results.json
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # GATE 3: IaC SCAN
+  # Checkov scans Kubernetes manifests and Dockerfiles for misconfigurations.
+  # ───────────────────────────────────────────────────────────────────────────
+  iac-scan:
+    name: "IaC Scan (Checkov)"
+    # Self-hosted runner — GitHub cloud runners cannot reach
+    # clearledger.local or the local MicroK8s cluster.
+    runs-on: [self-hosted, clearledger]
+    needs: secrets-scan
+    steps:
+      - name: Checkout code (IaC lives in infra/)
+        uses: actions/checkout@v4
+
+      - name: Install Checkov (policy-as-code for IaC)
+        run: pip install checkov
+
+      - name: Scan Kubernetes manifests (block HIGH/CRITICAL)
+        run: |
+          checkov \
+            --directory infra/manifests \
+            --framework kubernetes \
+            --output json \
+            --output-file checkov-k8s-results.json \
+            --soft-fail-on MEDIUM \
+            --hard-fail-on HIGH,CRITICAL
+
+      - name: Scan Dockerfiles (block HIGH/CRITICAL)
+        run: |
+          checkov \
+            --directory . \
+            --framework dockerfile \
+            --output json \
+            --output-file checkov-dockerfile-results.json \
+            --soft-fail-on MEDIUM \
+            --hard-fail-on HIGH,CRITICAL
+
+      - name: Upload Checkov results (evidence)
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: checkov-results
+          path: "checkov-*-results.json"
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # GATE 4: BUILD + IMAGE SCAN
+  # Build the image, then scan for CVEs before it touches the registry.
+  # Three services run in parallel — all require sast and iac-scan to pass.
+  # ───────────────────────────────────────────────────────────────────────────
+  build-scan-auth:
+    name: "Build + Scan auth-service"
+    # Self-hosted runner — GitHub cloud runners cannot reach
+    # clearledger.local or the local MicroK8s cluster.
+    runs-on: [self-hosted, clearledger]
+    needs: [sast, iac-scan]
+    steps:
+      - name: Checkout code (Docker context)
+        uses: actions/checkout@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build auth-service image (local tag)
+        run: |
+          docker build \
+            -t clearledger-auth-service:${IMAGE_TAG} \
+            ./app/auth-service
+
+      - name: Install Trivy (image vulnerability scanner)
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sh -s -- -b /usr/local/bin v0.52.1
+
+      - name: Scan auth-service image (Trivy blocks HIGH/CRITICAL)
+        run: |
+          trivy image \
+            --exit-code 1 \
+            --severity CRITICAL,HIGH \
+            --ignore-unfixed \
+            --format json \
+            --output trivy-auth-results.json \
+            clearledger-auth-service:${IMAGE_TAG}
+
+      - name: Generate SBOM (Syft = software inventory)
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
+            | sh -s -- -b /usr/local/bin
+          syft clearledger-auth-service:${IMAGE_TAG} \
+            -o spdx-json=sbom-auth.json
+
+      - name: Scan SBOM for vulnerabilities (Grype blocks high)
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
+            | sh -s -- -b /usr/local/bin
+          grype sbom:sbom-auth.json \
+            --fail-on high \
+            --output json \
+            --file grype-auth-results.json
+
+      - name: Push auth-service to GHCR (deployed artifact)
+        run: |
+          IMAGE="${REGISTRY}/clearledger-auth-service:${IMAGE_TAG}"
+          docker tag clearledger-auth-service:${IMAGE_TAG} "${IMAGE}"
+          docker push "${IMAGE}"
+
+      - name: Sign image with Cosign (supply chain integrity)
+        env:
+          COSIGN_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          curl -sSfL https://github.com/sigstore/cosign/releases/download/v2.2.4/cosign-linux-amd64 \
+            -o /usr/local/bin/cosign && chmod +x /usr/local/bin/cosign
+          echo "$COSIGN_KEY" > /tmp/cosign.key
+          cosign sign --key /tmp/cosign.key \
+            "${REGISTRY}/clearledger-auth-service:${IMAGE_TAG}"
+
+      # SLSA provenance attestation — SLSA Level 2
+      # This proves this image was built from a specific commit by a specific
+      # pipeline, not just that it was signed. Kyverno verifies this attestation
+      # at admission (Audit mode by default — switch to Enforce when ready).
+      # SLSA Level 3 would require a hermetic build environment — not practical
+      # in GitHub-hosted runners for a homelab. Level 2 is the practical target.
+      - name: Generate SLSA provenance attestation
+        env:
+          COSIGN_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          echo "$COSIGN_KEY" > /tmp/cosign.key
+          cosign public-key --key /tmp/cosign.key > /tmp/cosign-verify.key
+
+          cat > /tmp/provenance.json << EOF
+          {
+            "_type": "https://in-toto.io/Statement/v0.1",
+            "predicateType": "https://slsa.dev/provenance/v0.2",
+            "subject": [{
+              "name": "${REGISTRY}/clearledger-auth-service",
+              "digest": {"sha1": "${{ github.sha }}"}
+            }],
+            "predicate": {
+              "builder": {
+                "id": "https://github.com/${{ github.repository }}/actions"
+              },
+              "buildType": "https://github.com/actions/runner@v2",
+              "invocation": {
+                "configSource": {
+                  "uri": "git+https://github.com/${{ github.repository }}@${{ github.ref }}",
+                  "digest": {"sha1": "${{ github.sha }}"},
+                  "entryPoint": ".github/workflows/ci.yaml"
+                }
+              },
+              "metadata": {
+                "buildStartedOn": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+                "reproducible": false
+              }
+            }
+          }
+          EOF
+
+          python3 -m json.tool /tmp/provenance.json > /dev/null
+
+          cosign attest \
+            --key /tmp/cosign.key \
+            --predicate /tmp/provenance.json \
+            --type slsaprovenance \
+            "${REGISTRY}/clearledger-auth-service:${IMAGE_TAG}"
+
+      - name: Verify SLSA provenance attestation
+        env:
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          cosign verify-attestation \
+            --key /tmp/cosign-verify.key \
+            --type slsaprovenance \
+            "${REGISTRY}/clearledger-auth-service:${IMAGE_TAG}" \
+            | jq -r '.payload | @base64d | fromjson | .predicate.builder.id'
+          echo "✓ SLSA provenance attestation verified"
+          rm -f /tmp/cosign.key /tmp/cosign-verify.key /tmp/provenance.json
+
+      - name: Upload scan artifacts (evidence)
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: auth-scan-results
+          path: |
+            trivy-auth-results.json
+            sbom-auth.json
+            grype-auth-results.json
+
+  build-scan-ledger:
+    name: "Build + Scan ledger-service"
+    # Self-hosted runner — GitHub cloud runners cannot reach
+    # clearledger.local or the local MicroK8s cluster.
+    runs-on: [self-hosted, clearledger]
+    needs: [sast, iac-scan]
+    steps:
+      - name: Checkout code (Docker context)
+        uses: actions/checkout@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build, scan, push ledger-service
+        run: |
+          docker build -t clearledger-ledger-service:${IMAGE_TAG} ./app/ledger-service
+
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sh -s -- -b /usr/local/bin v0.52.1
+
+          trivy image \
+            --exit-code 1 \
+            --severity CRITICAL,HIGH \
+            --ignore-unfixed \
+            clearledger-ledger-service:${IMAGE_TAG}
+
+          IMAGE="${REGISTRY}/clearledger-ledger-service:${IMAGE_TAG}"
+          docker tag clearledger-ledger-service:${IMAGE_TAG} "${IMAGE}"
+          docker push "${IMAGE}"
+
+          curl -sSfL https://github.com/sigstore/cosign/releases/download/v2.2.4/cosign-linux-amd64 \
+            -o /usr/local/bin/cosign && chmod +x /usr/local/bin/cosign
+          echo "${{ secrets.COSIGN_PRIVATE_KEY }}" > /tmp/cosign.key
+          cosign sign --key /tmp/cosign.key "${IMAGE}"
+
+          cat > /tmp/provenance.json << EOF
+          {
+            "_type": "https://in-toto.io/Statement/v0.1",
+            "predicateType": "https://slsa.dev/provenance/v0.2",
+            "subject": [{
+              "name": "${REGISTRY}/clearledger-ledger-service",
+              "digest": {"sha1": "${{ github.sha }}"}
+            }],
+            "predicate": {
+              "builder": {
+                "id": "https://github.com/${{ github.repository }}/actions"
+              },
+              "buildType": "https://github.com/actions/runner@v2",
+              "invocation": {
+                "configSource": {
+                  "uri": "git+https://github.com/${{ github.repository }}@${{ github.ref }}",
+                  "digest": {"sha1": "${{ github.sha }}"},
+                  "entryPoint": ".github/workflows/ci.yaml"
+                }
+              },
+              "metadata": {
+                "buildStartedOn": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+                "reproducible": false
+              }
+            }
+          }
+          EOF
+          python3 -m json.tool /tmp/provenance.json > /dev/null
+          cosign attest --key /tmp/cosign.key --predicate /tmp/provenance.json \
+            --type slsaprovenance "${IMAGE}"
+          cosign public-key --key /tmp/cosign.key > /tmp/cosign-verify.key
+          cosign verify-attestation --key /tmp/cosign-verify.key --type slsaprovenance \
+            "${IMAGE}" | jq -r '.payload | @base64d | fromjson | .predicate.builder.id'
+          rm -f /tmp/cosign.key /tmp/cosign-verify.key /tmp/provenance.json
+
+  build-scan-notification:
+    name: "Build + Scan notification-service"
+    # Self-hosted runner — GitHub cloud runners cannot reach
+    # clearledger.local or the local MicroK8s cluster.
+    runs-on: [self-hosted, clearledger]
+    needs: [sast, iac-scan]
+    steps:
+      - name: Checkout code (Docker context)
+        uses: actions/checkout@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build, scan, push notification-service
+        run: |
+          docker build -t clearledger-notification-service:${IMAGE_TAG} \
+            ./app/notification-service
+
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sh -s -- -b /usr/local/bin v0.52.1
+
+          trivy image \
+            --exit-code 1 \
+            --severity CRITICAL,HIGH \
+            --ignore-unfixed \
+            clearledger-notification-service:${IMAGE_TAG}
+
+          IMAGE="${REGISTRY}/clearledger-notification-service:${IMAGE_TAG}"
+          docker tag clearledger-notification-service:${IMAGE_TAG} "${IMAGE}"
+          docker push "${IMAGE}"
+
+          curl -sSfL https://github.com/sigstore/cosign/releases/download/v2.2.4/cosign-linux-amd64 \
+            -o /usr/local/bin/cosign && chmod +x /usr/local/bin/cosign
+          echo "${{ secrets.COSIGN_PRIVATE_KEY }}" > /tmp/cosign.key
+          cosign sign --key /tmp/cosign.key "${IMAGE}"
+
+          cat > /tmp/provenance.json << EOF
+          {
+            "_type": "https://in-toto.io/Statement/v0.1",
+            "predicateType": "https://slsa.dev/provenance/v0.2",
+            "subject": [{
+              "name": "${REGISTRY}/clearledger-notification-service",
+              "digest": {"sha1": "${{ github.sha }}"}
+            }],
+            "predicate": {
+              "builder": {
+                "id": "https://github.com/${{ github.repository }}/actions"
+              },
+              "buildType": "https://github.com/actions/runner@v2",
+              "invocation": {
+                "configSource": {
+                  "uri": "git+https://github.com/${{ github.repository }}@${{ github.ref }}",
+                  "digest": {"sha1": "${{ github.sha }}"},
+                  "entryPoint": ".github/workflows/ci.yaml"
+                }
+              },
+              "metadata": {
+                "buildStartedOn": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+                "reproducible": false
+              }
+            }
+          }
+          EOF
+          python3 -m json.tool /tmp/provenance.json > /dev/null
+          cosign attest --key /tmp/cosign.key --predicate /tmp/provenance.json \
+            --type slsaprovenance "${IMAGE}"
+          cosign public-key --key /tmp/cosign.key > /tmp/cosign-verify.key
+          cosign verify-attestation --key /tmp/cosign-verify.key --type slsaprovenance \
+            "${IMAGE}" | jq -r '.payload | @base64d | fromjson | .predicate.builder.id'
+          rm -f /tmp/cosign.key /tmp/cosign-verify.key /tmp/provenance.json
+
+  build-frontend:
+    name: "Build + Scan frontend"
+    # Self-hosted runner — GitHub cloud runners cannot reach
+    # clearledger.local or the local MicroK8s cluster.
+    runs-on: [self-hosted, clearledger]
+    needs: [sast, iac-scan]
+    steps:
+      - name: Checkout code (Docker context)
+        uses: actions/checkout@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build frontend image
+        run: |
+          docker build \
+            -t clearledger-frontend:${IMAGE_TAG} \
+            ./app/frontend
+
+      - name: Scan frontend image
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sh -s -- -b /usr/local/bin v0.52.1
+          trivy image \
+            --exit-code 1 \
+            --severity CRITICAL,HIGH \
+            --ignore-unfixed \
+            clearledger-frontend:${IMAGE_TAG}
+
+      - name: Push frontend image
+        run: |
+          IMAGE="${REGISTRY}/clearledger-frontend:${IMAGE_TAG}"
+          docker tag clearledger-frontend:${IMAGE_TAG} "${IMAGE}"
+          docker push "${IMAGE}"
+
+      - name: Sign frontend image
+        env:
+          COSIGN_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          curl -sSfL https://github.com/sigstore/cosign/releases/download/v2.2.4/cosign-linux-amd64 \
+            -o /usr/local/bin/cosign && chmod +x /usr/local/bin/cosign
+          echo "$COSIGN_KEY" > /tmp/cosign.key
+          cosign sign --key /tmp/cosign.key \
+            "${REGISTRY}/clearledger-frontend:${IMAGE_TAG}"
+          rm /tmp/cosign.key
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # GATE 5: UPDATE MANIFESTS
+  # All gates passed. All images scanned and signed.
+  # Update Git. ArgoCD handles the rest. This pipeline never touches kubectl.
+  # ───────────────────────────────────────────────────────────────────────────
+  update-manifests:
+    name: "Update Manifests → GitHub"
+    # Self-hosted runner — GitHub cloud runners cannot reach
+    # clearledger.local or the local MicroK8s cluster.
+    runs-on: [self-hosted, clearledger]
+    needs: [build-scan-auth, build-scan-ledger, build-scan-notification, build-frontend]
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout infra repo
+        uses: actions/checkout@v4
+        with:
+          # clearledger-infra is a separate GitHub repo — the GitOps source of truth.
+          # INFRA_REPO_TOKEN: a GitHub PAT with repo scope.
+          # Create at: github.com/settings/tokens
+          # Add as a repository secret at: github.com/YOUR_USERNAME/clearledger/settings/secrets
+          repository: ${{ github.repository_owner }}/clearledger-infra
+          token: ${{ secrets.INFRA_REPO_TOKEN }}
+          path: infra
+
+      - name: Update image tags
+        run: |
+          cd infra
+          sed -i "s|clearledger-auth-service:.*|clearledger-auth-service:${{ github.sha }}|g" \
+            manifests/auth-service/deployment.yaml
+          sed -i "s|clearledger-ledger-service:.*|clearledger-ledger-service:${{ github.sha }}|g" \
+            manifests/ledger-service/deployment.yaml
+          sed -i "s|clearledger-notification-service:.*|clearledger-notification-service:${{ github.sha }}|g" \
+            manifests/notification-service/deployment.yaml
+          sed -i "s|clearledger-frontend:.*|clearledger-frontend:${{ github.sha }}|g" \
+            manifests/frontend/deployment.yaml
+
+      - name: Commit and push
+        run: |
+          cd infra
+          git config user.email "github-ci@clearledger.local"
+          git config user.name "GitHub Actions Bot"
+          git add manifests/
+          if git diff --staged --quiet; then
+            echo "No manifest changes to commit"
+          else
+            git commit -m "ci: deploy ${{ github.sha }} — all gates passed [skip ci]"
+            git push
+          fi
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # GATE 6: DAST (post-deploy)
+  # DAST needs a live running application. It cannot run against source code.
+  # This is why it's the final gate — it validates the deployed artifact,
+  # not the build artifact. Runs only on main branch pushes (not PRs): the
+  # runner must reach the live ingress (often requires self-hosted runner).
+  # ───────────────────────────────────────────────────────────────────────────
+  dast:
+    name: "DAST (OWASP ZAP + fintech API tests)"
+    # Self-hosted runner — GitHub cloud runners cannot reach
+    # clearledger.local or the local MicroK8s cluster.
+    runs-on: [self-hosted, clearledger]
+    needs: [update-manifests]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - name: Checkout app repo (DAST config + custom tests live here)
+        uses: actions/checkout@v4
+
+      - name: Wait for ArgoCD sync (tests deployed artifact)
+        run: sleep 60
+
+      - name: Install Python deps (requests only)
+        run: pip install requests
+
+      - name: Register ZAP user, login, inject JWT into ZAP plan
+        env:
+          DAST_BASE_URL: http://clearledger.local
+        run: |
+          set -euo pipefail
+          ZAP_EMAIL="zap-dast@clearledger.local"
+          ZAP_PASS="ZapDastPass123!"
+          curl -fsS -X POST "${DAST_BASE_URL}/auth/register" \
+            -H 'Content-Type: application/json' \
+            -d "{\"email\":\"${ZAP_EMAIL}\",\"password\":\"${ZAP_PASS}\"}" \
+            || true
+          TOKEN=$(curl -fsS -X POST "${DAST_BASE_URL}/auth/login" \
+            -H 'Content-Type: application/json' \
+            -d "{\"email\":\"${ZAP_EMAIL}\",\"password\":\"${ZAP_PASS}\"}" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')
+          CFG=stages/stage-3-security-gates/dast/zap-config.yaml
+          sed -i.bak "s|ZAP_ACCESS_TOKEN_PLACEHOLDER|${TOKEN}|g" "$CFG"
+
+      - name: Run OWASP ZAP automation plan (API scan)
+        run: |
+          set -euo pipefail
+          DAST_DIR="${{ github.workspace }}/stages/stage-3-security-gates/dast"
+          docker run --rm \
+            -v "${DAST_DIR}:/zap/wrk:rw" \
+            zaproxy/zap-stable \
+            zap.sh -cmd -autorun /zap/wrk/zap-config.yaml
+          test -f "${DAST_DIR}/zap-report.json"
+
+      - name: Fail on ZAP HIGH or CRITICAL findings
+        run: |
+          set -euo pipefail
+          RPT=stages/stage-3-security-gates/dast/zap-report.json
+          n=$(jq '[.site[]? | .alerts[]? | select(.risk=="High" or .risk=="Critical")] | length' "$RPT")
+          echo "ZAP High+ alert count: $n"
+          test "$n" -eq 0
+
+      - name: Run fintech DAST payloads (BOLA/JWT/business logic)
+        env:
+          BASE_URL: http://clearledger.local
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+        run: |
+          set -euo pipefail
+          python3 stages/stage-3-security-gates/dast/fintech-test-payloads.py 2>&1 | tee fintech-dast-output.txt
+
+      - name: Upload DAST artifacts (evidence)
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: dast-reports
+          path: |
+            stages/stage-3-security-gates/dast/zap-report.json
+            fintech-dast-output.txt
+

@@ -1,0 +1,70 @@
+# INTRODUCED: Stage 0 — Raw Kubernetes
+# PURPOSE: Route external traffic to services via /etc/hosts domain names
+# NOTE: For AWS migration (Stage 8), replace ingressClassName and annotations
+#       with ALB-specific values. The path rules remain identical.
+#
+# Two Ingress resources share the same host. The nginx ingress controller
+# merges them internally — API paths (more specific) match first, the
+# frontend catch-all handles everything else.
+
+# ── API services ─────────────────────────────────────────────────────────────
+# Strips the prefix and forwards the remainder to the backend:
+#   /auth/register       → /register       (auth-service)
+#   /ledger/transactions → /transactions   (ledger-service)
+#   /notifications/alerts → /alerts        (notification-service)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: clearledger-api
+  namespace: clearledger
+  annotations:
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: clearledger.local
+      http:
+        paths:
+          - path: /auth(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: auth-service
+                port:
+                  number: 80
+          - path: /ledger(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: ledger-service
+                port:
+                  number: 80
+          - path: /notifications(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: notification-service
+                port:
+                  number: 80
+---
+# ── Frontend ─────────────────────────────────────────────────────────────────
+# No rewrite — paths pass through unchanged so static assets load correctly.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: clearledger-frontend
+  namespace: clearledger
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: clearledger.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 80

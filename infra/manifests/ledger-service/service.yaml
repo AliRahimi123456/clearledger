@@ -1,0 +1,15 @@
+# INTRODUCED: Stage 0 — Raw Kubernetes
+# PURPOSE: Exposes ledger-service pods internally for ingress routing.
+#          Also reachable by auth-service at cluster DNS:
+#          http://ledger-service.clearledger.svc.cluster.local
+apiVersion: v1
+kind: Service
+metadata:
+  name: ledger-service
+  namespace: clearledger
+spec:
+  selector:
+    app: ledger-service
+  ports:
+    - port: 80
+      targetPort: 8000

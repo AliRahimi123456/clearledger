@@ -1,0 +1,301 @@
+# INTRODUCED: Stage 7 — Security Observability
+# PURPOSE: Prometheus alerting rules that make dashboards actionable.
+#          A dashboard without alerts is a report. These rules trigger
+#          notifications so security events are caught in real time,
+#          not discovered during the next morning's review.
+# FRAMEWORK: SOC2 CC7.2 (runtime threat detection), CC7.3 (monitoring)
+#
+# Apply:
+#   kubectl apply -f stages/stage-7-observability/infra/monitoring/alerting-rules.yaml
+#
+# To receive alerts, configure Alertmanager with a Slack webhook or email.
+# See the Alertmanager config section in the Stage 7 README.
+
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: clearledger-security-alerts
+  namespace: monitoring
+  labels:
+    # This label must match the kube-prometheus-stack selector
+    release: kube-prometheus-stack
+    app: kube-prometheus-stack
+spec:
+  groups:
+
+    # ── Runtime Security (Falco) ──────────────────────────────────────────────
+    - name: clearledger.runtime.security
+      interval: 30s
+      rules:
+
+        - alert: FalcoCriticalAlert
+          expr: |
+            increase(falco_events_total{priority="CRITICAL"}[5m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+            team: security
+          annotations:
+            summary: "Falco CRITICAL event detected in ClearLedger"
+            description: >
+              {{ $value }} CRITICAL Falco event(s) detected in the last 5 minutes.
+              This may indicate an active attack or container escape attempt.
+              Check the Falco UI at http://falco.local or run:
+              kubectl logs -n falco daemonset/falco | grep CRITICAL
+            runbook: "https://github.com/YOUR_USERNAME/clearledger-infra/wiki/Runbook-Falco-Critical"
+
+        - alert: FalcoHighAlertSpike
+          expr: |
+            increase(falco_events_total{priority="WARNING"}[10m]) > 10
+          for: 2m
+          labels:
+            severity: warning
+            team: security
+          annotations:
+            summary: "Unusual spike in Falco WARNING alerts"
+            description: >
+              {{ $value }} WARNING events in 10 minutes (threshold: 10).
+              Could indicate a scanning attempt or misconfigured workload.
+
+        - alert: FalcoNotReceivingEvents
+          expr: |
+            absent(falco_events_total)
+          for: 5m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "Falco is not emitting metrics"
+            description: >
+              Falco metrics have not been received for 5 minutes.
+              Runtime security may be down. Check:
+              kubectl get pods -n falco
+              kubectl logs -n falco daemonset/falco
+
+    # ── Admission Control (Kyverno) ───────────────────────────────────────────
+    - name: clearledger.admission.control
+      interval: 60s
+      rules:
+
+        - alert: KyvernoHighViolationRate
+          expr: |
+            sum(rate(kyverno_policy_results_total{result="fail"}[10m])) > 0.5
+          for: 5m
+          labels:
+            severity: warning
+            team: security
+          annotations:
+            summary: "High rate of Kyverno policy violations"
+            description: >
+              More than 0.5 violations/second over 10 minutes.
+              Something is actively trying to deploy non-compliant workloads.
+              Check: kubectl get policyreport -A
+
+        - alert: KyvernoCriticalPolicyViolation
+          # Fires if the require-signed-images or disallow-root policies are violated
+          expr: |
+            increase(kyverno_policy_results_total{
+              result="fail",
+              policy_name=~"require-signed-images|disallow-root-containers"
+            }[5m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+            team: security
+          annotations:
+            summary: "Critical Kyverno policy violated: {{ $labels.policy_name }}"
+            description: >
+              Policy {{ $labels.policy_name }} was violated.
+              This means either an unsigned image or a root container attempted deployment.
+              Check the admission webhook logs:
+              kubectl get events -n clearledger --sort-by='.lastTimestamp' | tail -20
+
+    # ── Auth Service Security ─────────────────────────────────────────────────
+    - name: clearledger.auth.security
+      interval: 60s
+      rules:
+
+        - alert: BruteForceLoginAttempt
+          # Uses Loki recording rule — requires Loki ruler to be enabled
+          # Alternative: use the Grafana alert on the Failed Login panel
+          expr: |
+            sum(count_over_time(
+              {namespace="clearledger", app="auth-service"} |= "Failed login attempt" [5m]
+            )) > 10
+          for: 0m
+          labels:
+            severity: critical
+            team: security
+          annotations:
+            summary: "Possible brute force attack on ClearLedger auth"
+            description: >
+              More than 10 failed login attempts in 5 minutes.
+              Check which IP is originating the requests:
+              kubectl logs -n clearledger -l app=auth-service | grep "Failed login"
+
+    # ── Service Health ────────────────────────────────────────────────────────
+    - name: clearledger.service.health
+      interval: 30s
+      rules:
+
+        - alert: ClearLedgerServiceDown
+          expr: |
+            up{namespace="clearledger"} == 0
+          for: 2m
+          labels:
+            severity: critical
+            team: platform
+          annotations:
+            summary: "ClearLedger service {{ $labels.pod }} is down"
+            description: >
+              Pod {{ $labels.pod }} has been unreachable for 2 minutes.
+              kubectl describe pod {{ $labels.pod }} -n clearledger
+              kubectl logs {{ $labels.pod }} -n clearledger --previous
+
+        - alert: ClearLedgerHighErrorRate
+          expr: |
+            sum(rate(http_requests_total{
+              namespace="clearledger",
+              status=~"5.."
+            }[5m])) /
+            sum(rate(http_requests_total{namespace="clearledger"}[5m])) > 0.05
+          for: 3m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "ClearLedger error rate above 5%"
+            description: >
+              HTTP 5xx error rate is {{ printf "%.1f" (mul $value 100) }}%.
+              Threshold: 5%. Check service logs for root cause.
+
+        - alert: ClearLedgerPodRestarting
+          expr: |
+            increase(kube_pod_container_status_restarts_total{
+              namespace="clearledger"
+            }[15m]) > 3
+          for: 0m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "Pod {{ $labels.pod }} restarting frequently"
+            description: >
+              {{ $labels.container }} in {{ $labels.pod }} has restarted
+              {{ $value }} times in 15 minutes.
+              kubectl logs {{ $labels.pod }} -n clearledger --previous
+
+    # ── Vault Health ──────────────────────────────────────────────────────────
+    - name: clearledger.vault.health
+      interval: 60s
+      rules:
+
+        - alert: VaultSealed
+          expr: |
+            vault_core_unsealed == 0
+          for: 1m
+          labels:
+            severity: critical
+            team: security
+          annotations:
+            summary: "HashiCorp Vault is sealed"
+            description: >
+              Vault is sealed — no secrets can be injected into new pods.
+              Any pod restart will fail to retrieve credentials.
+              Unseal Vault: kubectl exec -n vault vault-0 -- vault operator unseal
+
+        - alert: VaultDown
+          expr: |
+            absent(vault_core_unsealed)
+          for: 2m
+          labels:
+            severity: critical
+            team: security
+          annotations:
+            summary: "Vault metrics not received — Vault may be down"
+            description: >
+              kubectl get pods -n vault
+              kubectl logs -n vault vault-0
+
+        # Secret rotation overdue (PCI-DSS 8.3.9: rotate application passwords at least every 90 days).
+        # Lab implementation uses the CronJob schedule as the evidence clock.
+        - alert: SecretRotationOverdueWarning
+          expr: |
+            (time() - kube_cronjob_status_last_schedule_time{namespace="clearledger", cronjob="vault-secret-rotation"}) > 75 * 24 * 60 * 60
+          for: 0m
+          labels:
+            severity: warning
+            team: security
+          annotations:
+            summary: "Secret rotation approaching PCI deadline"
+            description: "Vault rotation CronJob last run is older than 75 days"
+
+        - alert: SecretRotationOverdueCritical
+          expr: |
+            (time() - kube_cronjob_status_last_schedule_time{namespace="clearledger", cronjob="vault-secret-rotation"}) > 90 * 24 * 60 * 60
+          for: 0m
+          labels:
+            severity: critical
+            team: security
+          annotations:
+            summary: "Secret rotation overdue (PCI violation)"
+            description: "Vault rotation CronJob last run is older than 90 days"
+
+    # ── Kubernetes API Audit Security ─────────────────────────────────────────
+    - name: clearledger.audit.security
+      interval: 60s
+      rules:
+        - alert: UnauthorizedAPIAccess
+          # Loki-derived metric (requires Loki ruler/recording rules in production).
+          # Query intent: response_code 401/403 spikes (>10 in 5 minutes).
+          expr: |
+            sum(count_over_time({job="kubernetes-audit"} | json | response_code=~"401|403" [5m])) > 10
+          for: 0m
+          labels:
+            severity: critical
+            team: security
+          annotations:
+            summary: "Unauthorized API access spike"
+            description: "Someone or something is getting access denied on the API server"
+
+        - alert: SecretAccessedByUnexpectedUser
+          # Fires when a Secret in clearledger namespace is accessed by an unexpected principal.
+          expr: |
+            sum(count_over_time(
+              {job="kubernetes-audit"} | json | namespace="clearledger" | resource="secrets"
+              | user!~"system:serviceaccount:clearledger:.*|system:admin"
+              [5m]
+            )) > 0
+          for: 0m
+          labels:
+            severity: critical
+            team: security
+          annotations:
+            summary: "Secret accessed by unexpected principal"
+            description: "Secret access by unexpected principal — possible credential theft"
+
+        - alert: KubectlExecInProduction
+          # Immediate: exec into a production pod requires incident review.
+          expr: |
+            sum(count_over_time(
+              {job="kubernetes-audit"} | json | namespace="clearledger" | verb="create" | resource="pods" | subresource="exec"
+              [1m]
+            )) > 0
+          for: 0m
+          labels:
+            severity: critical
+            team: security
+          annotations:
+            summary: "kubectl exec used on a clearledger pod"
+            description: "kubectl exec used on a clearledger pod — requires incident review"
+
+        - alert: ResourceDeleted
+          expr: |
+            sum(count_over_time({job="kubernetes-audit"} | json | namespace="clearledger" | verb="delete" [1m])) > 0
+          for: 0m
+          labels:
+            severity: critical
+            team: security
+          annotations:
+            summary: "Resource deleted in clearledger namespace"
+            description: "Resource deleted in production namespace: {{$labels.name}}"

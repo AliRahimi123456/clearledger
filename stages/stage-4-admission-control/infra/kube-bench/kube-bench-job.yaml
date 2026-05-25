@@ -1,0 +1,51 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kube-bench
+  namespace: kube-system
+  labels:
+    app: kube-bench
+spec:
+  # The Job must clean itself up after completion (keeps kube-system tidy).
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app: kube-bench
+    spec:
+      # kube-bench needs node-level access to read kubelet/apiserver config and host paths.
+      hostPID: true
+      hostIPC: true
+      hostNetwork: true
+      restartPolicy: Never
+      containers:
+        - name: kube-bench
+          image: aquasec/kube-bench:latest
+          command: ["kube-bench", "--json"]
+          volumeMounts:
+            - name: var-lib-etcd
+              mountPath: /var/lib/etcd
+              readOnly: true
+            - name: etc-kubernetes
+              mountPath: /etc/kubernetes
+              readOnly: true
+            - name: usr-bin
+              mountPath: /usr/local/mount-from-host/bin
+              readOnly: true
+      volumes:
+        - name: var-lib-etcd
+          hostPath:
+            path: /var/lib/etcd
+        - name: etc-kubernetes
+          hostPath:
+            # MicroK8s stores control-plane args here:
+            #   /var/snap/microk8s/current/args
+            #
+            # Standard kubeadm / EKS equivalents commonly used by kube-bench:
+            #   /etc/kubernetes
+            #   /var/lib/kubelet/config.yaml
+            #   /etc/systemd/system/kubelet.service.d
+            path: /var/snap/microk8s/current/args
+        - name: usr-bin
+          hostPath:
+            path: /usr/bin

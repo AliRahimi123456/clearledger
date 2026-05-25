@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ClearLedger</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- LOGIN SCREEN -->
+  <div id="screen-login" class="screen active">
+    <div class="login-card">
+      <div class="brand">
+        <div class="brand-monogram brand-monogram-lg">CL</div>
+        <h1 class="brand-name-lg">ClearLedger</h1>
+        <p class="brand-sub">
+          Secure fintech infrastructure demo.<br>
+          <span class="brand-sub-muted">Powered by Kubernetes, Vault, and Falco.</span>
+        </p>
+      </div>
+      <div id="login-error" class="error-banner hidden"></div>
+      <p class="login-hint">First time here? Register below, then sign in.</p>
+      <div class="form-group">
+        <label for="email">Email</label>
+        <input type="email" id="email" placeholder="you@example.com" autocomplete="username">
+      </div>
+      <div class="form-group">
+        <label for="password">Password</label>
+        <input type="password" id="password" placeholder="••••••••" autocomplete="current-password">
+      </div>
+      <button id="btn-login" class="btn-primary" type="button">Sign In</button>
+      <button id="btn-show-register" class="btn-link" type="button">
+        No account? Register →
+      </button>
+    </div>
+  </div>
+
+  <!-- REGISTER SCREEN -->
+  <div id="screen-register" class="screen">
+    <div class="login-card">
+      <div class="brand">
+        <div class="brand-monogram brand-monogram-lg">CL</div>
+        <h1 class="brand-name-lg">Create Account</h1>
+        <p class="brand-sub">ClearLedger</p>
+      </div>
+      <div id="register-error" class="error-banner hidden"></div>
+      <div class="form-group">
+        <label for="reg-email">Email</label>
+        <input type="email" id="reg-email" placeholder="you@example.com">
+      </div>
+      <div class="form-group">
+        <label for="reg-password">Password</label>
+        <input type="password" id="reg-password" placeholder="••••••••">
+      </div>
+      <button id="btn-register" class="btn-primary" type="button">Create Account</button>
+      <button id="btn-show-login" class="btn-link" type="button">
+        ← Back to sign in
+      </button>
+    </div>
+  </div>
+
+  <!-- DASHBOARD SCREEN -->
+  <div id="screen-dashboard" class="screen">
+
+    <nav class="navbar">
+      <div class="navbar-brand">
+        <div class="brand-monogram">CL</div>
+        <span class="brand-name">ClearLedger</span>
+        <span class="brand-tagline">Fintech Lab</span>
+      </div>
+      <div class="navbar-right">
+        <span id="nav-email" class="nav-email"></span>
+        <span class="nav-divider" aria-hidden="true">|</span>
+        <button id="btn-logout" class="btn-ghost" type="button">Sign out</button>
+      </div>
+    </nav>
+
+    <div id="seed-overlay" class="seed-overlay hidden" role="status" aria-live="polite">
+      Setting up your demo account...
+    </div>
+
+    <main class="dashboard">
+
+      <!-- Balance card -->
+      <div class="card card-balance">
+        <div class="card-label">Current Balance</div>
+        <div id="balance-sparkline" class="balance-sparkline"></div>
+        <div id="balance-amount" class="balance-amount">—</div>
+        <div class="balance-meta">
+          <span id="balance-count" class="balance-count">Loading...</span>
+          <span id="balance-updated" class="card-sub"></span>
+        </div>
+      </div>
+
+      <!-- Quick actions -->
+      <div class="card card-actions">
+        <div class="card-label">New Transaction</div>
+        <div id="tx-error" class="error-banner hidden"></div>
+        <div id="tx-success" class="success-banner hidden"></div>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="tx-amount">Amount ($)</label>
+            <input type="number" id="tx-amount" placeholder="0.00"
+                   min="0.01" step="0.01">
+          </div>
+          <div class="form-group">
+            <label for="tx-direction">Type</label>
+            <select id="tx-direction">
+              <option value="credit" selected>Credit (+) — money in</option>
+              <option value="debit">Debit (−) — money out</option>
+            </select>
+            <small id="tx-direction-hint" class="tx-hint"></small>
+          </div>
+        </div>
+        <div class="form-group">
+          <label for="tx-description">Description</label>
+          <input type="text" id="tx-description" placeholder="e.g. Salary, Rent...">
+        </div>
+        <button id="btn-create-tx" class="btn-primary" type="button">Submit Transaction</button>
+      </div>
+
+      <!-- Transaction history -->
+      <div class="card card-transactions">
+        <div class="card-header">
+          <div class="card-label">Transaction History</div>
+          <button id="btn-refresh" class="btn-ghost btn-sm" type="button">↻ Refresh</button>
+        </div>
+        <div id="tx-list" class="tx-list">
+          <div class="empty-state">
+            <div class="empty-icon">↕</div>
+            <p class="empty-title">No transactions yet</p>
+            <p class="empty-sub">Create your first transaction using the form above.</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Alerts panel -->
+      <div class="card card-alerts">
+        <div class="card-header">
+          <div class="card-label">
+            Alerts
+            <span id="alert-badge" class="badge hidden">0</span>
+          </div>
+          <button id="btn-refresh-alerts" class="btn-ghost btn-sm" type="button">↻ Refresh</button>
+        </div>
+        <div id="alert-list" class="alert-list">
+          <div class="empty-state">
+            <div class="empty-icon">✓</div>
+            <p class="empty-title">No alerts</p>
+            <p class="empty-sub">Transactions over $10,000 trigger a compliance alert.</p>
+          </div>
+        </div>
+      </div>
+
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

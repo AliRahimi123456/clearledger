@@ -1,0 +1,44 @@
+# INTRODUCED: Stage 4 — Admission Control
+# PURPOSE: Block unsigned images from running in the clearledger namespace
+# FRAMEWORK: SLSA Level 2 / Supply chain security
+# PREREQUISITE: Stage 3 must be complete — images must be signed with Cosign
+#
+# SETUP: Replace the placeholder below with your actual cosign.pub content.
+# Run: cat cosign.pub
+# Then paste the public key block into the publicKeys field.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-signed-images
+  annotations:
+    policies.kyverno.io/title: Require Signed Images
+    policies.kyverno.io/severity: critical
+    policies.kyverno.io/description: >
+      Only images signed with the ClearLedger Cosign key are permitted.
+      This prevents supply chain attacks — a critical fintech security control.
+spec:
+  validationFailureAction: Enforce
+  background: false
+  rules:
+    - name: verify-cosign-signature
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [clearledger]
+      verifyImages:
+        - imageReferences:
+            # index.docker.io is Docker Hub's canonical registry URL used by Kyverno.
+            # The * before clearledger-* matches any Docker Hub username.
+            - "index.docker.io/*/clearledger-auth-service*"
+            - "index.docker.io/*/clearledger-ledger-service*"
+            - "index.docker.io/*/clearledger-notification-service*"
+            - "index.docker.io/*/clearledger-frontend*"
+          attestors:
+            - count: 1
+              entries:
+                - keys:
+                    publicKeys: |-
+                      -----BEGIN PUBLIC KEY-----
+                      PASTE_YOUR_COSIGN_PUBLIC_KEY_HERE
+                      -----END PUBLIC KEY-----

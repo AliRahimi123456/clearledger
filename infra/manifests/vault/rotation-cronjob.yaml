@@ -1,0 +1,58 @@
+# INTRODUCED: Stage 5 — Secrets Management
+# PURPOSE: Automated secret rotation on a monthly schedule.
+# This CronJob runs on the 1st of each month at 2am.
+# Manual trigger: kubectl create job --from=cronjob/secret-rotation manual-rotation-$(date +%s) -n clearledger
+# See: stages/stage-5-secrets-management/scripts/rotate-secret.sh for the manual version.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vault-rotation
+  namespace: clearledger
+---
+# Production pattern: automated rotation on a schedule.
+# This CronJob is a demonstration scaffold:
+# - It needs a Vault token (ideally via Kubernetes auth + Vault Agent) to update KV.
+# - It notifies notification-service after a successful rotation.
+#
+# NOTE: activeDeadlineSeconds prevents a stuck job from blocking the next run.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: vault-secret-rotation
+  namespace: clearledger
+spec:
+  schedule: "0 2 1 * *" # 2am on the 1st of each month
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 600
+      template:
+        spec:
+          serviceAccountName: vault-rotation
+          restartPolicy: Never
+          containers:
+            - name: rotation
+              image: hashicorp/vault:1.16
+              env:
+                - name: VAULT_ADDR
+                  value: "http://vault.vault.svc.cluster.local:8200"
+                # Provide a Vault token via a Kubernetes Secret in this lab.
+                # In production, use Kubernetes auth (Vault agent) rather than static tokens.
+                - name: VAULT_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: vault-rotation-token
+                      key: token
+              command:
+                - /bin/sh
+                - -lc
+                - |
+                  set -euo pipefail
+                  echo "Rotating jwt_secret (demo)..."
+                  CUR=$(vault kv get -format=json clearledger/auth-service | sed -n 's/.*"jwt_secret":"\([^"]*\)".*/\1/p' | head -1)
+                  DB=$(vault kv get -format=json clearledger/auth-service | sed -n 's/.*"database_url":"\([^"]*\)".*/\1/p' | head -1)
+                  NEW=$(head -c 48 /dev/urandom | base64)
+                  vault kv put clearledger/auth-service database_url="${DB}" jwt_secret="${NEW}\n${CUR}"
+                  echo "Rotation complete (demo)."

@@ -1,0 +1,9 @@
+# Helm values for LitmusChaos — used with litmus-install.yaml helm command
+portal:
+  frontend:
+    service:
+      type: ClusterIP
+  server:
+    graphqlServer:
+      service:
+        type: ClusterIP

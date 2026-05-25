@@ -1,0 +1,86 @@
+# INTRODUCED: Stage 0 — Raw Kubernetes
+# UPDATED:    Stage 5 — copy stages/stage-5-secrets-management/infra/manifests/auth-service/deployment.yaml
+#             over this file to add Vault agent injection and remove secretKeyRef
+# PURPOSE: Auth service deployment with security context hardening
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auth-service
+  namespace: clearledger
+  labels:
+    app: auth-service
+    version: v0.1.0
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: auth-service
+  template:
+    metadata:
+      labels:
+        app: auth-service
+        version: v0.1.0
+    spec:
+      serviceAccountName: auth-service
+      # CIS 5.1.6 — app does not call the Kubernetes API; disable default token mount.
+      # Stage 5 Vault: set automountServiceAccountToken: true on the Deployment used with Vault
+      # (see stages/stage-5-secrets-management/...) so the agent can read the projected SA JWT.
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+      containers:
+        - name: auth-service
+          # Replace veeno with your Docker Hub username.
+          # This is updated automatically by the CI pipeline after Stage 1.
+          image: veeno/clearledger-auth-service:v0.1.0
+          ports:
+            - containerPort: 8000
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: auth-service-secret
+                  key: database_url
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: auth-service-secret
+                  key: jwt_secret
+            # OTLP gRPC endpoint for the in-cluster OpenTelemetry Collector
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://otel-collector.monitoring.svc.cluster.local:4317"
+            # service.name label on every trace span in Tempo
+            - name: OTEL_SERVICE_NAME
+              value: "auth-service"
+            # Additional resource attributes for trace filtering in Grafana
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: "k8s.namespace=clearledger,k8s.deployment.name=auth-service"
+            # deployment.environment resource attribute (production vs dev)
+            - name: ENV
+              value: "production"
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]

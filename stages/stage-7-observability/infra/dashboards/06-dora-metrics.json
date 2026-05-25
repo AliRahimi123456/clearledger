@@ -1,0 +1,159 @@
+{
+  "__inputs": [],
+  "__requires": [
+    { "type": "grafana", "id": "grafana", "name": "Grafana", "version": "10.0.0" },
+    { "type": "datasource", "id": "prometheus", "name": "Prometheus", "version": "1.0.0" }
+  ],
+  "description": "DORA engineering performance metrics. Import at http://grafana.local/dashboard/import",
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "panels": [
+    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }, "id": 30, "title": "DORA Metrics", "type": "row" },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "How often ClearLedger deploys to production. Elite: multiple per day. High: once per day. Medium: once per week. Low: once per month.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "steps": [{ "color": "red", "value": null }, { "color": "yellow", "value": 0.1 }, { "color": "green", "value": 1 }] },
+          "unit": "short",
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "No deployments", "color": "red" } } },
+            { "type": "range", "options": { "from": 0.1, "to": 0.9, "result": { "text": "Low performer", "color": "yellow" } } },
+            { "type": "range", "options": { "from": 1, "to": 6.9, "result": { "text": "Medium performer", "color": "green" } } },
+            { "type": "range", "options": { "from": 7, "to": null, "result": { "text": "High/Elite performer", "color": "green" } } }
+          ]
+        }
+      },
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 1 },
+      "id": 1,
+      "options": { "colorMode": "background", "textMode": "value_and_name" },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "sum(increase(argocd_app_sync_total{namespace=\"argocd\",name=\"clearledger\",phase=\"Succeeded\"}[7d]))",
+        "refId": "A"
+      }],
+      "title": "Deployment Frequency (7d)",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Time from code push to running in production. Approximated from ArgoCD reconcile duration. Elite: < 1 hour. High: < 1 day.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 86400 }, { "color": "red", "value": 604800 }] },
+          "unit": "s",
+          "min": 0,
+          "max": 604800
+        }
+      },
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 1 },
+      "id": 2,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "showThresholdLabels": false, "showThresholdMarkers": true },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "avg(argocd_app_reconcile_duration_seconds{namespace=\"argocd\",name=\"clearledger\"})",
+        "refId": "A"
+      }],
+      "title": "Lead Time (avg seconds)",
+      "type": "gauge"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "% of changes that caused failures. Elite: < 5%. High: 5-10%. Low: > 15%.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 10 }, { "color": "red", "value": 15 }] },
+          "unit": "percent",
+          "min": 0,
+          "max": 100
+        }
+      },
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 1 },
+      "id": 3,
+      "options": { "colorMode": "background", "textMode": "value_and_name" },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "(sum(increase(argocd_app_sync_total{namespace=\"argocd\",name=\"clearledger\",phase=\"Failed\"}[7d])) / sum(increase(argocd_app_sync_total{namespace=\"argocd\",name=\"clearledger\"}[7d]))) * 100",
+        "refId": "A"
+      }],
+      "title": "Change Failure Rate (7d)",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Average time ArgoCD takes to reconcile after a sync failure. Not true MTTR — true MTTR requires incident data (PagerDuty/Opsgenie). This shows deployment recovery speed.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 86400 }, { "color": "red", "value": 604800 }] },
+          "unit": "s"
+        }
+      },
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 1 },
+      "id": 4,
+      "options": { "colorMode": "background", "textMode": "value_and_name" },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "avg(argocd_app_reconcile_duration_seconds{namespace=\"argocd\",name=\"clearledger\"}) by (name)",
+        "refId": "A"
+      }],
+      "title": "MTTR Proxy (avg recovery seconds)",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Successful and failed deployments over time. Each bar = one day.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 30, "drawStyle": "bars" }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "Successful deploys" }, "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "Failed deploys" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] }
+        ]
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 7 },
+      "id": 5,
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "increase(argocd_app_sync_total{name=\"clearledger\",phase=\"Succeeded\"}[1d])",
+          "legendFormat": "Successful deploys",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "increase(argocd_app_sync_total{name=\"clearledger\",phase=\"Failed\"}[1d])",
+          "legendFormat": "Failed deploys",
+          "refId": "B"
+        }
+      ],
+      "title": "Deployment Activity (7d)",
+      "type": "timeseries"
+    },
+  {
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 15 },
+      "id": 6,
+      "options": {
+        "mode": "markdown",
+        "content": "## What These Numbers Mean\n\n| Metric | Elite | High | Medium | Low |\n|---|---|---|---|---|\n| Deploy Frequency | Multiple/day | Once/day | Once/week | Once/month |\n| Lead Time | < 1 hour | < 1 day | < 1 week | > 1 month |\n| Change Failure Rate | < 5% | 5-10% | 10-15% | > 15% |\n| MTTR | < 1 hour | < 1 day | < 1 week | > 1 week |\n\nSource: Google DORA State of DevOps Report 2024.\n\nClearLedger aims for **High** on all four metrics.\nIn a homelab with manual testing, **Medium** is realistic.\n\n**MTTR note:** This dashboard uses ArgoCD reconcile duration as a proxy.\nTrue MTTR requires incident timestamps from PagerDuty, Opsgenie, or similar."
+      },
+      "title": "What These Numbers Mean",
+      "type": "text"
+    }
+  ],
+  "refresh": "5m",
+  "schemaVersion": 38,
+  "tags": ["clearledger", "dora", "engineering"],
+  "time": { "from": "now-7d", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "ClearLedger — DORA Metrics",
+  "uid": "clearledger-dora",
+  "version": 1
+}
