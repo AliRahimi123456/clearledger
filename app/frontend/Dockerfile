@@ -1,5 +1,8 @@
 FROM nginx:1.27-alpine
 
+# Upgrade all Alpine OS packages to pull latest security patches
+RUN apk update && apk upgrade --no-cache
+
 # Security: run as non-root
 RUN addgroup -S appuser && adduser -S appuser -G appuser
 
