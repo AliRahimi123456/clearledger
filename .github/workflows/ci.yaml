@@ -54,7 +54,7 @@ jobs:
 
       - name: Upload Gitleaks report (evidence)
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: gitleaks-report
           path: gitleaks-report.json
@@ -91,7 +91,7 @@ jobs:
 
       - name: Upload Semgrep results (evidence)
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: semgrep-results
           path: semgrep-results.json
@@ -135,7 +135,7 @@ jobs:
 
       - name: Upload Checkov results (evidence)
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: checkov-results
           path: "checkov-*-results.json"
@@ -281,7 +281,7 @@ jobs:
 
       - name: Upload scan artifacts (evidence)
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: auth-scan-results
           path: |
@@ -605,7 +605,7 @@ jobs:
 
       - name: Upload DAST artifacts (evidence)
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: dast-reports
           path: |

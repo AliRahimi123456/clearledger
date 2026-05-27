@@ -803,6 +803,14 @@ sudo ./svc.sh install
 sudo ./svc.sh start
 ```
 
+The `clearledger` label is required. The workflow uses:
+
+```yaml
+runs-on: [self-hosted, clearledger]
+```
+
+GitHub schedules jobs by runner **labels**, not by runner name. A runner named `clearledger` without the `clearledger` label will stay online but jobs will remain queued with `Waiting for a runner to pick up this job`.
+
 What those last two commands mean:
 
 ```text
@@ -851,7 +859,16 @@ exit
 
 Go to: github.com/YOUR_USERNAME/clearledger → Settings → Actions → Runners
 
-You should see `clearledger-runner` with a green dot and status **Idle**.
+You should see `clearledger-runner` with a green dot and status **Idle**. Open the runner details and confirm the labels include:
+
+```text
+self-hosted
+Linux
+X64
+clearledger
+```
+
+If `clearledger` is missing, add it in the runner settings before rerunning the workflow. The runner name alone is not enough.
 
 If it shows Offline:
 
