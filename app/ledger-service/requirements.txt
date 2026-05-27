@@ -1,11 +1,12 @@
 setuptools>=78.1.1
-fastapi==0.115.12
+fastapi==0.136.3
+starlette>=0.49.1
 uvicorn==0.30.1
 sqlalchemy==2.0.31
 asyncpg==0.29.0
 psycopg2-binary==2.9.9
 pydantic-settings==2.3.4
-httpx==0.27.0
+httpx==0.28.1
 redis==5.0.7
 opentelemetry-api==1.42.1
 opentelemetry-sdk==1.42.1

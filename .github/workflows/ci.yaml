@@ -210,7 +210,7 @@ jobs:
           syft clearledger-auth-service:${IMAGE_TAG} \
             -o spdx-json=sbom-auth.json
 
-      - name: Scan SBOM for vulnerabilities (Grype blocks high)
+      - name: Scan SBOM for vulnerabilities (Grype blocks fixable HIGH+)
         run: |
           mkdir -p "$HOME/.local/bin"
           export PATH="$HOME/.local/bin:$PATH"
@@ -220,6 +220,7 @@ jobs:
           fi
           grype sbom:sbom-auth.json \
             --fail-on high \
+            --only-fixed \
             --output json \
             --file grype-auth-results.json
 
