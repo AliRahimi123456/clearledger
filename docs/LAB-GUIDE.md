@@ -779,6 +779,23 @@ docker --version
 
 Expected: Docker prints a version number.
 
+The runner uses Docker **inside the Ubuntu VM**, not Docker Desktop on your Mac. If a GitHub Actions job later fails with:
+
+```text
+permission denied while trying to connect to the Docker API at unix:///var/run/docker.sock
+```
+
+it usually means the runner process started before the `ubuntu` user picked up the `docker` group membership. Restart the runner inside the VM:
+
+```bash
+cd ~/actions-runner
+pkill -f "Runner.Listener|Runner.Worker|./run.sh" || true
+nohup ./run.sh > _diag/manual-runner.log 2>&1 &
+docker ps
+```
+
+`docker ps` should run without `sudo`. That proves the runner user can build images in the VM.
+
 What you proved: the VM can build container images without relying on Docker Desktop on your host.
 
 **Step 4 — Install and register the runner**
@@ -1135,6 +1152,8 @@ The pipeline does **not** deploy to Kubernetes directly. It only updates `clearl
 
 The Kubernetes Checkov scan in Stage 1 is evidence-only. It uploads findings so you can see the hardening work ahead, but it does not block the first CI pipeline run. That is intentional: Stage 1 proves the build-push-update flow. Later stages tighten Kubernetes policy with security gates, admission control, and secrets management.
 
+DAST is also disabled by default in Stage 1. It needs a live deployed application, but Stage 1 only updates `clearledger-infra`; ArgoCD does not deploy that change until Stage 2. To enable DAST later, add a repository variable named `ENABLE_DAST` with value `true`.
+
 Notice what the pipeline does **not** do: it does not run `kubectl`.
 
 That is intentional. CI should produce artifacts and update desired state. It should not directly mutate the cluster. Direct cluster mutation is hard to audit and easy to drift from Git.
@@ -1306,9 +1325,9 @@ make check-2
 
 ## Stage 3 — Security Gates
 
-> Every commit passes through security checks. A failure at any gate stops the pipeline.
+> Every commit passes through security checks. The gates that protect the build artifact stop the pipeline; Kubernetes hardening findings become enforcement later.
 
-**Goal:** six security tools scan every commit. Each one catches a different category of vulnerability. You will deliberately trigger each one to see exactly what it catches and why it matters.
+**Goal:** six security tools scan every commit. Each one catches a different category of vulnerability. Some findings block immediately, such as secrets, SAST, vulnerable images, and production Dockerfile issues. Kubernetes manifest findings are collected first, then become deployment enforcement in Stage 4 with Kyverno. You will deliberately trigger each category to see exactly what it catches and why it matters.
 
 ### What you need to know first
 
@@ -1323,7 +1342,7 @@ Security scanning has categories, each catching problems at a different layer:
 | **Image scanning** | Your built Docker images | OS-level vulnerabilities in the base image (e.g. outdated openssl) | Trivy |
 | **Image signing** | Your built Docker images | Proves an image was built by *your* pipeline, not tampered with after the fact | Cosign |
 
-No single tool covers everything. That is why you need all six — each one is a gate that blocks a different class of problem from reaching production.
+No single tool covers everything. That is why you need all six. In Stage 1, Kubernetes Checkov runs as evidence so the first CI lesson stays focused on build-push-update. In Stage 3 and Stage 4, those findings become the security story: CI tells you what is wrong, and admission control prevents bad manifests from running.
 
 **Pre-commit hooks** run these checks on your laptop *before* the commit even reaches Git. The CI pipeline runs them again on the server. This is defense in depth — two chances to catch a problem.
 
@@ -1387,9 +1406,9 @@ This is where the learning happens. You are going to deliberately introduce each
 | Gitleaks | Add `AWS_KEY = "AKIAIOSFODNN7EXAMPLE"` to any Python file | Pipeline fails at Secrets Scan step | Leaked credentials are the #1 cause of cloud breaches |
 | Trivy | Change `FROM python:3.12-slim` to `FROM python:3.8-slim` in any Dockerfile | Pipeline fails at image scan with a list of CVEs | Old base images contain known, exploitable vulnerabilities |
 | Semgrep | Add `subprocess.run(request.args.get("cmd"), shell=True)` to any route | Pipeline fails at SAST step | This is a remote code execution vulnerability — an attacker could run any command on your server |
-| Checkov | Remove `securityContext` from any deployment manifest | Pipeline fails at IaC scan | Without security context, the container runs as root with full privileges |
+| Checkov | Remove `HEALTHCHECK` from a production Dockerfile, or review the uploaded Kubernetes findings | Dockerfile issues fail the IaC scan; Kubernetes findings are uploaded as evidence | Dockerfile issues affect the artifact you are publishing now; Kubernetes policy enforcement comes in Stage 4 |
 
-**For each gate:** push the change, watch the specific gate fail at github.com/YOUR_USERNAME/clearledger/actions, read the error message, understand what it caught, revert the change, push again, watch it go green.
+For the blocking gates, push the change, watch the specific gate fail at github.com/YOUR_USERNAME/clearledger/actions, read the error message, understand what it caught, revert the change, push again, watch it go green. For Kubernetes manifest findings, open the uploaded Checkov artifact and treat it as the backlog that Stage 4 admission control will enforce.
 
 **Take a screenshot of at least one pipeline failure showing a blocked security gate.** This is strong portfolio evidence — it shows you do not just set up security tools, you understand what they catch.
 
