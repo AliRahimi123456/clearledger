@@ -1110,6 +1110,8 @@ The pipeline does **not** deploy to Kubernetes directly. It only updates `clearl
 | Build jobs | Builds and pushes each service image | Same work as Stage 0, but repeatable and tied to a commit |
 | `update-manifests` | Updates image tags in clearledger-infra on GitHub | Records the desired new version in Git |
 
+The Kubernetes Checkov scan in Stage 1 is evidence-only. It uploads findings so you can see the hardening work ahead, but it does not block the first CI pipeline run. That is intentional: Stage 1 proves the build-push-update flow. Later stages tighten Kubernetes policy with security gates, admission control, and secrets management.
+
 Notice what the pipeline does **not** do: it does not run `kubectl`.
 
 That is intentional. CI should produce artifacts and update desired state. It should not directly mutate the cluster. Direct cluster mutation is hard to audit and easy to drift from Git.

@@ -121,15 +121,14 @@ jobs:
           python3 -m pip install --user checkov
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Scan Kubernetes manifests (block HIGH/CRITICAL)
+      - name: Scan Kubernetes manifests (evidence only in Stage 1)
         run: |
           checkov \
             --directory infra/manifests \
             --framework kubernetes \
             --output json \
             --output-file checkov-k8s-results.json \
-            --soft-fail-on MEDIUM \
-            --hard-fail-on HIGH,CRITICAL
+            --soft-fail
 
       - name: Scan Dockerfiles (block HIGH/CRITICAL)
         run: |
