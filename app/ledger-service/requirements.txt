@@ -1,6 +1,7 @@
-setuptools>=69.0.0,<82.0.0
-fastapi==0.111.0
+setuptools>=78.1.1
+fastapi==0.115.12
 uvicorn==0.30.1
+protobuf>=5.29.6
 sqlalchemy==2.0.31
 asyncpg==0.29.0
 psycopg2-binary==2.9.9

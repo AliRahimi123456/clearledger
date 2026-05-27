@@ -177,10 +177,17 @@ jobs:
 
       - name: Install Trivy (image vulnerability scanner)
         run: |
-          mkdir -p "$HOME/.local/bin"
-          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
-            | sh -s -- -b "$HOME/.local/bin" v0.52.1
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          if ! command -v trivy &>/dev/null && ! [ -f "$HOME/.local/bin/trivy" ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y wget gnupg
+            wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key \
+              | gpg --dearmor \
+              | sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
+            echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main" \
+              | sudo tee /etc/apt/sources.list.d/trivy.list
+            sudo apt-get update -qq && sudo apt-get install -y trivy
+          fi
 
       - name: Scan auth-service image (Trivy blocks HIGH/CRITICAL)
         run: |
@@ -330,8 +337,15 @@ jobs:
           export PATH="$HOME/.local/bin:$PATH"
           docker build -t clearledger-ledger-service:${IMAGE_TAG} ./app/ledger-service
 
-          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
-            | sh -s -- -b "$HOME/.local/bin" v0.52.1
+          if ! command -v trivy &>/dev/null && ! [ -f "$HOME/.local/bin/trivy" ]; then
+            sudo apt-get update -qq && sudo apt-get install -y wget gnupg
+            wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key \
+              | gpg --dearmor \
+              | sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
+            echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main" \
+              | sudo tee /etc/apt/sources.list.d/trivy.list
+            sudo apt-get update -qq && sudo apt-get install -y trivy
+          fi
 
           trivy image \
             --exit-code 1 \
@@ -409,8 +423,15 @@ jobs:
           docker build -t clearledger-notification-service:${IMAGE_TAG} \
             ./app/notification-service
 
-          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
-            | sh -s -- -b "$HOME/.local/bin" v0.52.1
+          if ! command -v trivy &>/dev/null && ! [ -f "$HOME/.local/bin/trivy" ]; then
+            sudo apt-get update -qq && sudo apt-get install -y wget gnupg
+            wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key \
+              | gpg --dearmor \
+              | sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
+            echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main" \
+              | sudo tee /etc/apt/sources.list.d/trivy.list
+            sudo apt-get update -qq && sudo apt-get install -y trivy
+          fi
 
           trivy image \
             --exit-code 1 \
@@ -486,10 +507,17 @@ jobs:
 
       - name: Scan frontend image
         run: |
-          mkdir -p "$HOME/.local/bin"
-          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
-            | sh -s -- -b "$HOME/.local/bin" v0.52.1
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.local/bin:$PATH"
+          if ! command -v trivy &>/dev/null && ! [ -f "$HOME/.local/bin/trivy" ]; then
+            sudo apt-get update -qq && sudo apt-get install -y wget gnupg
+            wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key \
+              | gpg --dearmor \
+              | sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
+            echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main" \
+              | sudo tee /etc/apt/sources.list.d/trivy.list
+            sudo apt-get update -qq && sudo apt-get install -y trivy
+          fi
           trivy image \
             --exit-code 1 \
             --severity CRITICAL,HIGH \
