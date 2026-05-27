@@ -37,11 +37,52 @@
 
 | Local | AWS | Required Change |
 |---|---|---|
-| Docker Hub | Amazon ECR | Update image URLs in manifests |
+| Docker Hub + stored secrets | Amazon ECR + OIDC (no stored AWS keys) | Switch to `.github/workflows/ci-aws.yaml` |
 | Self-hosted Vault | AWS Secrets Manager or Vault on EKS | Update secret source |
 | MicroK8s nginx ingress | AWS ALB Ingress Controller | Change ingress annotations |
 | `/etc/hosts` domains | Route53 + ACM | Update DNS and TLS |
 | `clearledger-infra` on GitHub | No change needed — already on GitHub | ArgoCD repo URL stays the same |
+
+---
+
+## Local CI vs AWS CI
+
+There are two workflows on purpose:
+
+| Workflow | Trigger | Registry | Use it for |
+|---|---|---|---|
+| `.github/workflows/ci.yaml` | Automatic on push to `main` | Docker Hub | Stages 1–7 local MicroK8s lab |
+| `.github/workflows/ci-aws.yaml` | Manual only: Actions → CI — AWS (ECR + OIDC) → Run workflow | Amazon ECR | Stage 8 AWS migration |
+
+`ci-aws.yaml` is manual so AWS/ECR work does not run while you are testing the local lab. This avoids surprise cloud changes and surprise cost.
+
+---
+
+## Production Hardening Checklist
+
+The Stage 8 design is production-style: no SSH deploys, no static AWS keys for CI, GitOps deploys through ArgoCD, and pods use IRSA. Before calling it production-ready, add these guardrails:
+
+| Control | What to configure | Why |
+|---|---|---|
+| Branch protection | Protect `main` in `clearledger` and `clearledger-infra`; require PRs, approvals, and passing checks | Prevent direct pushes to code or deployment state |
+| GitHub Environments | Create `production`; require reviewers; restrict deployment branches to `main` | Adds an approval gate before production AWS actions |
+| Fine-grained token / GitHub App | Replace broad classic PAT with a fine-grained token limited to `clearledger-infra` with Contents read/write, or use a GitHub App | Reduces blast radius if `INFRA_REPO_TOKEN` leaks |
+| OIDC environment lock | `.github/workflows/ci-aws.yaml` uses `environment: production`; Terraform trusts `repo:Osomudeya/clearledger:environment:production` | AWS only issues credentials to approved production jobs |
+| Staging to prod promotion | Build once, deploy to staging, test, then promote the same image SHA/digest to prod | Prevents untested direct production deployment |
+| Private networking | Private EKS nodes, private RDS, restricted EKS endpoint, least-privilege security groups | Reduces public attack surface |
+| Terraform remote state | Encrypted S3 backend + DynamoDB locking + bucket versioning + public access blocked | Protects and coordinates infrastructure state |
+
+Production summary:
+
+```text
+CI builds and proves the artifact.
+GitHub Environments approve production.
+OIDC gives short-lived AWS credentials.
+ECR stores immutable images.
+clearledger-infra records desired state.
+ArgoCD deploys from Git.
+No SSH. No static AWS keys. No direct kubectl from CI.
+```
 
 ---
 

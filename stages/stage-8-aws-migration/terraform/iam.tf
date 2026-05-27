@@ -352,6 +352,92 @@ resource "aws_iam_role_policy" "app_notification_irsa_permissions" {
   policy = data.aws_iam_policy_document.app_notification_irsa_permissions.json
 }
 
+# ── GitHub Actions OIDC — keyless ECR push ───────────────────────────────────
+# Why: no AWS_ACCESS_KEY_ID or AWS_SECRET_ACCESS_KEY stored in GitHub Secrets.
+# GitHub mints a short-lived OIDC token per job; AWS trusts it via this provider.
+# The pipeline assumes this role to push images to ECR and nothing else.
+
+resource "aws_iam_openid_connect_provider" "github_actions" {
+  url = "https://token.actions.githubusercontent.com"
+
+  # Audience claim GitHub uses when minting OIDC tokens for AWS.
+  client_id_list = ["sts.amazonaws.com"]
+
+  # GitHub's OIDC CA thumbprint — stable, published by GitHub.
+  # https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/configuring-openid-connect-in-amazon-web-services
+  thumbprint_list = ["6938fd4d98bab03faadb97b34396831e3780aea1"]
+
+  tags = {
+    Name = "${var.project_name}-github-actions-oidc"
+  }
+}
+
+data "aws_iam_policy_document" "github_actions_ecr_assume" {
+  statement {
+    effect  = "Allow"
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+    principals {
+      type        = "Federated"
+      identifiers = [aws_iam_openid_connect_provider.github_actions.arn]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+    # Why StringEquals on the GitHub Environment subject:
+    # The AWS role can only be assumed by jobs running in the protected
+    # `production` environment of Osomudeya/clearledger. In GitHub, protect
+    # that environment with required reviewers and branch restrictions.
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:sub"
+      values   = ["repo:Osomudeya/clearledger:environment:production"]
+    }
+  }
+}
+
+data "aws_iam_policy_document" "github_actions_ecr_permissions" {
+  statement {
+    sid    = "ECRAuth"
+    effect = "Allow"
+    # GetAuthorizationToken has no resource ARN — it returns a registry-level token.
+    actions   = ["ecr:GetAuthorizationToken"]
+    resources = ["*"]
+  }
+
+  statement {
+    sid    = "ECRPush"
+    effect = "Allow"
+    actions = [
+      "ecr:BatchCheckLayerAvailability",
+      "ecr:CompleteLayerUpload",
+      "ecr:InitiateLayerUpload",
+      "ecr:PutImage",
+      "ecr:UploadLayerPart",
+      "ecr:BatchGetImage",
+      "ecr:GetDownloadUrlForLayer",
+    ]
+    # Scoped to only the ClearLedger ECR repos — not every repo in the account.
+    resources = [for repo in aws_ecr_repository.services : repo.arn]
+  }
+}
+
+resource "aws_iam_role" "github_actions_ecr" {
+  name               = "${var.project_name}-github-actions-ecr"
+  assume_role_policy = data.aws_iam_policy_document.github_actions_ecr_assume.json
+
+  tags = {
+    Name = "${var.project_name}-github-actions-ecr"
+  }
+}
+
+resource "aws_iam_role_policy" "github_actions_ecr" {
+  name   = "${var.project_name}-github-actions-ecr-inline"
+  role   = aws_iam_role.github_actions_ecr.id
+  policy = data.aws_iam_policy_document.github_actions_ecr_permissions.json
+}
+
 # ── Developer read-only (human assume) ──────────────────────────────────────
 data "aws_iam_policy_document" "developer_assume" {
   statement {

@@ -41,15 +41,32 @@
 
 ### 1. Create the Infra Repo on GitHub
 
-The pipeline updates a separate repo (`clearledger-infra`) with new image tags after each build. ArgoCD (Stage 2) watches this repo and syncs the cluster.
+You use two GitHub repositories:
+
+| Repo | What lives there | Who changes it |
+|---|---|---|
+| `clearledger` | App source code, Dockerfiles, tests, pipeline YAML, lab docs | You |
+| `clearledger-infra` | Kubernetes manifests only | The CI pipeline, then ArgoCD reads it |
+
+Think of the split like this:
+
+```text
+clearledger
+  "Here is the application code"
+
+clearledger-infra
+  "Here is the exact version that should run in Kubernetes"
+```
+
+The pipeline builds images from `clearledger`, pushes those images to Docker Hub, then updates image tags in `clearledger-infra`. It does **not** deploy directly to Kubernetes. ArgoCD closes that gap in Stage 2.
 
 Go to github.com → New Repository → Name: `clearledger-infra` → Public → Create.
 
-Push the Kubernetes manifests to it:
+Push only the Kubernetes manifests to it:
 
 ```bash
 mkdir -p /tmp/clearledger-infra
-cp -r infra/* /tmp/clearledger-infra/
+cp -r infra/manifests /tmp/clearledger-infra/
 cd /tmp/clearledger-infra
 git init
 git remote add origin https://github.com/YOUR_USERNAME/clearledger-infra.git
@@ -97,11 +114,17 @@ Go to: github.com/YOUR_USERNAME/clearledger → Settings → Actions → Runners
 
 Select: Linux → x64. Copy the token shown (expires in 1 hour).
 
-**Step 2 — Install the runner inside the VM**
+**Step 2 — Enter the VM**
 
 ```bash
 multipass shell clearledger
 ```
+
+> **Check your prompt before continuing.**
+> It must change to `ubuntu@clearledger:~$`.
+> If it still shows your Mac username, you are on the wrong machine.
+> The runner binary is Linux-only — running it on macOS gives:
+> `cannot execute binary file`
 
 Inside the VM:
 
@@ -124,6 +147,36 @@ tar xzf ./actions-runner-linux-x64.tar.gz
 sudo ./svc.sh install
 sudo ./svc.sh start
 ```
+
+What those last two commands mean:
+
+```text
+sudo ./svc.sh install
+  Registers the runner with systemd inside the VM.
+  Without this, `sudo ./svc.sh status` says: not installed.
+
+sudo ./svc.sh start
+  Starts the runner service in the background.
+  After this, it keeps running even when you close the terminal.
+```
+
+Check it locally:
+
+```bash
+cd ~/actions-runner
+sudo ./svc.sh status
+```
+
+If you see `not installed`, run:
+
+```bash
+cd ~/actions-runner
+sudo ./svc.sh install
+sudo ./svc.sh start
+sudo ./svc.sh status
+```
+
+If `install` fails, rerun `./config.sh` with a fresh GitHub runner token, then run install/start again.
 
 **Step 3 — Install Docker inside the VM**
 
@@ -150,9 +203,15 @@ You should see `clearledger-runner` with status **Idle**.
 
 Go to: github.com/YOUR_USERNAME/clearledger → Settings → Secrets and variables → Actions → New repository secret
 
-Generate a PAT for the infra repo first:
+The workflow needs credentials for Docker Hub and for the second GitHub repo.
 
-Go to: github.com/settings/tokens → Generate new token (classic) → repo scope → Copy the token.
+Create the values like this:
+
+- `DOCKER_USERNAME`: your Docker Hub username, from hub.docker.com → Account Settings.
+- `DOCKER_PASSWORD`: a Docker Hub access token, from hub.docker.com → Account Settings → Security → New Access Token. Use this instead of your normal password.
+- `INFRA_REPO_TOKEN`: a GitHub PAT, from GitHub profile photo → Settings → Developer settings → Personal access tokens → Tokens (classic) → Generate new token → Generate new token (classic) → select `repo` scope. The pipeline uses this to push commits to `clearledger-infra`.
+
+Copy tokens immediately. Docker Hub and GitHub only show token values once.
 
 Add these three secrets:
 

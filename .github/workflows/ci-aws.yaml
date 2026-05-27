@@ -1,0 +1,222 @@
+# INTRODUCED: Stage 8 — AWS Migration
+# PURPOSE: CI pipeline variant that pushes images to Amazon ECR instead of Docker Hub.
+#          Uses OIDC — no AWS_ACCESS_KEY_ID or AWS_SECRET_ACCESS_KEY stored in GitHub.
+#
+# HOW TO ACTIVATE:
+#   1. Run `terraform apply` in stages/stage-8-aws-migration/terraform/
+#   2. Copy the `github_actions_ecr_role_arn` output value.
+#   3. Create a GitHub Environment named `production`.
+#   4. Add GITHUB_ACTIONS_ROLE_ARN as an environment secret in `production`.
+#   5. Add INFRA_REPO_TOKEN as an environment secret in `production`.
+#      Prefer a fine-grained PAT limited to Osomudeya/clearledger-infra
+#      with Contents: Read and write.
+#   6. Add two GitHub Variables (non-secret):
+#      AWS_ACCOUNT_ID  — your 12-digit AWS account ID
+#      AWS_REGION      — e.g. eu-west-1
+#   7. Require reviewers on the `production` environment before deployment.
+#   8. Run this workflow manually from the GitHub Actions tab.
+#      It is intentionally NOT triggered on every push.
+#      Stage 1 local CI uses ci.yaml; Stage 8 AWS CI uses this file.
+#
+# WHAT CHANGES VS ci.yaml:
+#   - Docker Hub login replaced with OIDC + ECR login (no stored AWS keys)
+#   - Image registry: ECR instead of Docker Hub
+#   - update-manifests: image URLs use ECR format (ACCOUNT.dkr.ecr.REGION.amazonaws.com/...)
+
+name: CI — AWS (ECR + OIDC)
+
+on:
+  # Manual only. This prevents the AWS/ECR pipeline from running while learners
+  # are still testing the local MicroK8s/Docker Hub pipeline in Stage 1.
+  workflow_dispatch:
+
+# OIDC requires these permissions. id-token: write lets GitHub mint the OIDC token.
+# contents: read is needed for actions/checkout.
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # ECR registry URL — derived from GitHub Variables set after terraform apply.
+  ECR_REGISTRY: ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # AUTH TO AWS — one job, then all build jobs reuse the same session context
+  # via environment variables set by configure-aws-credentials.
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  build-scan-auth:
+    name: "Build + Scan auth-service → ECR"
+    # Uses self-hosted runner — GitHub cloud runners cannot reach
+    # clearledger.local or the local MicroK8s cluster.
+    runs-on: [self-hosted, clearledger]
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          # OIDC: GitHub mints a short-lived token; AWS exchanges it for
+          # temporary STS credentials scoped to this role only.
+          # No AWS keys stored anywhere. Token expires when the job ends.
+          role-to-assume: ${{ secrets.GITHUB_ACTIONS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push auth-service
+        uses: docker/build-push-action@v5
+        with:
+          context: ./app/auth-service
+          push: true
+          tags: ${{ env.ECR_REGISTRY }}/clearledger/auth-service:${{ env.IMAGE_TAG }}
+
+      - name: Scan auth-service image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.ECR_REGISTRY }}/clearledger/auth-service:${{ env.IMAGE_TAG }}
+          format: table
+          exit-code: 1
+          severity: CRITICAL
+
+  build-scan-ledger:
+    name: "Build + Scan ledger-service → ECR"
+    runs-on: [self-hosted, clearledger]
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.GITHUB_ACTIONS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push ledger-service
+        uses: docker/build-push-action@v5
+        with:
+          context: ./app/ledger-service
+          push: true
+          tags: ${{ env.ECR_REGISTRY }}/clearledger/ledger-service:${{ env.IMAGE_TAG }}
+
+      - name: Scan ledger-service image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.ECR_REGISTRY }}/clearledger/ledger-service:${{ env.IMAGE_TAG }}
+          format: table
+          exit-code: 1
+          severity: CRITICAL
+
+  build-scan-notification:
+    name: "Build + Scan notification-service → ECR"
+    runs-on: [self-hosted, clearledger]
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.GITHUB_ACTIONS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push notification-service
+        uses: docker/build-push-action@v5
+        with:
+          context: ./app/notification-service
+          push: true
+          tags: ${{ env.ECR_REGISTRY }}/clearledger/notification-service:${{ env.IMAGE_TAG }}
+
+      - name: Scan notification-service image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.ECR_REGISTRY }}/clearledger/notification-service:${{ env.IMAGE_TAG }}
+          format: table
+          exit-code: 1
+          severity: CRITICAL
+
+  build-scan-frontend:
+    name: "Build + Scan frontend → ECR"
+    runs-on: [self-hosted, clearledger]
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.GITHUB_ACTIONS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push frontend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./app/frontend
+          push: true
+          tags: ${{ env.ECR_REGISTRY }}/clearledger/frontend:${{ env.IMAGE_TAG }}
+
+      - name: Scan frontend image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.ECR_REGISTRY }}/clearledger/frontend:${{ env.IMAGE_TAG }}
+          format: table
+          exit-code: 1
+          severity: CRITICAL
+
+  update-manifests:
+    name: "Update Manifests → GitHub (ECR image tags)"
+    runs-on: [self-hosted, clearledger]
+    environment: production
+    needs: [build-scan-auth, build-scan-ledger, build-scan-notification, build-scan-frontend]
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout infra repo
+        uses: actions/checkout@v4
+        with:
+          repository: Osomudeya/clearledger-infra
+          token: ${{ secrets.INFRA_REPO_TOKEN }}
+          path: infra
+
+      - name: Update image tags to ECR URLs
+        run: |
+          cd infra
+          ECR="${{ env.ECR_REGISTRY }}"
+          SHA="${{ env.IMAGE_TAG }}"
+          sed -i "s|image:.*clearledger/auth-service:.*|image: ${ECR}/clearledger/auth-service:${SHA}|g" \
+            manifests/auth-service/deployment.yaml
+          sed -i "s|image:.*clearledger/ledger-service:.*|image: ${ECR}/clearledger/ledger-service:${SHA}|g" \
+            manifests/ledger-service/deployment.yaml
+          sed -i "s|image:.*clearledger/notification-service:.*|image: ${ECR}/clearledger/notification-service:${SHA}|g" \
+            manifests/notification-service/deployment.yaml
+          sed -i "s|image:.*clearledger/frontend:.*|image: ${ECR}/clearledger/frontend:${SHA}|g" \
+            manifests/frontend/deployment.yaml
+
+      - name: Commit and push
+        run: |
+          cd infra
+          git config user.email "github-ci@clearledger.local"
+          git config user.name "GitHub Actions Bot"
+          git add manifests/
+          if git diff --staged --quiet; then
+            echo "No manifest changes to commit"
+          else
+            git commit -m "ci(aws): deploy ${{ env.IMAGE_TAG }} — ECR images [skip ci]"
+            git push
+          fi

@@ -751,7 +751,19 @@ Do NOT close this page yet — the token expires in 1 hour.
 multipass shell clearledger
 ```
 
-Everything below runs **inside the VM**, not on your host laptop.
+> **STOP. Check your prompt before continuing.**
+>
+> After running `multipass shell clearledger`, your terminal prompt should change to something like:
+> ```
+> ubuntu@clearledger:~$
+> ```
+> If your prompt still shows your Mac username (e.g. `mac@192` or `yourname@MacBook`), you are still on your host machine.
+> The runner binary is compiled for Linux. Running it on macOS will fail with:
+> `cannot execute binary file`
+>
+> Do not proceed until your prompt shows `ubuntu@clearledger`.
+
+**Everything from Step 3 onwards runs inside the VM, not on your Mac.**
 
 **Step 3 — Install Docker inside the VM**
 
@@ -791,13 +803,43 @@ sudo ./svc.sh install
 sudo ./svc.sh start
 ```
 
-This installs the runner as a background service. It will keep running after you close the terminal.
+What those last two commands mean:
 
-Check it locally:
+```text
+sudo ./svc.sh install
+  Registers the runner with systemd inside the VM.
+  Without this, `sudo ./svc.sh status` says: not installed.
+
+sudo ./svc.sh start
+  Starts the runner service in the background.
+  After this, it keeps running even when you close the terminal.
+```
+
+Check it locally from the same folder, still inside the VM:
 
 ```bash
+cd ~/actions-runner
 sudo ./svc.sh status
 ```
+
+Expected: the service is installed and running.
+
+If you see this:
+
+```text
+not installed
+```
+
+then `sudo ./svc.sh install` did not run successfully. Run:
+
+```bash
+cd ~/actions-runner
+sudo ./svc.sh install
+sudo ./svc.sh start
+sudo ./svc.sh status
+```
+
+If `install` fails, rerun `./config.sh` with a fresh GitHub runner token, then run the install/start commands again.
 
 **Step 5 — Exit the VM**
 
@@ -822,20 +864,78 @@ What you proved: GitHub can now send work into your local lab environment.
 
 ### 1.3 — Create the Infra Repo on GitHub
 
-Now separate application code from infrastructure code.
+Now separate **application code** from **deployment state**.
 
-- **`clearledger`** — source code, Dockerfiles, pipeline file (you just pushed this)
-- **`clearledger-infra`** — Kubernetes manifests that describe what should run
+You now use two GitHub repositories:
 
-The pipeline builds images, then updates the infra repo with new image tags. It does **not** deploy directly to the cluster. That is Stage 2 (ArgoCD).
+| Repo | What lives there | Who changes it | Why it exists |
+|---|---|---|---|
+| `clearledger` | App source code, Dockerfiles, tests, `.github/workflows/ci.yaml`, lab docs | You, the developer | This is where code changes start |
+| `clearledger-infra` | Kubernetes manifests only: `deployment.yaml`, `service.yaml`, ingress, secrets templates | The CI pipeline, then ArgoCD reads it | This is the desired state of the cluster |
+
+The important idea:
+
+```text
+clearledger
+  "Here is the application code"
+
+clearledger-infra
+  "Here is the exact version that should run in Kubernetes"
+```
+
+Why not keep everything in one repo?
+
+Because the two repos answer different questions:
+
+```text
+clearledger asks:
+  What is the application code?
+
+clearledger-infra asks:
+  What exact version should the cluster run right now?
+```
+
+Imagine you edit `README.md` in `clearledger`. That is a code/documentation repo change, but it should not mean "deploy the application." Now imagine you change `auth-service` code and the pipeline builds image tag `abc123`. Only after tests and scans pass should the desired running version change.
+
+That is why the pipeline writes this kind of change into `clearledger-infra`:
+
+```yaml
+image: osomudeya/clearledger-auth-service:abc123
+```
+
+Then ArgoCD watches `clearledger-infra` and says:
+
+```text
+Git says auth-service should run abc123.
+The cluster is running the old tag.
+I will update the cluster to match Git.
+```
+
+So the app repo is where work starts. The infra repo is the deployment contract.
+
+The pipeline flow is:
+
+```text
+You push code to clearledger
+        ↓
+GitHub Actions builds Docker images
+        ↓
+Images are pushed to Docker Hub
+        ↓
+Pipeline updates clearledger-infra with the new image tags
+        ↓
+Stage 2: ArgoCD watches clearledger-infra and deploys it
+```
+
+The pipeline does **not** deploy directly to the cluster. That is Stage 2 (ArgoCD).
 
 Go to github.com → New Repository → Name: `clearledger-infra` → Public → Create.
 
-Push the manifests:
+Push only the Kubernetes manifests:
 
 ```bash
 mkdir -p /tmp/clearledger-infra
-cp -r infra/* /tmp/clearledger-infra/
+cp -r infra/manifests /tmp/clearledger-infra/
 cd /tmp/clearledger-infra
 git init
 git remote add origin https://github.com/YOUR_USERNAME/clearledger-infra.git
@@ -849,7 +949,68 @@ What you proved: the infrastructure definition has its own Git history, separate
 
 Go to: `github.com/YOUR_USERNAME/clearledger` → Settings → Secrets and variables → Actions → New repository secret
 
-Generate a GitHub PAT for the infra repo: go to github.com/settings/tokens → Generate new token (classic) → check `repo` scope → copy the token.
+The workflow needs credentials for two external systems:
+
+- Docker Hub, so it can push images.
+- GitHub, so it can push image tag updates into `clearledger-infra`.
+
+Do **not** paste these values into YAML files. Store them as GitHub Actions secrets.
+
+**Secret 1 — `DOCKER_USERNAME`**
+
+This is just your Docker Hub username.
+
+Example:
+
+```text
+osomudeya
+```
+
+Get it from Docker Hub: hub.docker.com → profile menu → Account Settings.
+
+**Secret 2 — `DOCKER_PASSWORD`**
+
+This should be a Docker Hub **access token**, not your normal Docker Hub password.
+
+Create it here:
+
+```text
+hub.docker.com
+→ Account Settings
+→ Security
+→ New Access Token
+→ Description: clearledger-github-actions
+→ Access permissions: Read, Write, Delete or Read/Write
+→ Generate
+```
+
+Copy the token immediately. Docker Hub only shows it once.
+
+**Secret 3 — `INFRA_REPO_TOKEN`**
+
+This is a GitHub Personal Access Token (PAT). The pipeline uses it to push commits to the second repo, `clearledger-infra`.
+
+Create it here:
+
+```text
+GitHub profile settings
+→ Settings
+→ Developer settings
+→ Personal access tokens
+→ Tokens (classic)
+→ Click "Generate new token"
+→ Choose "Generate new token (classic)"
+→ If GitHub asks for your password or 2FA, complete it
+→ Note: clearledger-infra-ci
+→ Expiration: choose a lab-friendly value
+→ Select scope: repo
+   This allows the pipeline to push to clearledger-infra.
+→ Generate token
+```
+
+Copy the token immediately. GitHub only shows it once.
+
+For this lab, `repo` scope is the simplest option. In production, you would use tighter permissions, such as a fine-grained token limited to only `clearledger-infra`.
 
 Add these three secrets:
 
@@ -865,30 +1026,56 @@ What you proved: the pipeline can authenticate to external systems without hardc
 
 Do not treat the workflow file as magic. Open `.github/workflows/ci.yaml` and read it before you run it.
 
-The pipeline has two jobs:
+The pipeline has two responsibilities:
 
-1. Build and push each service image
-2. Update the infra repo with the new image tags
+1. Prove the code and images are safe enough to publish.
+2. Update the infra repo with the new image tags.
 
-Here is the flow:
+Here is the security flow first:
 
 ```text
-git push to GitHub
+Developer pushes code to GitHub
         ↓
 GitHub Actions starts workflow
         ↓
-self-hosted runner builds images
+Self-hosted runner inside the Multipass VM picks up the job
         ↓
-images are pushed to Docker Hub using commit SHA tags
+1. Scan secrets
         ↓
-runner checks out clearledger-infra from GitHub
+2. Run code security scans (SAST)
         ↓
-deployment YAML image tags are updated
+3. Scan Kubernetes and IaC files
         ↓
-runner commits and pushes back to clearledger-infra
+4. Build Docker images
+        ↓
+5. Scan images for vulnerabilities
+        ↓
+6. Generate a software inventory (SBOM)
+        ↓
+7. Push images to Docker Hub with commit SHA tags
+        ↓
+8. Sign images with Cosign
+        ↓
+9. Produce supply-chain evidence for later verification
+```
+
+Then comes the GitOps handoff:
+
+```text
+Secure images now exist in Docker Hub
+        ↓
+Runner checks out clearledger-infra from GitHub
+        ↓
+Deployment YAML image tags are updated
+        ↓
+Runner commits and pushes back to clearledger-infra
+        ↓
+Stage 1 ends here
 ```
 
 Important: the image tag is based on the commit SHA. That means you can answer "which code produced this image?" just by looking at the tag.
+
+The pipeline does **not** deploy to Kubernetes directly. It only updates `clearledger-infra`. Stage 2 installs ArgoCD, and ArgoCD watches `clearledger-infra` to deploy the change.
 
 | Section | What it does | Why |
 |---|---|---|
@@ -1722,6 +1909,35 @@ The key insight: **the application code does not change.** The Dockerfiles, the 
 
 **Terraform** provisions the AWS resources. It reads `.tf` files that describe the desired infrastructure (VPC, subnets, EKS cluster, RDS database, etc.) and creates everything in your AWS account.
 
+### Two OIDC Ideas in Stage 8
+
+Stage 8 uses OIDC in two places. They sound similar, but they solve different problems:
+
+- **GitHub Actions OIDC:** lets the pipeline push images to Amazon ECR without storing AWS access keys in GitHub.
+- **IRSA:** lets pods inside EKS read AWS services, like Secrets Manager, without storing AWS access keys in Kubernetes.
+
+Think of it this way:
+
+```text
+GitHub Actions OIDC
+  GitHub job proves: "I am an approved job in the production environment of Osomudeya/clearledger"
+  AWS replies: "Here are short-lived credentials to push images to ECR"
+
+IRSA
+  Kubernetes pod proves: "I am the auth-service ServiceAccount"
+  AWS replies: "Here are short-lived credentials to read only the auth secret"
+```
+
+The important part is what is **not** stored anymore:
+
+```text
+No AWS_ACCESS_KEY_ID in GitHub Secrets
+No AWS_SECRET_ACCESS_KEY in GitHub Secrets
+No AWS keys inside Kubernetes Secrets
+```
+
+When Terraform runs, it creates a role called `clearledger-github-actions-ecr`. The Stage 8 pipeline in `.github/workflows/ci-aws.yaml` assumes that role using OIDC, logs in to ECR, pushes images, then updates `clearledger-infra` with ECR image URLs.
+
 ---
 
 **Prerequisites:** AWS CLI configured (`aws sts get-caller-identity` returns your account), Terraform installed (`terraform --version`).
@@ -1730,7 +1946,199 @@ The key insight: **the application code does not change.** The Dockerfiles, the 
 make aws-up   # provisions everything, ends by printing a URL
 ```
 
-Terraform creates: VPC, EKS, ECR, RDS, ALB, Secrets Manager, GuardDuty, CloudTrail, VPC Flow Logs, IRSA roles. ArgoCD, Kyverno, and Falco install identically to the local setup.
+Terraform creates: VPC, EKS, ECR, RDS, ALB, Secrets Manager, GuardDuty, CloudTrail, VPC Flow Logs, IRSA roles, and the GitHub Actions OIDC role for ECR pushes. ArgoCD, Kyverno, and Falco install identically to the local setup.
+
+After Terraform finishes, add the AWS pipeline values to GitHub:
+
+```text
+GitHub production environment secrets:
+  GITHUB_ACTIONS_ROLE_ARN = terraform output github_actions_ecr_role_arn
+  INFRA_REPO_TOKEN         = fine-grained token or GitHub App token for clearledger-infra
+
+GitHub Variables:
+  AWS_ACCOUNT_ID = your 12-digit AWS account ID
+  AWS_REGION     = eu-west-1
+```
+
+Then run the Stage 8 workflow:
+
+```text
+GitHub → clearledger repo → Actions → CI — AWS (ECR + OIDC) → Run workflow
+```
+
+That workflow is the AWS version of the Stage 1 pipeline. It uses the same self-hosted runner, but pushes to ECR instead of Docker Hub.
+
+Important: the two workflows are intentionally different:
+
+| Workflow | When it runs | Registry | Target stage |
+|---|---|---|---|
+| `.github/workflows/ci.yaml` | Automatically on push to `main` | Docker Hub | Stages 1–7 local MicroK8s lab |
+| `.github/workflows/ci-aws.yaml` | Manually from the Actions tab | Amazon ECR | Stage 8 AWS migration |
+
+Why manual for AWS? Because AWS actions can create cost and affect a real cloud environment. You should choose when to run the AWS pipeline instead of triggering it during local MicroK8s testing.
+
+### Production Hardening Checklist
+
+The lab architecture is production-style, but a real production setup needs extra guardrails. Add these before you describe it as production-ready.
+
+#### 1. Protect the main branches
+
+Protect both GitHub repos:
+
+```text
+github.com/Osomudeya/clearledger
+github.com/Osomudeya/clearledger-infra
+```
+
+Go to each repo:
+
+```text
+Settings
+→ Rules
+→ Rulesets
+→ New ruleset
+→ Branch targeting: main
+```
+
+Enable:
+
+```text
+Require a pull request before merging
+Require approvals
+Require status checks to pass
+Require branches to be up to date before merging
+Block force pushes
+Block branch deletion
+```
+
+Why this matters: nobody should push straight to the code repo or the GitOps repo in production. A bad direct push to `clearledger-infra` is a direct deployment request.
+
+#### 2. Use GitHub Environments with approvals
+
+Create a protected environment:
+
+```text
+clearledger repo
+→ Settings
+→ Environments
+→ New environment
+→ Name: production
+→ Required reviewers: add yourself or the team
+→ Deployment branches: main only
+```
+
+The AWS workflow uses:
+
+```yaml
+environment: production
+```
+
+That means GitHub pauses the AWS deployment until an approved reviewer allows it. This creates a real promotion gate instead of "every push deploys to prod."
+
+#### 3. Prefer fine-grained tokens or a GitHub App
+
+For the basic lab, `INFRA_REPO_TOKEN` can be a classic PAT. For production, tighten it.
+
+Better option:
+
+```text
+Fine-grained personal access token
+→ Repository access: only Osomudeya/clearledger-infra
+→ Permissions:
+   Contents: Read and write
+   Metadata: Read
+```
+
+Best option for teams: use a GitHub App installed only on `clearledger-infra`, with permission to write contents. That gives better audit logs and easier rotation than a personal token.
+
+Store `INFRA_REPO_TOKEN` as a **production environment secret**, not a general repository secret:
+
+```text
+clearledger
+→ Settings
+→ Environments
+→ production
+→ Environment secrets
+→ INFRA_REPO_TOKEN
+```
+
+#### 4. Lock AWS OIDC to the production environment
+
+The Stage 8 Terraform does this in `iam.tf`:
+
+```text
+token.actions.githubusercontent.com:sub
+= repo:Osomudeya/clearledger:environment:production
+```
+
+That means AWS only trusts GitHub jobs from the `production` environment. A random branch, fork, or unapproved workflow run cannot assume the ECR push role.
+
+Important nuance: AWS IAM can reliably check the GitHub OIDC `aud` and `sub` claims. Use the protected GitHub environment and branch protection to control which workflow can reach that environment.
+
+#### 5. Use staging to production promotion
+
+The simplest lab flow is:
+
+```text
+main → build → update clearledger-infra → ArgoCD deploys
+```
+
+A production flow should be:
+
+```text
+main
+  ↓
+Build image once
+  ↓
+Deploy to staging
+  ↓
+Run smoke tests / DAST / manual approval
+  ↓
+Promote same image SHA to production
+```
+
+Do **not** rebuild for production. Promote the same image digest or SHA that passed staging.
+
+#### 6. Use private networking where possible
+
+For production AWS:
+
+```text
+EKS nodes in private subnets
+RDS in private subnets
+Private EKS API endpoint, or restricted public endpoint
+Security groups scoped to required ports only
+ALB public only if the app is public
+No SSH-based deployment path
+```
+
+The pipeline should talk to AWS APIs through IAM/OIDC and deploy through GitOps. It should not SSH into EC2 instances.
+
+#### 7. Store Terraform state remotely
+
+Local Terraform state is fine for a lab. Production should use encrypted remote state:
+
+```text
+S3 bucket for terraform.tfstate
+DynamoDB table for state locking
+SSE encryption enabled
+Bucket versioning enabled
+Public access blocked
+```
+
+The Terraform backend block is already included in `stages/stage-8-aws-migration/terraform/main.tf` as a commented template. Uncomment it after you create the S3 bucket and DynamoDB lock table.
+
+#### Production-ready summary
+
+```text
+CI builds and proves the artifact.
+GitHub Environments approve production.
+OIDC gives short-lived AWS credentials.
+ECR stores immutable images.
+clearledger-infra records desired state.
+ArgoCD deploys from Git.
+No SSH. No static AWS keys. No direct kubectl from CI.
+```
 
 Open the URL. ClearLedger is running on AWS. Same architecture, same security layers, new infrastructure.
 
@@ -1747,7 +2155,7 @@ See `stages/stage-8-aws-migration/README.md` for the full walkthrough and cost r
 - That containerized applications are portable — the same code runs on your laptop and on AWS
 - What Terraform does: declares infrastructure as code so environments are reproducible
 - What changes in a cloud migration (managed services, IAM, networking) and what does not (application code, CI logic, security policies)
-- AWS-specific security services: GuardDuty (threat detection), CloudTrail (API audit), IRSA (pod-level IAM without long-lived credentials)
+- AWS-specific security services: GuardDuty (threat detection), CloudTrail (API audit), GitHub Actions OIDC (pipeline AWS auth without long-lived keys), and IRSA (pod-level IAM without long-lived credentials)
 
 ---
 

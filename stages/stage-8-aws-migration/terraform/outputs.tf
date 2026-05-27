@@ -66,6 +66,11 @@ output "notification_service_irsa_role_arn" {
   value       = aws_iam_role.app_notification_irsa.arn
 }
 
+output "github_actions_ecr_role_arn" {
+  description = "IAM role ARN for GitHub Actions OIDC — add as GITHUB_ACTIONS_ROLE_ARN secret in github.com/Osomudeya/clearledger/settings/secrets/actions"
+  value       = aws_iam_role.github_actions_ecr.arn
+}
+
 output "developer_readonly_role_arn" {
   description = "Human-assumable read-only role — ReadOnlyAccess + deny Secrets Manager + permission boundary"
   value       = aws_iam_role.developer_readonly.arn
