@@ -960,6 +960,14 @@ git add . && git commit -m "feat: initial manifests" && git push -u origin main
 cd -
 ```
 
+Stage 1 does not keep a separate copy of manifests inside `stages/stage-1-ci-pipeline/infra`. If that folder is empty or missing, that is expected. The source manifests for this stage are the root manifests:
+
+```text
+infra/manifests/
+```
+
+You copy those manifests into the separate GitHub repo named `clearledger-infra`. That repo is the real Stage 1 infra target. The app repo stays focused on application code and pipeline logic; `clearledger-infra` becomes the desired-state repo that the pipeline updates after successful builds.
+
 What you proved: the infrastructure definition has its own Git history, separate from application code.
 
 ### 1.4 — Set up GitHub Secrets
@@ -1128,6 +1136,8 @@ Expected: all jobs green in about 8 minutes.
 ✓ Build + Scan frontend
 ✓ Update manifests → GitHub
 ```
+
+Note: this lab includes `.gitleaksignore` because some intentional demo secrets are already present in git history. Gitleaks still runs normally. The ignore file only suppresses known lab fingerprints. Do not add new findings to it unless you have confirmed they are intentional test data.
 
 Click into the job logs and look for the story — do not just wait for green:
 
