@@ -21,7 +21,7 @@ env:
 
 jobs:
   # ───────────────────────────────────────────────────────────────────────────
-  # GATE 1: SECRETS SCAN
+  # GATE 1: SECRETS SCAN!
   # Catch hardcoded secrets before anything else runs.
   # A leaked secret is a breach. Stop everything if one is found.
   # ───────────────────────────────────────────────────────────────────────────
