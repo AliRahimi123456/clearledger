@@ -974,10 +974,11 @@ What you proved: the infrastructure definition has its own Git history, separate
 
 Go to: `github.com/YOUR_USERNAME/clearledger` → Settings → Secrets and variables → Actions → New repository secret
 
-The workflow needs credentials for two external systems:
+The workflow needs credentials for Docker Hub, GitHub, and image signing:
 
 - Docker Hub, so it can push images.
 - GitHub, so it can push image tag updates into `clearledger-infra`.
+- Cosign, so it can sign the images after pushing them.
 
 Do **not** paste these values into YAML files. Store them as GitHub Actions secrets.
 
@@ -1037,13 +1038,35 @@ Copy the token immediately. GitHub only shows it once.
 
 For this lab, `repo` scope is the simplest option. In production, you would use tighter permissions, such as a fine-grained token limited to only `clearledger-infra`.
 
-Add these three secrets:
+**Secrets 4 and 5 — `COSIGN_PRIVATE_KEY` and `COSIGN_PASSWORD`**
+
+Cosign signs container images after the pipeline pushes them to Docker Hub. Later, Stage 4 uses the public key with Kyverno so the cluster can verify that images came from your trusted pipeline.
+
+Generate the key pair on your host machine, not inside the Multipass VM:
+
+```bash
+brew install cosign
+cosign generate-key-pair
+```
+
+This creates:
+
+```text
+cosign.key   # private key — never commit this
+cosign.pub   # public key — keep for later Kyverno verification
+```
+
+When Cosign asks for a password, enter one and save it in your password manager. If you already generated a key without a password, regenerate it with a password for this lab.
+
+Add these five secrets to the `clearledger` repo, not `clearledger-infra`:
 
 | Secret name | Value | Purpose |
 |---|---|---|
 | `DOCKER_USERNAME` | Your Docker Hub username | Pipeline logs in to push images |
 | `DOCKER_PASSWORD` | Your Docker Hub access token | Pipeline authenticates with Docker Hub |
 | `INFRA_REPO_TOKEN` | The GitHub PAT from above | Pipeline pushes image tag updates to clearledger-infra |
+| `COSIGN_PRIVATE_KEY` | Contents of `cosign.key` | Pipeline signs pushed container images |
+| `COSIGN_PASSWORD` | Password used when creating the Cosign key | Unlocks the private key during signing |
 
 What you proved: the pipeline can authenticate to external systems without hardcoding credentials in the repo.
 

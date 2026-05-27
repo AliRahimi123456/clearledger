@@ -1,7 +1,8 @@
 # Cosign private key — NEVER commit this
 cosign.key
 
-# Public key — safe to commit, but exclude from repo so learners explicitly add their own
+# Public key — safe to share, but exclude from repo so learners explicitly add their own
+cosign.pub
 infra/cosign.pub
 
 # Environment files with local credentials

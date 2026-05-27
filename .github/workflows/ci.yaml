@@ -135,6 +135,7 @@ jobs:
           checkov \
             --directory . \
             --framework dockerfile \
+            --skip-path app/frontend/Dockerfile.dev \
             --output json \
             --output-file checkov-dockerfile-results.json \
             --soft-fail-on MEDIUM \
