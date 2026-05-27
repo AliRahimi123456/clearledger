@@ -1154,6 +1154,8 @@ The Kubernetes Checkov scan in Stage 1 is evidence-only. It uploads findings so 
 
 DAST is also disabled by default in Stage 1. It needs a live deployed application, but Stage 1 only updates `clearledger-infra`; ArgoCD does not deploy that change until Stage 2. To enable DAST later, add a repository variable named `ENABLE_DAST` with value `true`.
 
+If a Stage 1 job fails, use `docs/troubleshooting.md#stage-1-ci-troubleshooting` before changing the workflow. It covers the failures this lab commonly exposes: runner label mismatch, Docker socket permissions, Docker Hub IPv6 connectivity, missing `pip`, Gitleaks demo secrets, Checkov behavior, Trivy install problems, real Python and frontend CVEs, Cosign download issues, Syft/Grype installs, wrong manifest image paths, and DAST being too early for Stage 1.
+
 Notice what the pipeline does **not** do: it does not run `kubectl`.
 
 That is intentional. CI should produce artifacts and update desired state. It should not directly mutate the cluster. Direct cluster mutation is hard to audit and easy to drift from Git.
