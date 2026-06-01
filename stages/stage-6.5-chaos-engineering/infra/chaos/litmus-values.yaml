@@ -1,4 +1,11 @@
-# Helm values for LitmusChaos — used with litmus-install.yaml helm command
+# Stage 6.5 — Litmus ChaosCenter (UI) Helm values
+# Used by install-litmus.sh: helm install chaos litmuschaos/litmus ...
+#
+# Default login (first time): admin / litmus
+adminConfig:
+  ADMIN_USERNAME: "admin"
+  ADMIN_PASSWORD: "litmus"
+
 portal:
   frontend:
     service:
@@ -7,3 +14,12 @@ portal:
     graphqlServer:
       service:
         type: ClusterIP
+      genericEnv:
+        CHAOS_CENTER_UI_ENDPOINT: "http://litmus.local"
+        INGRESS: "true"
+        INGRESS_NAME: "litmus-ingress"
+        ALLOWED_ORIGINS: "http://litmus.local"
+
+# Lab uses a separate Ingress manifest (litmus-ingress.yaml) like falco.local
+ingress:
+  enabled: false

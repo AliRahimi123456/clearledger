@@ -24,15 +24,22 @@ DOMAINS=(
   "grafana.local"
   "vault.local"
   "falco.local"
+  "litmus.local"
 )
 
 echo "==> Adding /etc/hosts entries..."
 for domain in "${DOMAINS[@]}"; do
-  if grep -q "$domain" /etc/hosts; then
+  if grep -qE "[[:space:]]${domain}([[:space:]]|$)" /etc/hosts; then
     echo "  Skipping $domain (already exists)"
   else
-    echo "$VMIP  $domain" | sudo tee -a /etc/hosts
-    echo "  Added: $VMIP  $domain"
+    if echo "$VMIP  $domain" | sudo tee -a /etc/hosts >/dev/null; then
+      echo "  Added: $VMIP  $domain"
+    else
+      echo ""
+      echo "Could not write /etc/hosts (sudo required). Add manually:"
+      echo "  echo \"$VMIP  $domain\" | sudo tee -a /etc/hosts"
+      exit 1
+    fi
   fi
 done
 
@@ -40,5 +47,5 @@ echo ""
 echo "✓ /etc/hosts updated."
 echo ""
 echo "Test with:"
-echo "  curl -s http://clearledger.local/auth/health"
-echo "  (after deploying — see stages/stage-0-raw-kubernetes/README.md)"
+echo "  curl -s -o /dev/null -w '%{http_code}' http://clearledger.local/auth/health"
+echo "  curl -s -o /dev/null -w '%{http_code}' http://litmus.local/"

@@ -114,13 +114,16 @@ Save as: screenshots/03-kyverno-block.png
 Setup:
 
 ```bash
-# Trigger the alert first
+make demo-6
+# Or trigger manually, then open the UI:
 kubectl exec -n clearledger \
   $(kubectl get pod -n clearledger -l app=auth-service -o name | head -1) \
   -- /bin/sh -c "id && exit" 2>/dev/null || true
 ```
 
-Then open: http://falco.local
+Then open: http://falco.local (login **admin** / password **admin**)
+
+**What to look for:** Ignore **Notice** events such as “Contact K8S API Server From Container” from `argocd` — that is normal cluster noise. After `make demo-6`, refresh and capture a **Critical** row: **Shell Spawned in ClearLedger Container**, with `auth-service` in the output.
 
 What to capture: The Falco Sidekick UI showing:
 

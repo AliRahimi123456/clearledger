@@ -1,116 +1,86 @@
-# Stage 6.5 — Chaos Engineering (LitmusChaos)
+# Stage 6.5 — Chaos Engineering
 
-> **The problem you felt in Stage 6:** Falco detects threats inside running pods.
-> Network policies block unauthorized connections. But you never proved the
-> system **survives** failure — only that you can **detect** it.
->
-> **What changes here:** LitmusChaos injects controlled failures — pod kills,
-> network latency, memory pressure — and you verify ClearLedger keeps serving
-> requests. Detection (Falco) and resilience (chaos) are different skills.
-> EU DORA Pillar 3 requires documented resilience testing. This stage is that evidence.
+> Falco **detects**. Chaos **proves you survive**.
 
----
+**Full guide (UI walkthrough):** [LAB-GUIDE.md § Stage 6.5](../../docs/LAB-GUIDE.md#stage-65--chaos-engineering-optional)
 
-## What You Will Learn
+## What you are learning (not just installing)
 
-- The difference between **detection** (Falco) and **resilience** (chaos engineering)
-- How to install LitmusChaos on Kubernetes
-- How to run three failure experiments against ClearLedger
-- How chaos test output satisfies DORA resilience testing requirements
-- Why MTTR is measured from failure to recovery, not failure to alert
+| Concept | Meaning |
+|---------|---------|
+| **Chaos engineering** | Deliberately break something small, watch if users still succeed |
+| **Resilience** | `auth-service` has 2 replicas — killing one should not kill login |
+| **ChaosCenter UI** | Where you *see* experiments; useless until the cluster is **connected** |
+| **Terminal** | Proves availability with `curl` while the UI shows the experiment timeline |
 
----
+**Empty Litmus UI?** The control plane was running but **no agent** was registered with your cluster. The install script now runs `connect-litmus-infra.sh` to fix that automatically.
 
-## Falco vs LitmusChaos
+## Steps (≈30 minutes)
 
-| Tool | Question it answers |
-|---|---|
-| Falco | Did a threat or anomaly occur? |
-| LitmusChaos | Did the service stay available when something failed? |
-
-Falco seeing a pod die is **detection**.
-The service staying available while the pod dies is **resilience**.
-
----
-
-## Prerequisites
-
-- Stage 6 complete — Falco running, NetworkPolicies applied
-
----
-
-## Steps
-
-### 1. Install LitmusChaos
+### 1. Stabilize auth (required)
 
 ```bash
-helm repo add litmuschaos https://litmuschaos.github.io/litmus-helm/
-helm repo update
-
-helm install chaos litmuschaos/litmus \
-  --namespace litmus --create-namespace \
-  -f stages/stage-6.5-chaos-engineering/infra/chaos/litmus-values.yaml
-
-kubectl apply -f stages/stage-6.5-chaos-engineering/infra/chaos/litmus-install.yaml
-kubectl apply -f stages/stage-6.5-chaos-engineering/infra/chaos/litmus-rbac.yaml
+make fix-65-prereqs
+kubectl get pods -n clearledger -l app=auth-service   # 2 pods, 2/2 Ready
 ```
 
-### 2. Run the automated resilience test
+### 2. Install + connect Litmus
 
 ```bash
-bash stages/stage-6.5-chaos-engineering/scripts/run-chaos.sh
+# If you changed the admin password at first login:
+export LITMUS_PASSWORD='your-password'
+
+bash stages/stage-6.5-chaos-engineering/scripts/install-litmus.sh
 ```
 
-This kills one auth-service replica (50% of 2 replicas) and verifies:
-- `/auth/health` returns **200 during chaos** (availability)
-- Both replicas are **Running after chaos ends** (recovery)
+**Checkpoints after login:**
 
-Save the script output — it is your DORA Pillar 3 evidence artifact.
+| Where | What you must see |
+|-------|-------------------|
+| **Overview** | Infrastructures: **Active 1** |
+| **Environments → clearledger-lab → clearledger-cluster** | Status **Active** (not **Pending**) |
 
-### 3. Manual experiments (one at a time)
+**Navigation guide:** [LAB-GUIDE §6.5.1c](../../docs/LAB-GUIDE.md#651c--how-to-navigate-the-litmus-ui-read-before-you-click)
 
-> **WARNING:** Never run all three experiments simultaneously.
-> Always verify recovery before starting the next experiment.
-
-All experiments are defined in:
-`stages/stage-6.5-chaos-engineering/infra/chaos/clearledger-experiments.yaml`
-
-| Experiment | Apply | Proves |
-|---|---|---|
-| Pod delete | `auth-service-pod-delete.yaml` | Replica redundancy (2 replicas) |
-| Network latency | `ledger-service-network-latency` doc in experiments file | 503 on auth timeout, not hang |
-| Memory hog | `notification-service-memory-hog` doc in experiments file | OOMKill + Redis subscription recovery |
-
----
-
-## EU DORA Connection
-
-DORA Pillar 3 — Digital Operational Resilience Testing (Articles 24–27)
-requires documented resilience tests, not just vulnerability scans.
-
-| DORA requirement | ClearLedger evidence |
-|---|---|
-| Resilience testing | LitmusChaos experiments in this stage |
-| Test evidence | `run-chaos.sh` output saved to file |
-| TLPT-style scenarios | Pod delete + network latency + memory pressure |
-
----
-
-## What Is Still Broken
-
-You can survive pod failures, but you cannot yet **trace** a request across
-services or **measure** deployment frequency and MTTR in dashboards.
-
-**Stage 7 adds observability. Stage 7.5 adds distributed tracing.**
-
----
-
-## Before You Move On
+If Overview still says **0**, re-run:
 
 ```bash
-bash scripts/health-check.sh 6.5
+export LITMUS_PASSWORD='your-password'
+bash stages/stage-6.5-chaos-engineering/scripts/connect-litmus-infra.sh
 ```
 
-## ← Previous: [Stage 6 — Runtime Security](../stage-6-runtime-security/README.md)
+**Stuck on PENDING?** See [LAB-GUIDE §6.5.1d](../../docs/LAB-GUIDE.md#651d--why-infrastructure-shows-pending).
 
-## → Next: [Stage 7 — Observability](../stage-7-observability/README.md)
+### 3. Learn in the UI (main exercise)
+
+Open **http://litmus.local** → log in → follow the lab guide:
+
+| Guide section | What you do |
+|---------------|-------------|
+| [§6.5.1](../../docs/LAB-GUIDE.md#651--install-litmuschaos-operator-ui-cluster-connection) | Install + connect (one script) |
+| [§6.5.1c](../../docs/LAB-GUIDE.md#651c--how-to-navigate-the-litmus-ui-read-before-you-click) | Sidebar, **Active** infrastructure, click order |
+| [§6.5.2](../../docs/LAB-GUIDE.md#652--how-to-use-chaoshub-and-run-your-first-chaos-experiment) | **ChaosHubs → Pod Delete** — version-agnostic wizard + terminals |
+
+### 4. Optional — same test as YAML
+
+```bash
+make demo-65
+```
+
+See [LAB-GUIDE §6.5.3](../../docs/LAB-GUIDE.md#653--same-experiment-from-the-terminal-make-demo-65). Use after the UI exercise.
+
+## Scripts
+
+| Script | Purpose |
+|--------|---------|
+| `install-litmus.sh` | Operator + UI + ingress + **connect cluster** |
+| `connect-litmus-infra.sh` | Re-connect UI to cluster (empty Overview fix) |
+| `run-chaos.sh` | `make demo-65` — YAML path |
+
+## Pass criteria
+
+- Overview → **Infrastructures: Active 1**
+- You ran **pod-delete** on `auth-service` from the UI (or `make demo-65`)
+- During chaos: `curl http://clearledger.local/auth/health` → **200**
+- After chaos: **2/2** auth pods Ready
+- You can explain: *Falco detects; chaos proves we survive*

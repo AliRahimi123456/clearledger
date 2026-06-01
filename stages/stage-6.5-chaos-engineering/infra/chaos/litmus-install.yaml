@@ -1,17 +1,7 @@
 # INTRODUCED: Stage 6.5 — LitmusChaos install
 #
-# Install LitmusChaos:
-#   helm repo add litmuschaos https://litmuschaos.github.io/litmus-helm/
-#   helm repo update
-#   helm install chaos litmuschaos/litmus \
-#     --namespace litmus --create-namespace \
-#     -f stages/stage-6.5-chaos-engineering/infra/chaos/litmus-values.yaml
+# Automated install (recommended):
+#   bash stages/stage-6.5-chaos-engineering/scripts/install-litmus.sh
 #
-# Apply RBAC for chaos experiments in the clearledger namespace:
-#   kubectl apply -f stages/stage-6.5-chaos-engineering/infra/chaos/litmus-rbac.yaml
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: litmus
-  labels:
-    name: litmus
+# Installs: litmus namespace, RBAC, litmus-core (operator), kubernetes-chaos
+# (experiments), ChaosCenter UI (chaos helm release), and litmus-ingress.yaml.

@@ -90,7 +90,6 @@
       },
       "gridPos": { "h": 10, "w": 24, "x": 0, "y": 15 },
       "id": 7,
-      "options": { "footer": { "show": false } },
       "targets": [{ "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "vector(1)", "refId": "A", "hide": true }],
       "transformations": [{ "id": "prepareTimeSeries", "options": {} }, { "id": "convertFieldType", "options": {} }],
       "title": "Active Security Controls — Compliance Mapping",

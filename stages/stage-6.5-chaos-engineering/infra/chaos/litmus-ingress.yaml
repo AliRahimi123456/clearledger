@@ -1,0 +1,32 @@
+# INTRODUCED: Stage 6.5 — ChaosCenter UI at http://litmus.local
+# Requires INGRESS=true on chaos-litmus-server (set in litmus-values.yaml / install-litmus.sh).
+# Without /backend/ routing the SPA loads but API calls fail → blank settings/projects pages.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: litmus-ingress
+  namespace: litmus
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /$1
+    nginx.ingress.kubernetes.io/use-regex: "true"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: litmus.local
+      http:
+        paths:
+          # Backend (GraphQL) must be listed before the frontend catch-all
+          - path: /backend/(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: chaos-litmus-server-service
+                port:
+                  number: 9002
+          - path: /(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: chaos-litmus-frontend-service
+                port:
+                  number: 9091

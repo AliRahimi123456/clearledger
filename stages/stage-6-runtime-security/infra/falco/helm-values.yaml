@@ -1,0 +1,11 @@
+# Stage 6 — Falco Helm values (lab)
+driver:
+  kind: modern_ebpf
+tty: true
+collectors:
+  kubernetes:
+    enabled: true
+falcosidekick:
+  enabled: true
+  webui:
+    enabled: true

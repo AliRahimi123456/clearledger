@@ -96,13 +96,15 @@ Keep them in sync when you change hooks.
 Install:
 
 ```bash
-# macOS / Linux
-pip install pre-commit
+# macOS (recommended — Homebrew avoids PEP 668 pip errors):
+brew install pre-commit
+
+# Linux (venv if pip3 is externally managed):
+# python3 -m venv .venv && source .venv/bin/activate && pip install pre-commit
+
 pre-commit install
 
-# Windows (Git Bash or WSL2)
-pip install pre-commit
-pre-commit install
+# Windows (Git Bash or WSL2): pipx install pre-commit, or use WSL + brew
 ```
 
 Test it works:
@@ -114,13 +116,34 @@ pre-commit run --all-files
 Now try to commit a hardcoded secret:
 
 ```bash
-echo 'AWS_SECRET = "AKIAIOSFODNN7EXAMPLE"' >> app/auth-service/main.py
+echo 'AWS_SECRET = "'$(printf '%s%s' 'AKIA' 'IOSFODNN7EXAMPLE')'"' >> app/auth-service/main.py
 git add app/auth-service/main.py
 git commit -m "test: this should be blocked"
 # Gitleaks fires before the commit is created. The secret never enters git history.
 ```
 
-Revert the test line before continuing.
+Revert the test line before continuing:
+
+```bash
+git restore --staged app/auth-service/main.py
+git checkout app/auth-service/main.py
+```
+
+### `pre-commit run --all-files` — expected failures at Stage 3
+
+**Yes, this is OK.** Stage 3 cares that **security hooks pass** (Gitleaks, Ruff, Hadolint). You do **not** need every hygiene hook green before continuing.
+
+| Hook | Common failure | OK at Stage 3? | What to do |
+|---|---|---|---|
+| Gitleaks | Blocks fake secrets | Must **pass** | This is the gate you are learning |
+| Ruff / Hadolint | Python/Dockerfile lint | Should **pass** on `app/` | Fix real lint issues |
+| check-yaml | `.github/workflows/ci.yaml` | **Expected skip** | Workflow embeds Python in `run:` blocks — excluded from YAML lint |
+| check-json | Grafana dashboards (Stage 7) | Fixed in repo | Duplicate `options` keys in exported JSON |
+| terraform_validate | Terraform ≥ 1.6 required | **Expected skip** | Only needed in **Stage 8** — run manually: `pre-commit run terraform_validate --hook-stage manual` after `brew upgrade terraform` |
+
+If Gitleaks and Ruff pass, your local security gate is working. `make check-3` only warns if `pre-commit run --all-files` fails — it does not block Stage 3.
+
+**macOS:** use `brew install pre-commit`, not `pip3` (PEP 668 “externally managed environment” error).
 
 ---
 
@@ -244,72 +267,73 @@ docker run --rm -v "$(pwd)/stages/stage-3-security-gates/dast:/zap/wrk:rw" \
 This is the most important part of Stage 3. Run each test. Watch it fail.
 Then revert and watch it pass. This is the muscle memory that matters.
 
+**Full walkthrough with commands, dry-runs, and exact terminal/CI output:**
+[LAB-GUIDE.md §3.4 — Break each gate on purpose](../docs/LAB-GUIDE.md#34--break-each-gate-on-purpose)
+
+Quick reference:
+
+| # | Gate | Break | Done = you see |
+|---|---|---|---|
+| 1 | Gitleaks | Fake AWS key in Python | `Failed`, `RuleID: aws-access-token`, commit blocked |
+| 2 | Semgrep | `subprocess.run(..., shell=True)` | `subprocess-shell-true`, exit 1 |
+| 3 | Checkov | Remove `HEALTHCHECK` from Dockerfile | `CKV_DOCKER_2` **FAILED** in log |
+| 4 | Trivy | `FROM python:3.8-slim` | CVE table, `HIGH`/`CRITICAL`, exit 1 |
+
 ### Test 1 — Gitleaks (Secrets Scan)
 
-```python
-# Temporarily add to app/auth-service/main.py:
-AWS_ACCESS_KEY = "AKIAIOSFODNN7EXAMPLE"
+```bash
+echo 'AWS_KEY = "'$(printf '%s%s' 'AKIA' 'IOSFODNN7EXAMPLE')'"' >> app/auth-service/main.py
+git add app/auth-service/main.py && git commit -m "test: trigger gitleaks"
+# pre-commit blocks locally — OR push to fail CI job "Secrets Scan (Gitleaks)"
+git restore --staged app/auth-service/main.py && git checkout app/auth-service/main.py
 ```
-
-Push it. Gitleaks fails. The pipeline stops before building any image.
-Revert. Push again. Pipeline goes green.
 
 ### Test 2 — Trivy (CVE Scan)
 
-```dockerfile
-# Temporarily change any Dockerfile's first line to:
-FROM python:3.8-slim
-```
+```bash
+# Dry-run without building:
+trivy image --exit-code 1 --severity CRITICAL,HIGH --ignore-unfixed python:3.8-slim
 
-Push it. Trivy finds CRITICAL CVEs in the old base image. Build fails.
-Revert to `python:3.12-slim`. Push. Pipeline goes green.
+# CI break: change app/auth-service/Dockerfile first line to FROM python:3.8-slim, push, revert
+```
 
 ### Test 3 — Semgrep (SAST)
 
-```python
-# Temporarily add to app/ledger-service/main.py:
-import subprocess
-result = subprocess.run(request.query_params.get("cmd"), shell=True)
+```bash
+# Dry-run:
+python3 -m venv /tmp/sec-gates-venv && /tmp/sec-gates-venv/bin/pip install semgrep
+# (add bad subprocess line — see LAB-GUIDE §3.4)
 ```
 
-Push it. Semgrep flags command injection. Pipeline fails at SAST stage.
-Revert. Push again. Pipeline goes green.
+Or push `subprocess.run(..., shell=True)` into a route — CI job **`SAST (Semgrep)`** goes red.
 
-### Test 4 — Checkov (IaC)
+### Test 4 — Checkov (IaC / Dockerfile)
 
-```yaml
-# Temporarily remove the securityContext block from any deployment.yaml
-# (comment out the entire securityContext section)
+```bash
+# Dry-run: remove HEALTHCHECK lines, scan copy — see LAB-GUIDE §3.4
+# CI: edit app/auth-service/Dockerfile, push, read "IaC Scan (Checkov)" log
 ```
 
-Push the infra repo change. Checkov reports a HIGH finding (missing securityContext).
-Pipeline fails. Restore securityContext. Push. Pipeline goes green.
+Kubernetes Checkov findings are **evidence-only** in CI until Stage 4 (Kyverno enforces them).
 
 ---
 
 ## What Each Failure Looks Like
 
-Save these error outputs — they prove the gates work:
+See [LAB-GUIDE §3.4](../docs/LAB-GUIDE.md#34--break-each-gate-on-purpose) for copy-paste terminal output. Summary:
 
-```
-# Gitleaks output:
-Finding: AWS Access Key
-Rule: aws-access-key-id
-File: app/auth-service/main.py
-Line: X
+```text
+# Gitleaks:
+RuleID: aws-access-token  |  leaks found: 1
 
-# Trivy output:
-CRITICAL: CVE-2023-XXXXX — python3.8 base image
-Fixed version: python:3.12-slim
+# Semgrep:
+python.lang.security.audit.subprocess-shell-true  |  Blocking
 
-# Semgrep output:
-app/ledger-service/main.py:X — subprocess-shell-true
-  Command injection via shell=True with user-controlled input
-  OWASP A03:2021 — Injection
+# Checkov:
+CKV_DOCKER_2: HEALTHCHECK ... FAILED  |  Failed checks: 1
 
-# Checkov output:
-Check: CKV_K8S_30 — "Ensure that the securityContext is applied to pods"
-FAILED for resource: kubernetes_deployment.auth-service
+# Trivy:
+CVE-2024-6345  |  HIGH  |  exit code 1
 ```
 
 ---
@@ -399,13 +423,29 @@ That is Kyverno. Stage 4.
 
 ## Before You Move On
 
-Run the health check to confirm this stage is working:
+Full walkthrough (terminal output, done checklist, what Stage 4 adds):
+[LAB-GUIDE.md — Stage 3 complete](../docs/LAB-GUIDE.md#stage-3-complete--done-checklist-move-to-stage-4)
+
+**Quick verify:**
 
 ```bash
-bash scripts/health-check.sh 3
+make check-3
 ```
 
-Green output = ready for the next stage.
-Red output = something needs fixing. The message tells you what.
+**Done when** you see:
+
+```text
+All checks passed. Ready for the next stage.
+```
+
+Plus you proved Gitleaks blocks a fake secret in the terminal (`Failed`, `exit code: 1`, commit never created). Cosign from Stage 1 counts — no need to regenerate keys.
+
+**Portfolio (optional):** screenshot terminal Gitleaks block or one red GitHub Actions security job.
+
+### DevSecOps lesson
+
+Security belongs **in the pipeline**, not at the end. Stage 3 stacks gates (secrets → SAST → IaC → image CVEs → signing) so bad code **stops before deploy**. One tool is never enough — each gate covers a different layer. Catch early (pre-commit + CI), fail fast, prove what you shipped (Cosign). Stage 4 closes the cluster door for anything that bypasses CI.
+
+Full note: [LAB-GUIDE § Stage 3 lesson](../docs/LAB-GUIDE.md#devsecops-lesson--stage-3-in-one-paragraph)
 
 ## → Next: [Stage 4 — Admission Control](../stage-4-admission-control/README.md)

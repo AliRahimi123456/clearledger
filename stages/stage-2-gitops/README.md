@@ -75,7 +75,7 @@ chmod +x argocd && sudo mv argocd /usr/local/bin/
 
 # Windows: winget install ArgoProj.ArgoCD
 
-argocd login argocd.local --username admin --password YOUR_PASSWORD --insecure
+argocd login argocd.local --username admin --password YOUR_PASSWORD --insecure --grpc-web
 ```
 
 ### 4. Connect the Infra Repo
@@ -105,11 +105,25 @@ argocd app get clearledger
 The ArgoCD UI at `https://argocd.local` shows the full resource graph:
 which pods, services, and deployments are in sync vs out of sync.
 
+### Red pods or "Progressing" after the first sync?
+
+Normal if `manifests/netpol/` is still in `clearledger-infra` (older lab copies). Network policies belong in **`infra/deferred-by-stage/`** and are applied in **Stage 6**, not via ArgoCD in Stage 2.
+
+**Fix:** delete `manifests/netpol/` on GitHub, sync ArgoCD, delete cluster policies, restart auth/ledger. Full walkthrough: [LAB-GUIDE.md — Stage 2](../../docs/LAB-GUIDE.md#if-the-ui-shows-red-pods-or-progressing-read-this-before-the-screenshot).
+
 ---
 
 ## Prove the GitOps Contract
 
 This is the most important step in Stage 2. Run it.
+
+**What this proves:** `kubectl` changes the **cluster**, not Git. ArgoCD should show **OutOfSync**, then `selfHeal` restores the image from `clearledger-infra`.
+
+**Prerequisite:** ArgoCD must manage deployments, not only top-level files. The Application manifest sets `directory.recurse: true` so `manifests/auth-service/` and other subfolders are included. Verify:
+
+```bash
+argocd app resources clearledger --grpc-web | grep Deployment
+```
 
 ```bash
 # Manually change something in the cluster — bypass Git entirely
@@ -122,11 +136,14 @@ kubectl get deployment auth-service -n clearledger \
   -o jsonpath='{.spec.template.spec.containers[0].image}'
 # Output: DOCKER_USERNAME/clearledger-auth-service:fake-tag
 
+# ArgoCD should report OutOfSync (Git unchanged)
+argocd app get clearledger --grpc-web | grep "Sync Status"
+
 # Wait 3 minutes. ArgoCD's sync interval is 3 minutes by default.
 # Then check again:
 kubectl get deployment auth-service -n clearledger \
   -o jsonpath='{.spec.template.spec.containers[0].image}'
-# Output: DOCKER_USERNAME/clearledger-auth-service:ORIGINAL_SHA
+# Output: image from clearledger-infra (ORIGINAL_SHA), not fake-tag
 ```
 
 ArgoCD reverted your change. Nobody can drift the cluster from Git.
@@ -185,13 +202,16 @@ ever reaches Git.
 
 ## Before You Move On
 
-Run the health check to confirm this stage is working:
-
 ```bash
-bash scripts/health-check.sh 2
+make check-2
 ```
 
-Green output = ready for the next stage.
-Red output = something needs fixing. The message tells you what.
+Green output = ready for Stage 3.
+
+### DevSecOps lesson
+
+**Git is the contract; ArgoCD enforces it.** CI updates `clearledger-infra`; ArgoCD keeps the cluster in sync and reverts manual drift (`selfHeal`). Deployments become auditable and repeatable — no human `kubectl` deploy step.
+
+Full note: [LAB-GUIDE § Stage 2 lesson](../../docs/LAB-GUIDE.md#devsecops-lesson--stage-2-in-one-paragraph)
 
 ## → Next: [Stage 3 — Security Gates](../stage-3-security-gates/README.md)

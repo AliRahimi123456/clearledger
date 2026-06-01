@@ -1,0 +1,27 @@
+# Kyverno Helm values for the ClearLedger lab (chart 3.2.x / Kyverno 1.12.x).
+#
+# bitnami/kubectl was removed from Docker Hub — disable cleanup cronjobs in the lab
+# (they only prune old PolicyReports) and point helm hooks at the legacy image so
+# uninstall/upgrade hooks do not hang on ImagePullBackOff.
+
+replicaCount: 1
+
+webhooksCleanup:
+  image:
+    repository: bitnamilegacy/kubectl
+    tag: "1.28.5"
+
+policyReportsCleanup:
+  image:
+    repository: bitnamilegacy/kubectl
+    tag: "1.28.5"
+
+cleanupJobs:
+  admissionReports:
+    enabled: false
+  clusterAdmissionReports:
+    enabled: false
+  ephemeralReports:
+    enabled: false
+  clusterEphemeralReports:
+    enabled: false

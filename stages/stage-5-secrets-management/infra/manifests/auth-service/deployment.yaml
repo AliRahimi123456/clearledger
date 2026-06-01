@@ -48,6 +48,13 @@ spec:
         # The sidecar stays running to renew the Vault token before TTL expiry.
         # Secrets are refreshed on renewal — enables zero-downtime rotation.
         vault.hashicorp.com/agent-pre-populate-only: "false"
+        vault.hashicorp.com/agent-set-security-context: "true"
+        vault.hashicorp.com/agent-run-as-user: "1000"
+        vault.hashicorp.com/agent-run-as-group: "1000"
+        vault.hashicorp.com/agent-requests-cpu: "50m"
+        vault.hashicorp.com/agent-requests-mem: "64Mi"
+        vault.hashicorp.com/agent-limits-cpu: "200m"
+        vault.hashicorp.com/agent-limits-mem: "128Mi"
     spec:
       serviceAccountName: auth-service
       # Vault Kubernetes auth requires the projected service account token (CIS 5.1.6 trade-off).
@@ -58,15 +65,9 @@ spec:
         runAsGroup: 1000
         fsGroup: 1000
 
-      # ── emptyDir volumes ────────────────────────────────────────────────────
-      # readOnlyRootFilesystem: true prevents any writes to the container layer.
-      # Vault agent writes to /vault/secrets — this MUST be an emptyDir volume
-      # or the sidecar will crashloop with a permission error.
-      # uvicorn also needs a writable /tmp for its worker process socket.
+      # /vault/secrets volume + mount are created by the Vault agent injector webhook.
+      # uvicorn needs a writable /tmp when readOnlyRootFilesystem is true.
       volumes:
-        - name: vault-secrets
-          emptyDir:
-            medium: Memory   # secrets stay in RAM, never touch disk
         - name: tmp
           emptyDir: {}
 
@@ -91,9 +92,6 @@ spec:
               value: "auth-service"
 
           volumeMounts:
-            - name: vault-secrets
-              mountPath: /vault/secrets
-              readOnly: true    # app can read but not write secrets
             - name: tmp
               mountPath: /tmp
 
@@ -102,38 +100,31 @@ spec:
               memory: "128Mi"
               cpu: "100m"
             limits:
-              memory: "256Mi"
+              memory: "384Mi"
               cpu: "500m"
 
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 5
+            failureThreshold: 24
           livenessProbe:
             httpGet:
               path: /health
               port: 8000
-            initialDelaySeconds: 15
             periodSeconds: 10
             failureThreshold: 3
-
           readinessProbe:
             httpGet:
               path: /health
               port: 8000
-            initialDelaySeconds: 5
             periodSeconds: 5
+            failureThreshold: 6
 
           securityContext:
+            runAsNonRoot: true
             allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true   # still enforced — emptyDirs handle writes
+            readOnlyRootFilesystem: true
             capabilities:
               drop: [ALL]
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: auth-service
-  namespace: clearledger
-spec:
-  selector:
-    app: auth-service
-  ports:
-    - port: 80
-      targetPort: 8000

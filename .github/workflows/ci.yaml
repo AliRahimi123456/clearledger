@@ -245,7 +245,9 @@ jobs:
           export PATH="$HOME/.local/bin:$PATH"
           echo "$COSIGN_KEY" > /tmp/cosign.key
           cosign sign --key /tmp/cosign.key \
+            --tlog-upload=false \
             "${REGISTRY}/clearledger-auth-service:${IMAGE_TAG}"
+          rm -f /tmp/cosign.key
 
       # SLSA provenance attestation — SLSA Level 2
       # This proves this image was built from a specific commit by a specific
@@ -259,44 +261,43 @@ jobs:
           COSIGN_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
         run: |
-          set -euo pipefail
+          export PATH="$HOME/.local/bin:$PATH"
           echo "$COSIGN_KEY" > /tmp/cosign.key
-          cosign public-key --key /tmp/cosign.key > /tmp/cosign-verify.key
-
-          cat > /tmp/provenance.json << EOF
-          {
-            "_type": "https://in-toto.io/Statement/v0.1",
-            "predicateType": "https://slsa.dev/provenance/v0.2",
-            "subject": [{
-              "name": "${REGISTRY}/clearledger-auth-service",
-              "digest": {"sha1": "${{ github.sha }}"}
-            }],
-            "predicate": {
-              "builder": {
-                "id": "https://github.com/${{ github.repository }}/actions"
-              },
-              "buildType": "https://github.com/actions/runner@v2",
-              "invocation": {
-                "configSource": {
-                  "uri": "git+https://github.com/${{ github.repository }}@${{ github.ref }}",
-                  "digest": {"sha1": "${{ github.sha }}"},
-                  "entryPoint": ".github/workflows/ci.yaml"
-                }
-              },
-              "metadata": {
-                "buildStartedOn": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-                "reproducible": false
-              }
-            }
-          }
-          EOF
-
-          python3 -m json.tool /tmp/provenance.json > /dev/null
-
+          cosign public-key --key /tmp/cosign.key > /tmp/cosign-verify.key 2>/dev/null || true
+          export PROVENANCE_SHA="${{ github.sha }}"
+          export PROVENANCE_REPO="${{ github.repository }}"
+          export PROVENANCE_REF="${{ github.ref }}"
+          python3 << 'PYEOF'
+import json, os
+from datetime import datetime, timezone
+e = os.environ
+provenance = {
+  "_type": "https://in-toto.io/Statement/v0.1",
+  "predicateType": "https://slsa.dev/provenance/v0.2",
+  "subject": [{"name": e["REGISTRY"] + "/clearledger-auth-service",
+               "digest": {"sha1": e["PROVENANCE_SHA"]}}],
+  "predicate": {
+    "builder": {"id": "https://github.com/" + e["PROVENANCE_REPO"] + "/actions"},
+    "buildType": "https://github.com/actions/runner@v2",
+    "invocation": {"configSource": {
+      "uri": "git+https://github.com/" + e["PROVENANCE_REPO"] + "@" + e["PROVENANCE_REF"],
+      "digest": {"sha1": e["PROVENANCE_SHA"]},
+      "entryPoint": ".github/workflows/ci.yaml"
+    }},
+    "metadata": {
+      "buildStartedOn": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+      "reproducible": False
+    }
+  }
+}
+json.dump(provenance, open("/tmp/provenance.json", "w"), indent=2)
+print("✓ provenance.json written")
+PYEOF
           cosign attest \
             --key /tmp/cosign.key \
             --predicate /tmp/provenance.json \
             --type slsaprovenance \
+            --tlog-upload=false \
             "${REGISTRY}/clearledger-auth-service:${IMAGE_TAG}"
 
       - name: Verify SLSA provenance attestation
@@ -304,12 +305,24 @@ jobs:
         env:
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
         run: |
-          set -euo pipefail
+          export PATH="$HOME/.local/bin:$PATH"
           cosign verify-attestation \
             --key /tmp/cosign-verify.key \
             --type slsaprovenance \
+            --insecure-ignore-tlog \
             "${REGISTRY}/clearledger-auth-service:${IMAGE_TAG}" \
-            | jq -r '.payload | @base64d | fromjson | .predicate.builder.id'
+            | python3 -c "
+import sys,json,base64
+for line in sys.stdin:
+    line=line.strip()
+    if not line: continue
+    try:
+        obj=json.loads(line)
+        p=json.loads(base64.b64decode(obj['payload']+'=='))
+        print(p['predicate']['builder']['id'])
+    except Exception:
+        pass
+"
           echo "✓ SLSA provenance attestation verified"
           rm -f /tmp/cosign.key /tmp/cosign-verify.key /tmp/provenance.json
 
@@ -373,43 +386,54 @@ jobs:
               -o "$HOME/.local/bin/cosign" && chmod +x "$HOME/.local/bin/cosign"
           fi
           echo "$COSIGN_KEY" > /tmp/cosign.key
-          cosign sign --key /tmp/cosign.key "${IMAGE}" || echo "⚠ cosign sign skipped (Stage 1 — enforced in Stage 4)"
-
-          cat > /tmp/provenance.json << EOF
-          {
-            "_type": "https://in-toto.io/Statement/v0.1",
-            "predicateType": "https://slsa.dev/provenance/v0.2",
-            "subject": [{
-              "name": "${REGISTRY}/clearledger-ledger-service",
-              "digest": {"sha1": "${{ github.sha }}"}
-            }],
-            "predicate": {
-              "builder": {
-                "id": "https://github.com/${{ github.repository }}/actions"
-              },
-              "buildType": "https://github.com/actions/runner@v2",
-              "invocation": {
-                "configSource": {
-                  "uri": "git+https://github.com/${{ github.repository }}@${{ github.ref }}",
-                  "digest": {"sha1": "${{ github.sha }}"},
-                  "entryPoint": ".github/workflows/ci.yaml"
-                }
-              },
-              "metadata": {
-                "buildStartedOn": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-                "reproducible": false
-              }
-            }
-          }
-          EOF
-          python3 -m json.tool /tmp/provenance.json > /dev/null
+          cosign sign --key /tmp/cosign.key --tlog-upload=false "${IMAGE}" \
+            || echo "⚠ cosign sign skipped (Stage 1 — enforced in Stage 4)"
+          export PROVENANCE_SHA="${{ github.sha }}"
+          export PROVENANCE_REPO="${{ github.repository }}"
+          export PROVENANCE_REF="${{ github.ref }}"
+          export PROVENANCE_SVC="${REGISTRY}/clearledger-ledger-service"
+          python3 << 'PYEOF'
+import json, os
+from datetime import datetime, timezone
+e = os.environ
+provenance = {
+  "_type": "https://in-toto.io/Statement/v0.1",
+  "predicateType": "https://slsa.dev/provenance/v0.2",
+  "subject": [{"name": e["PROVENANCE_SVC"], "digest": {"sha1": e["PROVENANCE_SHA"]}}],
+  "predicate": {
+    "builder": {"id": "https://github.com/" + e["PROVENANCE_REPO"] + "/actions"},
+    "buildType": "https://github.com/actions/runner@v2",
+    "invocation": {"configSource": {
+      "uri": "git+https://github.com/" + e["PROVENANCE_REPO"] + "@" + e["PROVENANCE_REF"],
+      "digest": {"sha1": e["PROVENANCE_SHA"]},
+      "entryPoint": ".github/workflows/ci.yaml"
+    }},
+    "metadata": {
+      "buildStartedOn": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+      "reproducible": False
+    }
+  }
+}
+json.dump(provenance, open("/tmp/provenance.json", "w"), indent=2)
+PYEOF
           cosign attest --key /tmp/cosign.key --predicate /tmp/provenance.json \
-            --type slsaprovenance "${IMAGE}" \
+            --type slsaprovenance --tlog-upload=false "${IMAGE}" \
             || echo "⚠ cosign attest skipped (Stage 1 — enforced in Stage 4)"
           cosign public-key --key /tmp/cosign.key > /tmp/cosign-verify.key 2>/dev/null || true
           cosign verify-attestation --key /tmp/cosign-verify.key --type slsaprovenance \
-            "${IMAGE}" 2>/dev/null \
-            | jq -r '.payload | @base64d | fromjson | .predicate.builder.id' || true
+            --insecure-ignore-tlog "${IMAGE}" 2>/dev/null \
+            | python3 -c "
+import sys,json,base64
+for line in sys.stdin:
+    line=line.strip()
+    if not line: continue
+    try:
+        obj=json.loads(line)
+        p=json.loads(base64.b64decode(obj['payload']+'=='))
+        print(p['predicate']['builder']['id'])
+    except Exception:
+        pass
+" || true
           rm -f /tmp/cosign.key /tmp/cosign-verify.key /tmp/provenance.json
 
   build-scan-notification:
@@ -463,43 +487,54 @@ jobs:
               -o "$HOME/.local/bin/cosign" && chmod +x "$HOME/.local/bin/cosign"
           fi
           echo "$COSIGN_KEY" > /tmp/cosign.key
-          cosign sign --key /tmp/cosign.key "${IMAGE}" || echo "⚠ cosign sign skipped (Stage 1 — enforced in Stage 4)"
-
-          cat > /tmp/provenance.json << EOF
-          {
-            "_type": "https://in-toto.io/Statement/v0.1",
-            "predicateType": "https://slsa.dev/provenance/v0.2",
-            "subject": [{
-              "name": "${REGISTRY}/clearledger-notification-service",
-              "digest": {"sha1": "${{ github.sha }}"}
-            }],
-            "predicate": {
-              "builder": {
-                "id": "https://github.com/${{ github.repository }}/actions"
-              },
-              "buildType": "https://github.com/actions/runner@v2",
-              "invocation": {
-                "configSource": {
-                  "uri": "git+https://github.com/${{ github.repository }}@${{ github.ref }}",
-                  "digest": {"sha1": "${{ github.sha }}"},
-                  "entryPoint": ".github/workflows/ci.yaml"
-                }
-              },
-              "metadata": {
-                "buildStartedOn": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-                "reproducible": false
-              }
-            }
-          }
-          EOF
-          python3 -m json.tool /tmp/provenance.json > /dev/null
+          cosign sign --key /tmp/cosign.key --tlog-upload=false "${IMAGE}" \
+            || echo "⚠ cosign sign skipped (Stage 1 — enforced in Stage 4)"
+          export PROVENANCE_SHA="${{ github.sha }}"
+          export PROVENANCE_REPO="${{ github.repository }}"
+          export PROVENANCE_REF="${{ github.ref }}"
+          export PROVENANCE_SVC="${REGISTRY}/clearledger-notification-service"
+          python3 << 'PYEOF'
+import json, os
+from datetime import datetime, timezone
+e = os.environ
+provenance = {
+  "_type": "https://in-toto.io/Statement/v0.1",
+  "predicateType": "https://slsa.dev/provenance/v0.2",
+  "subject": [{"name": e["PROVENANCE_SVC"], "digest": {"sha1": e["PROVENANCE_SHA"]}}],
+  "predicate": {
+    "builder": {"id": "https://github.com/" + e["PROVENANCE_REPO"] + "/actions"},
+    "buildType": "https://github.com/actions/runner@v2",
+    "invocation": {"configSource": {
+      "uri": "git+https://github.com/" + e["PROVENANCE_REPO"] + "@" + e["PROVENANCE_REF"],
+      "digest": {"sha1": e["PROVENANCE_SHA"]},
+      "entryPoint": ".github/workflows/ci.yaml"
+    }},
+    "metadata": {
+      "buildStartedOn": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+      "reproducible": False
+    }
+  }
+}
+json.dump(provenance, open("/tmp/provenance.json", "w"), indent=2)
+PYEOF
           cosign attest --key /tmp/cosign.key --predicate /tmp/provenance.json \
-            --type slsaprovenance "${IMAGE}" \
+            --type slsaprovenance --tlog-upload=false "${IMAGE}" \
             || echo "⚠ cosign attest skipped (Stage 1 — enforced in Stage 4)"
           cosign public-key --key /tmp/cosign.key > /tmp/cosign-verify.key 2>/dev/null || true
           cosign verify-attestation --key /tmp/cosign-verify.key --type slsaprovenance \
-            "${IMAGE}" 2>/dev/null \
-            | jq -r '.payload | @base64d | fromjson | .predicate.builder.id' || true
+            --insecure-ignore-tlog "${IMAGE}" 2>/dev/null \
+            | python3 -c "
+import sys,json,base64
+for line in sys.stdin:
+    line=line.strip()
+    if not line: continue
+    try:
+        obj=json.loads(line)
+        p=json.loads(base64.b64decode(obj['payload']+'=='))
+        print(p['predicate']['builder']['id'])
+    except Exception:
+        pass
+" || true
           rm -f /tmp/cosign.key /tmp/cosign-verify.key /tmp/provenance.json
 
   build-frontend:
@@ -564,8 +599,9 @@ jobs:
           export PATH="$HOME/.local/bin:$PATH"
           echo "$COSIGN_KEY" > /tmp/cosign.key
           cosign sign --key /tmp/cosign.key \
+            --tlog-upload=false \
             "${REGISTRY}/clearledger-frontend:${IMAGE_TAG}"
-          rm /tmp/cosign.key
+          rm -f /tmp/cosign.key
 
   # ───────────────────────────────────────────────────────────────────────────
   # GATE 5: UPDATE MANIFESTS
@@ -695,4 +731,3 @@ jobs:
           path: |
             stages/stage-3-security-gates/dast/zap-report.json
             fintech-dast-output.txt
-

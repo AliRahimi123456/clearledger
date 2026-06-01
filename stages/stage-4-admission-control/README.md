@@ -53,13 +53,15 @@
 helm repo add kyverno https://kyverno.github.io/kyverno/
 helm repo update
 
-helm install kyverno kyverno/kyverno \
+helm upgrade --install kyverno kyverno/kyverno \
+  --version 3.2.8 \
   --namespace kyverno \
   --create-namespace \
-  --set replicaCount=1
+  -f stages/stage-4-admission-control/infra/kyverno/values.yaml \
+  --wait --timeout=600s
 
 kubectl wait --for=condition=ready pod \
-  -l app.kubernetes.io/name=kyverno \
+  -l app.kubernetes.io/component=admission-controller \
   -n kyverno --timeout=120s
 ```
 
@@ -72,18 +74,25 @@ cat cosign.pub
 # Paste the output into infra/policies/require-signed-images.yaml
 ```
 
-### 3. Apply All Policies
+### 3. Apply the five core policies
+
+Apply the five policies that map to CIS Kubernetes Benchmark controls. Skip `verify-slsa-provenance.yaml` for now — it is an optional SLSA attestation policy (Audit mode) you can enable after the core policies are working.
 
 ```bash
-kubectl apply -f infra/policies/
+kubectl apply \
+  -f infra/policies/disallow-root.yaml \
+  -f infra/policies/disallow-privilege-escalation.yaml \
+  -f infra/policies/drop-all-capabilities.yaml \
+  -f infra/policies/require-resource-limits.yaml \
+  -f infra/policies/require-signed-images.yaml
 
 kubectl get clusterpolicy
-# NAME                          BACKGROUND   VALIDATE ACTION   READY
-# disallow-privilege-escalation  true         Enforce           true
-# disallow-root-containers        true         Enforce           true
-# drop-all-capabilities          true         Enforce           true
-# require-resource-limits        true         Enforce           true
-# require-signed-images          false        Enforce           true
+# NAME                            ADMISSION   BACKGROUND   VALIDATE ACTION   READY   AGE
+# disallow-privilege-escalation   true        true         Enforce           True    10s
+# disallow-root-containers        true        true         Enforce           True    10s
+# drop-all-capabilities           true        true         Enforce           True    10s
+# require-resource-limits         true        true         Enforce           True    10s
+# require-signed-images           true        false        Enforce           True    10s
 ```
 
 ---
@@ -105,10 +114,11 @@ spec:
       image: nginx:alpine
 EOF
 
-# Expected output:
-# Error from server: admission webhook "validate.kyverno.svc" denied the request:
-# Root containers are blocked in the clearledger namespace.
-# Set securityContext.runAsNonRoot: true
+# Expected output (multiple policies fire on a bare nginx pod):
+# Error from server: admission webhook "validate.kyverno.svc-fail" denied the request:
+# resource Pod/clearledger/root-test was blocked due to the following policies
+# disallow-root-containers:
+#   check-runAsNonRoot: validation error: Root containers are blocked...
 ```
 
 ### Scenario 2 — Missing Resource Limits
@@ -133,12 +143,20 @@ spec:
 EOF
 
 # Expected output:
-# admission webhook denied: Resource requests and limits are required for all containers.
+# Error from server: admission webhook "validate.kyverno.svc-fail" denied the request:
+# resource Pod/clearledger/nolimits-test was blocked due to the following policies
+# require-resource-limits:
+#   check-resources: 'validation error: Resource requests and limits are required for
+#     all containers. rule check-resources failed at path /spec/containers/0/resources/limits/'
 ```
 
 ### Scenario 3 — Unsigned Image
 
+**Prerequisite:** push an unsigned test image that exists on Docker Hub (see LAB-GUIDE §4.4 Scenario 3 Step 1).
+
 ```bash
+export DOCKER_USERNAME=your-dockerhub-username
+
 cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: Pod
@@ -148,7 +166,7 @@ metadata:
 spec:
   containers:
     - name: test
-      image: DOCKER_USERNAME/clearledger-auth-service:untagged
+      image: index.docker.io/${DOCKER_USERNAME}/clearledger-auth-service:unsigned-test
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
@@ -165,8 +183,14 @@ spec:
 EOF
 
 # Expected output:
-# admission webhook denied: image signature verification failed
+# Error from server: admission webhook "mutate.kyverno.svc-fail" denied the request:
+# resource Pod/clearledger/unsigned-test was blocked due to the following policies
+# require-signed-images:
+#   verify-cosign-signature: 'failed to verify image index.docker.io/.../clearledger-auth-service:unsigned-test:
+#     .attestors[0].entries[0].keys: no signatures found'
 ```
+
+Use `index.docker.io/` — not `docker.io/` — so Kyverno's `verifyImages` rule matches reliably.
 
 Save these error messages. They are evidence that the control is working.
 

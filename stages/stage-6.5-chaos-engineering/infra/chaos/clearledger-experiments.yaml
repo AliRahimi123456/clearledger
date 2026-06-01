@@ -1,104 +1,13 @@
-# WARNING: These experiments create real failures in the cluster.
-# Run them only when you can monitor the system.
-# Never run all three simultaneously.
-# Always verify recovery before running the next experiment.
+# Reference: all three ClearLedger chaos experiments (apply ONE file at a time)
+# Split manifests (used by run-chaos.sh and manual runs):
+#   auth-service-pod-delete.yaml          — Experiment 1 (automated demo)
+#   ledger-service-network-latency.yaml   — Experiment 2 (manual)
+#   notification-service-memory-hog.yaml    — Experiment 3 (manual)
 #
-# Apply one experiment at a time:
-#   kubectl apply -f auth-service-pod-delete.yaml
-#   kubectl apply -f ledger-service-network-latency.yaml
-#   kubectl apply -f notification-service-memory-hog.yaml
+# ChaosEngine resources live in namespace litmus (not clearledger).
+# Kyverno admission policies in clearledger block Litmus runner pods.
+# spec.appinfo.appns targets workloads in clearledger.
 #
-# Or use: bash stages/stage-6.5-chaos-engineering/scripts/run-chaos.sh
-# (runs pod-delete only and verifies availability during chaos)
----
-# Experiment 1: pod-delete (auth-service)
-# Kill one auth-service replica. ClearLedger should continue serving
-# requests on the remaining replica within 30 seconds.
-apiVersion: litmuschaos.io/v1alpha1
-kind: ChaosEngine
-metadata:
-  name: auth-service-pod-delete
-  namespace: clearledger
-spec:
-  appinfo:
-    appns: clearledger
-    applabel: app=auth-service
-    appkind: deployment
-  engineState: active
-  chaosServiceAccount: litmus-admin
-  experiments:
-    - name: pod-delete
-      spec:
-        components:
-          env:
-            - name: TOTAL_CHAOS_DURATION
-              value: "30"
-            - name: CHAOS_INTERVAL
-              value: "10"
-            - name: FORCE
-              value: "false"
-            # Kill only 1 pod — auth-service has 2 replicas
-            # so service remains available
-            - name: PODS_AFFECTED_PERC
-              value: "50"
-  # What to verify DURING the chaos:
-  # curl http://clearledger.local/auth/health should return 200
-  # kubectl get pods -n clearledger should show 1 auth-service Running
-  # What to verify AFTER chaos ends:
-  # kubectl get pods -n clearledger should show 2 auth-service Running
-  # ArgoCD should have auto-healed the deleted pod
----
-# Experiment 2: pod-network-latency (ledger-service)
-# Add 2000ms network latency to ledger-service for 60 seconds.
-# The auth-service HTTP call from ledger-service should timeout gracefully
-# (ledger-service has a 5-second timeout — it should return 503, not hang).
-apiVersion: litmuschaos.io/v1alpha1
-kind: ChaosEngine
-metadata:
-  name: ledger-service-network-latency
-  namespace: clearledger
-spec:
-  appinfo:
-    appns: clearledger
-    applabel: app=ledger-service
-    appkind: deployment
-  engineState: active
-  chaosServiceAccount: litmus-admin
-  experiments:
-    - name: pod-network-latency
-      spec:
-        components:
-          env:
-            - name: NETWORK_LATENCY
-              value: "2000"
-            - name: TOTAL_CHAOS_DURATION
-              value: "60"
-            - name: CONTAINER_RUNTIME
-              value: containerd
-            - name: SOCKET_PATH
-              value: /run/containerd/containerd.sock
----
-# Experiment 3: pod-memory-hog (notification-service)
-# Fill notification-service memory to 80%. Verify Kubernetes OOMKills
-# the pod and restarts it. Verify the Redis subscription recovers.
-apiVersion: litmuschaos.io/v1alpha1
-kind: ChaosEngine
-metadata:
-  name: notification-service-memory-hog
-  namespace: clearledger
-spec:
-  appinfo:
-    appns: clearledger
-    applabel: app=notification-service
-    appkind: deployment
-  engineState: active
-  chaosServiceAccount: litmus-admin
-  experiments:
-    - name: pod-memory-hog
-      spec:
-        components:
-          env:
-            - name: MEMORY_CONSUMPTION
-              value: "80"
-            - name: TOTAL_CHAOS_DURATION
-              value: "60"
+# Or run the guided demo:
+#   make demo-65
+#   bash stages/stage-6.5-chaos-engineering/scripts/run-chaos.sh

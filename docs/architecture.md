@@ -128,4 +128,5 @@ The Multipass VM IP maps to:
 | `argocd.local` | ArgoCD UI | 2 |
 | `vault.local` | Vault UI | 5 |
 | `falco.local` | Falcosidekick UI | 6 |
+| `litmus.local` | Litmus ChaosCenter UI | 6.5 |
 | `grafana.local` | Grafana UI | 7 |

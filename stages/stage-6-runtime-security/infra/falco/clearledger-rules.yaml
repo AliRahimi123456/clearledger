@@ -1,9 +1,6 @@
 # INTRODUCED: Stage 6 — Runtime Security
-# PURPOSE: Custom Falco rules detecting threats specific to ClearLedger workloads
-# FRAMEWORK: SOC2 CC7.2 — System monitoring
-#
-# Apply as a ConfigMap so Falco loads these rules alongside the default ruleset:
-#   kubectl apply -f infra/falco/clearledger-rules.yaml
+# PURPOSE: Custom Falco rules for ClearLedger workloads (health-check + reference)
+# Rules body: infra/falco/clearledger-rules-content.yaml (loaded via Helm customRules)
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -11,89 +8,60 @@ metadata:
   namespace: falco
 data:
   clearledger_rules.yaml: |
-
-    # ── Rule 1: Shell spawned inside a ClearLedger container ──────────────────
-    # No legitimate process in a FastAPI service should spawn a shell.
-    # This is the primary indicator of command injection or container escape.
     - rule: Shell Spawned in ClearLedger Container
-      desc: >
-        A shell was spawned inside a clearledger container. This could indicate
-        an attacker gaining interactive access via command injection or a
-        compromised dependency executing arbitrary code.
+      desc: A shell was spawned inside a clearledger container.
       condition: >
         spawned_process and container
-        and container.label.app in (auth-service, ledger-service, notification-service)
+        and k8smeta.ns.name = clearledger
         and proc.name in (bash, sh, zsh, ash, dash)
       output: >
         CRITICAL: Shell spawned in ClearLedger container
-        (user=%user.name container=%container.name
-        image=%container.image.repository
-        pod=%k8s.pod.name cmd=%proc.cmdline)
+        (user=%user.name container=%container.name pod=%k8smeta.pod.name cmd=%proc.cmdline)
       priority: CRITICAL
       tags: [clearledger, shell, attack]
-
-    # ── Rule 2: Sensitive file read attempt ──────────────────────────────────
-    # /etc/shadow, /etc/passwd — no application code should read these.
     - rule: Sensitive File Read in ClearLedger
       desc: A ClearLedger container attempted to read a sensitive system file.
       condition: >
         open_read and container
-        and container.label.app in (auth-service, ledger-service, notification-service)
+        and k8smeta.ns.name = clearledger
         and fd.name in (/etc/shadow, /etc/passwd, /etc/sudoers, /root/.ssh/id_rsa)
       output: >
         CRITICAL: Sensitive file read in ClearLedger
-        (file=%fd.name container=%container.name pod=%k8s.pod.name)
+        (file=%fd.name container=%container.name pod=%k8smeta.pod.name)
       priority: CRITICAL
       tags: [clearledger, file-access]
-
-    # ── Rule 3: Unexpected outbound network connection ────────────────────────
-    # ClearLedger services only communicate with known internal endpoints.
-    # Any outbound connection to an unknown IP is a data exfiltration indicator.
     - rule: Unexpected Outbound Connection from ClearLedger
-      desc: >
-        A ClearLedger container established a network connection to an unexpected
-        destination. Could indicate data exfiltration or C2 communication.
+      desc: Unexpected outbound connection from a ClearLedger container.
       condition: >
         outbound and container
-        and container.label.app in (auth-service, ledger-service, notification-service)
+        and k8smeta.ns.name = clearledger
         and not fd.sip.name in (postgres, redis, auth-service, ledger-service)
         and not fd.rip in ("127.0.0.1")
       output: >
         WARNING: Unexpected outbound connection from ClearLedger
-        (container=%container.name dest=%fd.rip:%fd.rport pod=%k8s.pod.name)
+        (container=%container.name dest=%fd.rip:%fd.rport pod=%k8smeta.pod.name)
       priority: WARNING
       tags: [clearledger, network, exfiltration]
-
-    # ── Rule 4: Unauthorized write to /vault/secrets ──────────────────────────
-    # Only the Vault agent sidecar should write to this directory.
-    # Any other process writing there is a credential tampering attempt.
     - rule: Unauthorized Write to Vault Secrets Directory
-      desc: >
-        A process other than vault-agent attempted to write to /vault/secrets.
-        This could indicate an attempt to tamper with or replace injected credentials.
+      desc: Non-vault process wrote to /vault/secrets.
       condition: >
         open_write and container
+        and k8smeta.ns.name = clearledger
         and fd.name startswith "/vault/secrets"
         and not proc.name = "vault"
       output: >
         CRITICAL: Unauthorized write to vault secrets directory
-        (proc=%proc.name container=%container.name pod=%k8s.pod.name)
+        (proc=%proc.name container=%container.name pod=%k8smeta.pod.name)
       priority: CRITICAL
       tags: [clearledger, vault, secrets]
-
-    # ── Rule 5: Package manager executed at runtime ───────────────────────────
-    # Immutable containers must not install packages after deployment.
-    # This rule catches live package installation — a sign of tampering or exploit.
     - rule: Package Manager Executed in ClearLedger Container
-      desc: >
-        A package manager or download tool was run inside a running container.
-        Immutable containers must not change after deployment.
+      desc: Package manager or download tool in running container.
       condition: >
         spawned_process and container
-        and container.label.app in (auth-service, ledger-service, notification-service)
+        and k8smeta.ns.name = clearledger
         and proc.name in (apt, apt-get, pip, pip3, curl, wget, yum, dnf)
       output: >
         WARNING: Package manager executed in running container
-        (proc=%proc.name container=%container.name pod=%k8s.pod.name)
+        (proc=%proc.name container=%container.name pod=%k8smeta.pod.name)
       priority: WARNING
       tags: [clearledger, immutability]

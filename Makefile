@@ -3,8 +3,9 @@
 	stage-0 stage-1 stage-2 stage-3 stage-4 \
 	stage-5 stage-6 stage-7 stage-8 \
 	integration-up integration-down integration-test open-local-ui \
-	open-ui open-argocd open-grafana open-vault open-falco \
+	open-ui open-argocd open-grafana open-vault open-falco open-litmus \
 	check-0 check-1 check-2 check-3 check-4 check-5 check-6 check-7 check-65 check-75 check-all \
+	demo-6 demo-65 fix-65-prereqs connect-litmus \
 	runner-status runner-logs
 
 .DEFAULT_GOAL := help
@@ -58,6 +59,11 @@ help:
 	@echo "  make open-grafana Open Grafana dashboards"
 	@echo "  make open-vault   Open HashiCorp Vault UI"
 	@echo "  make open-falco   Open Falco security UI"
+	@echo "  make open-litmus  Open Litmus ChaosCenter UI"
+	@echo "  make demo-6       Guided Falco alert demo (UI + terminal)"
+	@echo "  make fix-65-prereqs  Fix auth restarts before Stage 6.5 (netpol + probes)"
+	@echo "  make connect-litmus  Connect Litmus UI to cluster (fixes empty Overview)"
+	@echo "  make demo-65      Chaos pod-delete demo (auth-service resilience)"
 	@echo ""
 	@echo "$(CYAN)AWS (Stage 8):$(NC)"
 	@echo "  make aws-up       Provision AWS infrastructure (Terraform)"
@@ -174,6 +180,31 @@ check-5:
 check-6:
 	@bash scripts/health-check.sh 6
 
+demo-6:
+	@bash stages/stage-6-runtime-security/scripts/demo-falco-alerts.sh
+
+connect-litmus:
+	@bash stages/stage-6.5-chaos-engineering/scripts/connect-litmus-infra.sh
+
+fix-65-prereqs: fix-argocd
+
+fix-argocd:
+	@echo "$(GREEN)Stabilizing auth-service (fixes ArgoCD Progressing + restarts)...$(NC)"
+	@kubectl apply -f infra/argocd/clearledger-app.yaml 2>/dev/null || true
+	@kubectl apply -f infra/manifests/auth-service/deployment.yaml
+	@kubectl apply -f infra/deferred-by-stage/stage-6-runtime-security/netpol/network-policies.yaml
+	@kubectl rollout restart deployment/auth-service -n clearledger
+	@kubectl rollout status deployment/auth-service -n clearledger --timeout=300s || true
+	@echo "$(CYAN)Pruning old auth-service ReplicaSets (cleans ArgoCD tree view)...$(NC)"
+	@kubectl get rs -n clearledger -l app=auth-service -o json 2>/dev/null | \
+		python3 -c "import json,sys; [print(i['metadata']['name']) for i in json.load(sys.stdin).get('items',[]) if i.get('status',{}).get('replicas',1)==0]" | \
+		xargs -r kubectl delete rs -n clearledger 2>/dev/null || true
+	@echo ""
+	@kubectl get pods -n clearledger -l app=auth-service
+
+demo-65:
+	@bash stages/stage-6.5-chaos-engineering/scripts/run-chaos.sh
+
 check-7:
 	@bash scripts/health-check.sh 7
 
@@ -222,19 +253,19 @@ open-vault:
 	@$(OPEN_CMD) http://vault.local
 
 open-falco:
-	@echo "Opening Falco UI..."
+	@echo "Opening Falco UI (login: admin / admin)..."
 	@$(OPEN_CMD) http://falco.local
+
+open-litmus:
+	@echo "Opening Litmus ChaosCenter (login: admin / litmus)..."
+	@$(OPEN_CMD) http://litmus.local
 
 runner-status:
 	@echo "Checking GitHub Actions runner status..."
-	@multipass exec clearledger -- \
-	  sudo systemctl status actions.runner.*.service --no-pager 2>/dev/null \
-	  || echo "Runner service not found. See Stage 1 README for setup."
+	@bash scripts/runner-vm-state.sh status
 
 runner-logs:
-	@multipass exec clearledger -- \
-	  journalctl -u actions.runner.*.service --lines=50 --no-pager 2>/dev/null \
-	  || echo "Runner not installed. See Stage 1 README."
+	@bash scripts/runner-vm-state.sh logs
 
 aws-up:
 	@echo "$(YELLOW)Provisioning AWS infrastructure...$(NC)"

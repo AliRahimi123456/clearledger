@@ -62,7 +62,7 @@ The pipeline builds images from `clearledger`, pushes those images to Docker Hub
 
 Go to github.com → New Repository → Name: `clearledger-infra` → Public → Create.
 
-Push only the Kubernetes manifests to it:
+Push only `infra/manifests/` to it (not `infra/deferred-by-stage/` — that folder is for Stage 6+):
 
 ```bash
 mkdir -p /tmp/clearledger-infra
@@ -278,7 +278,10 @@ ArgoCD (inside cluster — Stage 2)
 
 **Runner shows Offline on GitHub**
 ```bash
-multipass exec clearledger -- sudo systemctl restart actions.runner.*.service
+bash scripts/runner-vm-state.sh start
+# or restart after config changes:
+multipass exec clearledger -- bash -lc \
+  'svc=$(systemctl list-units --type=service --all --no-legend "actions.runner.*.service" | awk "{print \$1}" | head -1); sudo systemctl restart "$svc"'
 ```
 
 **Jobs fail with "docker: command not found"**
@@ -300,7 +303,15 @@ Verify labels match: pipeline uses `runs-on: [self-hosted, clearledger]`, runner
 ## Before You Move On
 
 ```bash
-bash scripts/health-check.sh 1
+make check-1
 ```
+
+Green output = ready for Stage 2.
+
+### DevSecOps lesson
+
+Automate build and **record intent in Git** — do not `kubectl` deploy. CI produces signed, scanned images and updates `clearledger-infra`; the cluster gap you feel when tags change but pods do not is intentional. Stage 2 closes it with GitOps.
+
+Full note: [LAB-GUIDE § Stage 1 lesson](../../docs/LAB-GUIDE.md#devsecops-lesson--stage-1-in-one-paragraph)
 
 ## → Next: [Stage 2 — GitOps with ArgoCD](../stage-2-gitops/README.md)

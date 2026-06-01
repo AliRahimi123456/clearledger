@@ -1,0 +1,27 @@
+# Experiment 2 — network latency on ledger-service (manual, one at a time)
+# Run only after Experiment 1 completes and both auth-service replicas are Running.
+apiVersion: litmuschaos.io/v1alpha1
+kind: ChaosEngine
+metadata:
+  name: ledger-service-network-latency
+  namespace: litmus
+spec:
+  appinfo:
+    appns: clearledger
+    applabel: app=ledger-service
+    appkind: deployment
+  engineState: active
+  chaosServiceAccount: litmus-admin
+  experiments:
+    - name: pod-network-latency
+      spec:
+        components:
+          env:
+            - name: NETWORK_LATENCY
+              value: "2000"
+            - name: TOTAL_CHAOS_DURATION
+              value: "60"
+            - name: CONTAINER_RUNTIME
+              value: containerd
+            - name: SOCKET_PATH
+              value: /run/containerd/containerd.sock

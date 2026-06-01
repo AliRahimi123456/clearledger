@@ -199,6 +199,7 @@ $VMIP  argocd.local
 $VMIP  grafana.local
 $VMIP  vault.local
 $VMIP  falco.local
+$VMIP  litmus.local
 EOF
 ```
 
@@ -211,7 +212,8 @@ $ip = "PASTE_VM_IP_HERE"
 @(
   "$ip  clearledger.local",
   "$ip  argocd.local",     "$ip  grafana.local",
-  "$ip  vault.local",      "$ip  falco.local"
+  "$ip  vault.local",      "$ip  falco.local",
+  "$ip  litmus.local"
 ) | Add-Content "C:\Windows\System32\drivers\etc\hosts"
 ```
 
@@ -965,7 +967,7 @@ The pipeline does **not** deploy directly to the cluster. That is Stage 2 (ArgoC
 
 Go to github.com → New Repository → Name: `clearledger-infra` → Public → Create.
 
-Push only the Kubernetes manifests:
+Push only the Kubernetes manifests from `infra/manifests/` (not everything under `infra/`):
 
 ```bash
 mkdir -p /tmp/clearledger-infra
@@ -977,13 +979,21 @@ git add . && git commit -m "feat: initial manifests" && git push -u origin main
 cd -
 ```
 
-Stage 1 does not keep a separate copy of manifests inside `stages/stage-1-ci-pipeline/infra`. If that folder is empty or missing, that is expected. The source manifests for this stage are the root manifests:
+**Do not copy** `infra/deferred-by-stage/` into `clearledger-infra`. That folder holds manifests for later stages (for example network policies for **Stage 6**) so ArgoCD does not apply them too early.
+
+| Folder | Goes to `clearledger-infra`? | When it takes effect |
+|---|---|---|
+| `infra/manifests/` | **Yes** — Stage 1 push, ArgoCD from Stage 2 | App deployments, ingress, postgres, etc. |
+| `infra/deferred-by-stage/` | **No** — stays in the `clearledger` repo only | Manual `kubectl apply` at the stage named in the path |
+
+Stage 1 does not keep a separate copy of manifests inside `stages/stage-1-ci-pipeline/infra`. If that folder is empty or missing, that is expected. The GitOps source for this stage is:
 
 ```text
-infra/manifests/
+infra/manifests/          → clearledger-infra (ArgoCD)
+infra/deferred-by-stage/  → apply later (see README there)
 ```
 
-You copy those manifests into the separate GitHub repo named `clearledger-infra`. That repo is the real Stage 1 infra target. The app repo stays focused on application code and pipeline logic; `clearledger-infra` becomes the desired-state repo that the pipeline updates after successful builds.
+You copy `infra/manifests/` into the separate GitHub repo named `clearledger-infra`. That repo is the real Stage 1 infra target. The app repo stays focused on application code and pipeline logic; `clearledger-infra` becomes the desired-state repo that the pipeline updates after successful builds.
 
 What you proved: the infrastructure definition has its own Git history, separate from application code.
 
@@ -1154,6 +1164,42 @@ The Kubernetes Checkov scan in Stage 1 is evidence-only. It uploads findings so 
 
 DAST is also disabled by default in Stage 1. It needs a live deployed application, but Stage 1 only updates `clearledger-infra`; ArgoCD does not deploy that change until Stage 2. To enable DAST later, add a repository variable named `ENABLE_DAST` with value `true`.
 
+#### Stage 1 security posture — strict vs evidence-only
+
+Stage 1 is **not** “security turned off.” Some checks **block the pipeline**; others **run and upload evidence** so you can see what still needs work. This table is your reference — bookmark it and come back when you reach later stages.
+
+| Check | Stage 1 behavior | Blocks pipeline? | Hardened in | What changes later |
+|---|---|---|---|---|
+| Gitleaks (secrets in Git) | Runs on full history | **Yes** | Stage 3 (break exercise) | You deliberately leak a secret and watch it fail |
+| Semgrep (SAST) | Runs on Python services | **Yes** | Stage 3 (break exercise) | You inject unsafe code and watch SAST catch it |
+| Checkov (Dockerfiles) | Scans production Dockerfiles | **Yes** | Stage 3 (break exercise) | Remove `HEALTHCHECK` and watch IaC fail |
+| Checkov (Kubernetes manifests) | Scans `infra/manifests/` | **No — evidence only** | **Stage 4** | Kyverno enforces the same rules at the cluster gate |
+| Trivy (image CVEs) | Blocks fixable HIGH/CRITICAL (`--ignore-unfixed`) | **Yes** | Stage 3 (break exercise) | Downgrade base image and watch scan fail |
+| Grype (SBOM, auth-service) | Blocks fixable HIGH+ (`--only-fixed`) | **Yes** | Stage 3 | Same CVE story from a second scanner angle |
+| Syft (SBOM generation) | Generates inventory | No | Stage 3 | Used for supply-chain evidence and Grype input |
+| Cosign sign + SLSA attest | Runs after push | **No — non-blocking** | **Stage 4** | Kyverno rejects unsigned images at admission |
+| DAST (OWASP ZAP) | Disabled unless `ENABLE_DAST=true` | N/A in Stage 1 | After Stage 2 deploy | Needs a live app URL to scan |
+| Manifest update → Git | Updates `clearledger-infra` tags | **Yes** (must succeed) | Stage 2 | ArgoCD auto-syncs those tags to the cluster |
+
+**Will you remember which stage hardens what?** Probably not from memory alone — that is normal. Use this table as the map:
+
+| If Stage 1 left this loose… | Come back in… | You will… |
+|---|---|---|
+| Kubernetes Checkov findings (no `runAsNonRoot`, missing limits, etc.) | **Stage 4** | Install Kyverno; watch it **block** bad pods at admission |
+| Cosign signing errors ignored / non-blocking | **Stage 4** | Configure `require-signed-images`; unsigned images **cannot deploy** |
+| Passwords in Git / base64 K8s Secrets | **Stage 5** | Move credentials to Vault; secrets never live in YAML again |
+| Nothing watches running containers | **Stage 6** | Falco detects shell exec, crypto mining, etc. at runtime |
+| No central view of violations | **Stage 7** | Grafana dashboards show Kyverno blocks, Falco alerts, scan trends |
+
+**How to make it stick (do not rely on memory):**
+
+1. **Bookmark this section** — search the lab guide for “Stage 1 security posture”.
+2. **In Stage 3**, do the “break each gate on purpose” exercises — that is where you learn what each tool catches.
+3. **In Stage 4**, open the Checkov artifact from a Stage 1 run and compare it to what Kyverno now blocks. That connects “evidence” to “enforcement”.
+4. Run `make check-3` and `make check-4` — they verify the hardening stages actually landed.
+
+> **Design intent:** Stage 1 proves CI can build, scan, push, and update Git without you touching Docker manually. Stages 3–7 turn evidence into enforcement, runtime detection, and audit trails. Relaxations in Stage 1 are deliberate — not accidental weakening.
+
 If a Stage 1 job fails, use `docs/troubleshooting.md#stage-1-ci-troubleshooting` before changing the workflow. It covers the failures this lab commonly exposes: runner label mismatch, Docker socket permissions, Docker Hub IPv6 connectivity, missing `pip`, Gitleaks demo secrets, Checkov behavior, Trivy install problems, real Python and frontend CVEs, Cosign download issues, Syft/Grype installs, wrong manifest image paths, and DAST being too early for Stage 1.
 
 Notice what the pipeline does **not** do: it does not run `kubectl`.
@@ -1182,6 +1228,8 @@ Expected: all jobs green in about 8 minutes.
 ✓ Build + Scan frontend
 ✓ Update manifests → GitHub
 ```
+
+You may also see **DAST (OWASP ZAP + fintech API tests)** listed as **skipped** — that is expected. DAST is off until you set the repository variable `ENABLE_DAST` to `true` (after Stage 2, when the app is deployed and reachable). A skipped DAST job is not a failure.
 
 Note: this lab includes `.gitleaksignore` because some intentional demo secrets are already present in git history. Gitleaks still runs normally. The ignore file only suppresses known lab fingerprints. Do not add new findings to it unless you have confirmed they are intentional test data.
 
@@ -1225,25 +1273,39 @@ make check-1
 - **Good pipelines do not secretly mutate clusters.** This pipeline updates Git instead of running `kubectl`.
 - **The gap that remains:** the infra repo changed, but the cluster did not. Someone still has to apply the change manually. Stage 2 fixes that with GitOps.
 
+### DevSecOps lesson — Stage 1 in one paragraph
+
+**Automate the boring path first, and separate “built” from “deployed.”** Stage 1 turns `git push` into a repeatable factory: scan, build, sign, push images, then update **desired state** in `clearledger-infra` — not the cluster directly. That split is core DevSecOps: the pipeline produces **evidence** (scan reports, signed images, immutable tags tied to commit SHA) and records **intent** (which image *should* run) in Git. Security starts here too — some gates already block bad commits — but the deliberate lesson is operational: nobody SSHs to build, nobody runs `kubectl` to “deploy,” and when the infra repo changes but the cluster does not, you feel the **deployment gap** that Stage 2 closes. CI automates *building*; GitOps (next) automates *applying*.
+
 ---
 
 ## Stage 2 — GitOps with ArgoCD
 
-> Git is truth. The cluster proves it by correcting itself.
+> **Git is truth.** The infra repo says what *should* run. **ArgoCD** keeps the cluster matching that and fixes drift on its own.
 
-**Goal:** ArgoCD watches the infra repo and syncs the cluster to match. The pipeline never runs `kubectl` again.
+**Goal:** Install ArgoCD so it watches `clearledger-infra` and deploys to the cluster. CI still only updates Git; it never runs `kubectl`.
 
 ### What you need to know first
 
-**GitOps** is a deployment model where Git is the single source of truth for what should be running in the cluster. Instead of someone running `kubectl apply` or clicking "deploy" in a dashboard, a tool watches a Git repo and automatically applies any changes it sees.
+**The gap from Stage 1:** CI already builds images and updates `clearledger-infra`. The cluster did not change until someone ran `kubectl`. This stage closes that last step.
 
-**ArgoCD** is that tool. It runs inside your cluster, polls your infra Git repo every few minutes, and compares the manifests in Git to what is actually running. If they differ — whether because a new commit updated an image tag or because someone manually changed something in the cluster — ArgoCD corrects the cluster to match Git.
+| Who | Job |
+|---|---|
+| **CI** (Stage 1) | Build → scan → push images → update image tags in `clearledger-infra` |
+| **ArgoCD** (Stage 2) | Watch `clearledger-infra` → apply manifests → cluster runs what Git says |
 
-This solves every problem from Stage 0.7:
-- **Who deployed what?** Check the Git history.
-- **What is running right now?** Whatever Git says.
-- **How do you roll back?** Revert the commit.
-- **What if someone changes the cluster directly?** ArgoCD undoes it.
+```text
+push code → CI updates clearledger-infra → ArgoCD syncs cluster
+```
+
+**GitOps** means the infra repo is the official record of what should run, not “whatever the cluster happens to have.” **ArgoCD** is the controller inside Kubernetes that enforces that: new commit in Git → deploy; manual `kubectl` change → reverted back to Git.
+
+| Question | Answer |
+|---|---|
+| Who deployed what? | Git history in `clearledger-infra` |
+| What should be running? | Whatever the manifests in Git say |
+| Roll back? | Revert the commit in the infra repo |
+| Someone changed the cluster by hand? | ArgoCD undoes it (you will prove this below) |
 
 ---
 
@@ -1268,7 +1330,7 @@ Apply the ArgoCD Ingress so your browser can reach it:
 kubectl apply -f stages/stage-2-gitops/infra/argocd-ingress.yaml
 ```
 
-Open `https://argocd.local` — login: `admin` / the password from the command above.
+Open **`https://argocd.local`** (not `http://`) — login: `admin` / the password from the command above. Accept the browser certificate warning (self-signed). If the login page refreshes after Sign In without entering the app, you are almost certainly on HTTP; use HTTPS or let the ingress redirect you.
 
 Connect ArgoCD to the infra repo and apply the Application manifest:
 
@@ -1277,7 +1339,7 @@ Connect ArgoCD to the infra repo and apply the Application manifest:
 # macOS: brew install argocd
 # Linux: curl -sSL -o argocd https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64 && chmod +x argocd && sudo mv argocd /usr/local/bin/
 
-argocd login argocd.local --username admin --password YOUR_PASSWORD --insecure
+argocd login argocd.local --username admin --password YOUR_PASSWORD --insecure --grpc-web
 
 # Connect ArgoCD to the infra repo on GitHub
 # Public repo: no credentials needed
@@ -1289,28 +1351,94 @@ sed -i '' "s|YOUR_USERNAME|$(git config user.name)|g" \
   stages/stage-2-gitops/argocd/clearledger-app.yaml
 
 kubectl apply -f stages/stage-2-gitops/argocd/clearledger-app.yaml
-argocd app sync clearledger
+argocd app sync clearledger --grpc-web
 ```
 
-**Take a screenshot of ArgoCD showing all resources synced and healthy.** This is portfolio evidence.
+Confirm ArgoCD is watching **all** manifest folders (not only ingress):
+
+```bash
+argocd app resources clearledger --grpc-web | grep Deployment
+```
+
+You should see `auth-service`, `ledger-service`, `frontend`, and the other app Deployments. The Application manifest sets `directory.recurse: true` so ArgoCD reads `manifests/auth-service/`, `manifests/ledger-service/`, and so on — not just `ingress.yaml` at the top level.
+
+### If the UI shows red pods or "Progressing" (read this before the screenshot)
+
+This is a common first-sync surprise, not a broken install.
+
+**Three statuses, three meanings:**
+
+| What you see | Plain English |
+|---|---|
+| **Synced** | Git and the cluster agree on *what should exist* |
+| **Progressing** | ArgoCD is still waiting for pods to become ready |
+| **Red pod / 0/1** | A new pod is crashing or failing its health check |
+
+You can be **Synced** and **Progressing** at the same time: manifests applied, but not every pod is healthy yet.
+
+**Why it happens in Stage 2**
+
+Network policies belong to **Stage 6** (runtime security). They live in `infra/deferred-by-stage/stage-6-runtime-security/netpol/` in this repo — **not** in `infra/manifests/`.
+
+If `manifests/netpol/` is still in your **`clearledger-infra`** repo on GitHub (from an older copy of the lab), ArgoCD will keep applying it. Those policies use **default-deny** and break DNS for new pods, so you see red **0/1** pods and **Progressing** health.
+
+**Fix for Stage 2**
+
+Do **both** steps. Deleting only in the cluster is not enough — ArgoCD recreates policies from Git on the next sync.
+
+**Step 1 — remove from `clearledger-infra` on GitHub**
+
+Delete the folder `manifests/netpol/` → commit: `chore: defer network policies to Stage 6`.
+
+**Step 2 — sync and restart**
+
+```bash
+argocd app sync clearledger --grpc-web
+kubectl delete networkpolicy -n clearledger --all   # safe once Git no longer has netpol
+kubectl rollout restart deployment/auth-service deployment/ledger-service -n clearledger
+argocd app get clearledger --grpc-web | grep -E "Sync Status|Health Status"
+```
+
+Network policies stay in **`clearledger`** under `infra/deferred-by-stage/` until you apply them in Stage 6.
+
+When that looks good, continue below.
+
+---
+
+When sync finishes and health is **Healthy**, you should see the **clearledger** app in the UI with green **Healthy** and **Synced** badges — repo pointing at your `clearledger-infra` repo on `main`, path `manifests`, namespace `clearledger`. Open the app tile and the resource tree should show deployments, services, and ingresses reconciled with no red pods.
+
+From the CLI, `argocd app get clearledger` should echo the same story: `Sync Status: Synced`, `Health Status: Healthy`, and each resource listed as synced.
+
+**Take a screenshot of that view** — the app tile or the resource tree is fine. That’s your portfolio proof that GitOps is actually running.
 
 **Prove the contract — this is the aha moment:**
 
+The point is **not** to change Git. `kubectl set image` only changes what is running in the cluster. ArgoCD compares the cluster to `clearledger-infra`; if they differ, it shows **OutOfSync** and `selfHeal` puts the cluster back to match Git.
+
+Before you run the demo, confirm the app is **Healthy** (not **Progressing**) and that Deployments are managed — see the red-pods section above if not.
+
 ```bash
-# Manually change the image to a fake tag
+argocd app resources clearledger --grpc-web | grep Deployment
+```
+
+```bash
+# Manually change the image in the cluster only (Git stays the same)
 kubectl set image deployment/auth-service \
   auth-service=$DOCKER_USERNAME/clearledger-auth-service:fake-tag \
   -n clearledger
 
-# Wait 3 minutes. Do nothing.
+# ArgoCD should flip to OutOfSync within a minute or two
+argocd app get clearledger --grpc-web | grep -E "Sync Status|Health Status"
+
+# Wait for selfHeal (default sync interval is ~3 minutes)
 sleep 180
 
-# Check — ArgoCD reverted it
+# Cluster image should match clearledger-infra again — Git was never edited
 kubectl get deployment auth-service -n clearledger \
   -o jsonpath='{.spec.template.spec.containers[0].image}'
 ```
 
-The image is back to the Git version. The cluster self-corrected without being asked. That is GitOps working. If someone — even you — makes an unauthorized change to the cluster, ArgoCD reverts it within minutes.
+The image is back to the Git version. The cluster self-corrected without anyone editing the infra repo. That is GitOps: Git is the contract, ArgoCD enforces it on the cluster.
 
 ```bash
 make check-2
@@ -1323,6 +1451,10 @@ make check-2
 - How the full flow works now: push code → CI builds image → CI updates infra repo → ArgoCD syncs cluster
 - **No one runs `kubectl` to deploy anymore.** The pipeline updates Git, ArgoCD does the rest.
 
+### DevSecOps lesson — Stage 2 in one paragraph
+
+**Git is the contract; the controller enforces it.** Stage 1 wrote *what should run* into `clearledger-infra`. Stage 2 installs a reconciler — ArgoCD — that continuously compares the cluster to that repo and fixes drift. Manual `kubectl set image` does not change Git; it only changes the live cluster, and `selfHeal` puts the cluster back. That is the DevSecOps/GitOps payoff: deployments are **auditable** (Git history), **repeatable** (revert a commit to roll back), and **tamper-evident** (unauthorized cluster edits get reverted). The full chain is now push → CI updates infra Git → ArgoCD syncs cluster — still no human deploy step. Stage 3 adds security gates on the CI side; Stage 4 adds a cluster gate for anything that tries to skip them.
+
 ---
 
 ## Stage 3 — Security Gates
@@ -1330,6 +1462,8 @@ make check-2
 > Every commit passes through security checks. The gates that protect the build artifact stop the pipeline; Kubernetes hardening findings become enforcement later.
 
 **Goal:** six security tools scan every commit. Each one catches a different category of vulnerability. Some findings block immediately, such as secrets, SAST, vulnerable images, and production Dockerfile issues. Kubernetes manifest findings are collected first, then become deployment enforcement in Stage 4 with Kyverno. You will deliberately trigger each category to see exactly what it catches and why it matters.
+
+> **Reminder:** Stage 1 already ran most of these tools — some in blocking mode, some as evidence only. See [Stage 1 security posture — strict vs evidence-only](#stage-1-security-posture--strict-vs-evidence-only) for the full map of what was relaxed in Stage 1 and which later stage tightens it.
 
 ### What you need to know first
 
@@ -1353,21 +1487,32 @@ No single tool covers everything. That is why you need all six. In Stage 1, Kube
 ### 3.1 — Install pre-commit hooks
 
 ```bash
-pip install pre-commit
+# macOS (Homebrew — avoids PEP 668 "externally-managed-environment" from pip3):
+brew install pre-commit
+
+# Linux / venv (if pip3 works on your system):
+# python3 -m venv .venv && source .venv/bin/activate
+# pip install pre-commit
+
 pre-commit install
 pre-commit run --all-files
 ```
 
+If some hooks fail on first run, see [Stage 3 README — expected failures at Stage 3](../stages/stage-3-security-gates/README.md#pre-commit-run---all-files--expected-failures-at-stage-3). **Gitleaks and Ruff must pass** — YAML/Terraform issues on later-stage files are OK until you reach those stages.
+
 Test it catches secrets locally before CI does:
 
 ```bash
-echo 'AWS_SECRET = "AKIAIOSFODNN7EXAMPLE"' >> app/auth-service/main.py
+echo 'AWS_SECRET = "'$(printf '%s%s' 'AKIA' 'IOSFODNN7EXAMPLE')'"' >> app/auth-service/main.py
 git add app/auth-service/main.py && git commit -m "test"
-# Gitleaks fires and blocks the commit
+# Gitleaks fires and blocks the commit — see "What you should see" below
+git restore --staged app/auth-service/main.py
 git checkout app/auth-service/main.py
 ```
 
 The commit was blocked before it even reached Git. If the pre-commit hook was not installed, that fake AWS key would be in your Git history permanently (even if you delete the line later, Git remembers).
+
+> **Already did Cosign in Stage 1?** That counts. Stage 3 does not require regenerating keys — confirm `infra/cosign.pub` exists and GitHub has `COSIGN_PRIVATE_KEY` + `COSIGN_PASSWORD`. Stage 4 turns signing into **enforcement** at the cluster gate.
 
 ### 3.2 — Generate Cosign keys
 
@@ -1401,22 +1546,254 @@ git add . && git commit -m "ci: full DevSecOps pipeline" && git push origin main
 
 ### 3.4 — Break each gate on purpose
 
-This is where the learning happens. You are going to deliberately introduce each type of vulnerability, watch the pipeline catch it, read the error message, then revert the change.
+This is where the learning happens. For each gate: **inject the bad change → run or push → read the failure → revert → confirm green again.**
 
-| Gate | How to trigger | What you see | Why this matters |
+Use **local dry-run** commands first (fast feedback). Then push to CI for portfolio screenshots at `github.com/YOUR_USERNAME/clearledger/actions`.
+
+**Pattern for every gate:**
+
+```bash
+# 1. Break it (edit file)
+# 2. Test locally OR push to main
+# 3. Read the failure (terminal or GitHub Actions log)
+# 4. Revert
+git checkout -- path/to/file
+# 5. Confirm clean
+pre-commit run --all-files   # local
+git push origin main           # CI green again
+```
+
+---
+
+#### Gate 1 — Gitleaks (secrets)
+
+**Inject:** hardcoded AWS key in any Python file.
+
+```bash
+echo 'AWS_KEY = "'$(printf '%s%s' 'AKIA' 'IOSFODNN7EXAMPLE')'"' >> app/auth-service/main.py
+git add app/auth-service/main.py && git commit -m "test: trigger gitleaks"
+```
+
+**Done looks like (terminal — pre-commit):**
+
+```text
+🔑 Secrets scan (Gitleaks)...............................................Failed
+- hook id: gitleaks
+- exit code: 1
+
+Finding:     AWS_KEY = "REDACTED"
+RuleID:      aws-access-token
+File:        app/auth-service/main.py
+Line:        316
+```
+
+**Done looks like (CI — job `Secrets Scan (Gitleaks)`):** red ✗ on workflow; log contains `leaks found: 1` and the file path. **Build jobs do not start** — pipeline stops here.
+
+**Revert:**
+
+```bash
+git restore --staged app/auth-service/main.py 2>/dev/null
+git checkout app/auth-service/main.py
+pre-commit run gitleaks --all-files   # → Passed
+```
+
+---
+
+#### Gate 2 — Semgrep (SAST)
+
+**Inject:** command injection via `shell=True` (remote code execution if deployed).
+
+```bash
+# Add inside any route in app/auth-service/main.py (temporary test):
+#   subprocess.run(request.query_params.get("cmd"), shell=True)
+```
+
+Or dry-run on a throwaway file:
+
+```bash
+python3 -m venv /tmp/sec-gates-venv && /tmp/sec-gates-venv/bin/pip install semgrep
+cat > /tmp/semgrep-bad.py << 'EOF'
+import subprocess
+from fastapi import Request
+def bad(request: Request):
+    subprocess.run(request.query_params.get("cmd"), shell=True)
+EOF
+/tmp/sec-gates-venv/bin/semgrep \
+  --config=p/python --config=p/security-audit --config=p/owasp-top-ten --error \
+  /tmp/semgrep-bad.py
+```
+
+**Done looks like (terminal or CI job `SAST (Semgrep)`):**
+
+```text
+❯❱ python.lang.security.audit.subprocess-shell-true.subprocess-shell-true
+          ❰❰ Blocking ❱❱
+          Found 'subprocess' function 'run' with 'shell=True'. ...
+```
+
+Exit code **1**. CI: `SAST (Semgrep)` job red ✗; `Build + Scan` jobs **skipped** (they `need: sast`).
+
+**Revert:** remove the injected lines; `git checkout app/auth-service/main.py`
+
+---
+
+#### Gate 3 — Checkov (IaC / Dockerfile)
+
+**Inject:** remove `HEALTHCHECK` from a production Dockerfile (two lines at the bottom of `app/auth-service/Dockerfile`).
+
+```bash
+# Dry-run: copy Dockerfile without HEALTHCHECK, scan locally
+python3 -m venv /tmp/sec-gates-venv && /tmp/sec-gates-venv/bin/pip install checkov
+sed '/^HEALTHCHECK/,+1d' app/auth-service/Dockerfile > /tmp/Dockerfile-nohc
+mkdir -p /tmp/checkov-demo/app/auth-service
+cp /tmp/Dockerfile-nohc /tmp/checkov-demo/app/auth-service/Dockerfile
+/tmp/sec-gates-venv/bin/checkov --directory /tmp/checkov-demo --framework dockerfile
+```
+
+**Done looks like (terminal or CI job `IaC Scan (Checkov)` → Scan Dockerfiles step):**
+
+```text
+Check: CKV_DOCKER_2: "Ensure that HEALTHCHECK instructions have been added to container images"
+	FAILED for resource: /app/auth-service/Dockerfile.
+...
+Passed checks: 42, Failed checks: 1, Skipped checks: 0
+```
+
+Download artifact **`checkov-results`** → `checkov-dockerfile-results.json` for the full report.
+
+> **Note:** CI uses `--hard-fail-on HIGH,CRITICAL`. Some Dockerfile checks (including missing HEALTHCHECK) may appear as **FAILED** in the log but rate below HIGH — you still learn to read Checkov output. For a louder finding, add `EXPOSE 22` instead → **CKV_DOCKER_1** (port 22 exposed).
+
+**To break in CI:** edit `app/auth-service/Dockerfile`, commit, push; open Actions → `IaC Scan (Checkov)`.
+
+**Revert:**
+
+```bash
+git checkout app/auth-service/Dockerfile
+```
+
+---
+
+#### Gate 4 — Trivy (image CVEs)
+
+**Inject:** older base image in `app/auth-service/Dockerfile`:
+
+```bash
+sed -i '' 's/FROM python:3.12-slim/FROM python:3.8-slim/' app/auth-service/Dockerfile
+```
+
+**Dry-run (no full build — scan the base image directly):**
+
+```bash
+trivy image --exit-code 1 --severity CRITICAL,HIGH --ignore-unfixed python:3.8-slim
+```
+
+**Done looks like (terminal or CI job `Build + Scan auth-service` → Trivy step):**
+
+```text
+│ setuptools (METADATA) │ CVE-2024-6345  │ HIGH     │ fixed  │ 57.5.0 │ 70.0.0 │ ...
+│                       │ Remote code execution via download functions ...
+```
+
+Exit code **1**. Report Summary shows **37** vulnerabilities on `python:3.8-slim`. CI: `Build + Scan auth-service` red ✗; **`update-manifests` does not run** — cluster image tag unchanged.
+
+**Revert:**
+
+```bash
+git checkout app/auth-service/Dockerfile
+```
+
+---
+
+#### Summary — what “gate broken” looks like in GitHub Actions
+
+| Gate | Failed job name | Pipeline stops? | Key log phrase |
 |---|---|---|---|
-| Gitleaks | Add `AWS_KEY = "AKIAIOSFODNN7EXAMPLE"` to any Python file | Pipeline fails at Secrets Scan step | Leaked credentials are the #1 cause of cloud breaches |
-| Trivy | Change `FROM python:3.12-slim` to `FROM python:3.8-slim` in any Dockerfile | Pipeline fails at image scan with a list of CVEs | Old base images contain known, exploitable vulnerabilities |
-| Semgrep | Add `subprocess.run(request.args.get("cmd"), shell=True)` to any route | Pipeline fails at SAST step | This is a remote code execution vulnerability — an attacker could run any command on your server |
-| Checkov | Remove `HEALTHCHECK` from a production Dockerfile, or review the uploaded Kubernetes findings | Dockerfile issues fail the IaC scan; Kubernetes findings are uploaded as evidence | Dockerfile issues affect the artifact you are publishing now; Kubernetes policy enforcement comes in Stage 4 |
+| Gitleaks | `Secrets Scan (Gitleaks)` | Yes — first gate | `leaks found: 1` |
+| Semgrep | `SAST (Semgrep)` | Yes — no builds | `subprocess-shell-true` or `Blocking` |
+| Checkov | `IaC Scan (Checkov)` | Yes — no builds | `CKV_DOCKER_2` or `Failed checks:` |
+| Trivy | `Build + Scan auth-service` | Yes — no manifest update | `CVE-` + `HIGH` / `CRITICAL` |
 
-For the blocking gates, push the change, watch the specific gate fail at github.com/YOUR_USERNAME/clearledger/actions, read the error message, understand what it caught, revert the change, push again, watch it go green. For Kubernetes manifest findings, open the uploaded Checkov artifact and treat it as the backlog that Stage 4 admission control will enforce.
+After each test: **revert, push, confirm all jobs green.**
 
-**Take a screenshot of at least one pipeline failure showing a blocked security gate.** This is strong portfolio evidence — it shows you do not just set up security tools, you understand what they catch.
+**Take a screenshot of at least one red job** — portfolio evidence that you triggered and understood a security gate.
 
 ```bash
 make check-3
 ```
+
+### What you should see — terminal vs GitHub Actions
+
+Stage 3 uses **two places** to catch problems. Know which to look at:
+
+| Where | When | What runs |
+|---|---|---|
+| **Your terminal** (pre-commit) | Every `git commit` on your laptop | Gitleaks, Ruff, Hadolint, etc. |
+| **GitHub Actions** (CI) | Every push to `main` | Full pipeline: Gitleaks, Semgrep, Checkov, Trivy, Grype, Cosign |
+
+**Local secrets test — success looks like this in the terminal:**
+
+```text
+🔑 Secrets scan (Gitleaks)...............................................Failed
+- hook id: gitleaks
+- exit code: 1
+
+Finding:     AWS_SECRET = "REDACTED"
+RuleID:      aws-access-token
+File:        app/auth-service/main.py
+Line:        316
+```
+
+What that means:
+
+- **`Failed`** on the Gitleaks hook — the gate worked
+- **`exit code: 1`** — commit was **not** created (no new commit hash)
+- **`RuleID: aws-access-token`** — which rule caught it
+- Other hooks may show `Passed` or `Skipped` — that is fine
+
+After you revert the test line, confirm clean:
+
+```bash
+pre-commit run --all-files
+# Gitleaks ................................ Passed
+```
+
+**CI gate failures — look on GitHub, not only the terminal:**
+
+Push a deliberate bad change (§3.4), then open `github.com/YOUR_USERNAME/clearledger/actions`. Each gate fails in its own job:
+
+| Gate | Failed job name (approx.) | What to read in the log |
+|---|---|---|
+| Gitleaks | Secrets Scan | `leaks found`, file + line |
+| Semgrep | SAST | rule id, vulnerable code path |
+| Checkov | IaC Scan | policy id, Dockerfile or manifest path |
+| Trivy / Grype | Build + Scan * | CVE list, severity HIGH/CRITICAL |
+
+Revert the bad change, push again, watch the workflow go **green**.
+
+### Stage 3 complete — done checklist (move to Stage 4)
+
+You are **done with Stage 3** when all of these are true:
+
+| # | Check | How to verify |
+|---|---|---|
+| 1 | Pre-commit installed | `pre-commit install` ran; hooks run on commit |
+| 2 | Local secrets gate works | Fake AWS key **blocks** commit in terminal (see above) |
+| 3 | Cosign ready | `infra/cosign.pub` exists; GitHub secrets `COSIGN_*` set (Stage 1 is fine) |
+| 4 | Pipeline has all gates | `make check-3` lists gitleaks, semgrep, checkov, trivy, cosign |
+| 5 | Health check green | `make check-3` ends with **`All checks passed. Ready for the next stage.`** |
+
+**Recommended for portfolio (optional, not required to proceed):**
+
+- Screenshot of **one** blocked gate — terminal Gitleaks output **or** a red GitHub Actions job
+- Break at least one other gate in CI (Trivy, Semgrep, or Checkov) using §3.4, then revert
+
+**What Stage 3 does *not* require yet:**
+
+- Kubernetes Checkov findings blocking the pipeline (evidence only until **Stage 4**)
+- Cosign **blocking** deploys (non-blocking until **Stage 4** Kyverno)
+- DAST / ZAP (needs live app; optional later)
+
+**What “move to Stage 4” means:** CI scans code and images before they reach GitOps. Stage 4 adds **admission control** — Kyverno rejects bad pods and unsigned images **inside the cluster**, even if someone bypasses CI with `kubectl`. Run `make check-4` after Stage 4.
 
 ### What you learned in Stage 3
 
@@ -1426,6 +1803,10 @@ make check-3
 - What image signing proves and why it matters for supply chain security
 - **The pattern:** deliberately break → read the error → understand it → fix it. This is how you build operational instinct.
 
+### DevSecOps lesson — Stage 3 in one paragraph
+
+**Security is not a final review before release — it is a pipeline.** In Stage 2, any commit could reach the cluster through GitOps. Stage 3 adds automated gates that **fail fast**: secrets never enter git, vulnerable code and images never get tagged for deploy, and every artifact is signed so you can prove where it came from. No single scanner sees everything — Gitleaks, Semgrep, Checkov, and Trivy each guard a different layer — so **defense in depth** means stacking tools, not picking one. Pre-commit on your laptop plus CI on push is the same idea twice: catch problems **before** they become incidents. Stage 3 secures the **path into production**; Stage 4 secures the **cluster door** for anything that tries to bypass that path.
+
 ---
 
 ## Stage 4 — Admission Control (Kyverno)
@@ -1433,6 +1814,8 @@ make check-3
 > Even if CI passes, the cluster can still refuse.
 
 **Goal:** Kyverno intercepts every pod creation and rejects any that violate policy — before the container runtime ever sees them.
+
+> **This is where Stage 1 evidence becomes enforcement.** Kubernetes Checkov findings that did not block CI in Stage 1 now stop bad pods at the cluster gate. Cosign signing that was non-blocking in Stage 1 is now required for deployment. See [Stage 1 security posture — strict vs evidence-only](#stage-1-security-posture--strict-vs-evidence-only).
 
 ### What you need to know first
 
@@ -1444,24 +1827,144 @@ CI scanning catches problems before code is merged. But what if someone applies 
 
 The difference from CI: CI scans your code *before* it reaches the cluster. Kyverno enforces policy *at the cluster gate itself*. Together they create two layers of defense.
 
+| Policy | What it enforces | Framework |
+|---|---|---|
+| `disallow-root-containers` | `runAsNonRoot: true` | CIS K8s 5.2.6 |
+| `require-resource-limits` | CPU/memory requests and limits | CIS K8s 5.2.4 |
+| `disallow-privilege-escalation` | `allowPrivilegeEscalation: false` | CIS K8s 5.2.5 |
+| `drop-all-capabilities` | `capabilities.drop: [ALL]` | CIS K8s 5.2.7 |
+| `require-signed-images` | Cosign signature on ClearLedger images | SLSA Level 2 |
+
+All policy files live in `infra/policies/`. Kyverno itself is installed via Helm using `stages/stage-4-admission-control/infra/kyverno/values.yaml`.
+
+If install, policies, break-it scenarios, or `make check-4` fail, use [troubleshooting.md — Stage 4](troubleshooting.md#stage-4-admission-control-troubleshooting) before changing Helm charts or policy YAML.
+
 ---
 
-```bash
-helm repo add kyverno https://kyverno.github.io/kyverno/ && helm repo update
-helm install kyverno kyverno/kyverno \
-  --namespace kyverno --create-namespace --set replicaCount=1
-kubectl wait --for=condition=ready pod \
-  -l app.kubernetes.io/component=kyverno -n kyverno --timeout=120s
-```
-
-Apply all policies:
+### 4.1 — Install Kyverno
 
 ```bash
-kubectl apply -f infra/policies/
-kubectl get clusterpolicy   # all should show READY: True
+helm repo add kyverno https://kyverno.github.io/kyverno/
+helm repo update
+
+helm upgrade --install kyverno kyverno/kyverno \
+  --version 3.2.8 \
+  --namespace kyverno \
+  --create-namespace \
+  -f stages/stage-4-admission-control/infra/kyverno/values.yaml \
+  --wait --timeout=600s
 ```
 
-**Watch Kyverno block a pod — this is the aha moment:**
+The values file does two important things for the lab:
+
+1. **Disables cleanup CronJobs** — older Kyverno charts pull `bitnami/kubectl`, which was removed from Docker Hub and causes `ImagePullBackOff` on cleanup pods.
+2. **Points Helm hooks at `bitnamilegacy/kubectl`** — so future `helm uninstall` does not hang on a missing image.
+
+**What you should see:**
+
+```
+Release "kyverno" does not exist. Installing it now.
+NAME: kyverno
+NAMESPACE: kyverno
+STATUS: deployed
+...
+Kyverno version: v1.12.6
+```
+
+Verify all four controllers are running (first pull can take several minutes on a slow connection):
+
+```bash
+kubectl get pods -n kyverno
+```
+
+```
+NAME                                             READY   STATUS    RESTARTS   AGE
+kyverno-admission-controller-bd685cd4b-f6kl6     1/1     Running   0          2m
+kyverno-background-controller-66fcfc6d87-59wgt   1/1     Running   0          2m
+kyverno-cleanup-controller-5c5bf8bc6b-7kspq      1/1     Running   0          2m
+kyverno-reports-controller-5cdd6f4c48-qf5wc      1/1     Running   0          2m
+```
+
+If pods stay in `ContainerCreating` for a long time, the node is still pulling images from `ghcr.io/kyverno`. Wait — do not start a second Helm install on top of a partial one.
+
+---
+
+### 4.2 — Confirm your Cosign public key is in the policy
+
+Stage 3 created `infra/cosign.pub`. Kyverno uses that key to verify image signatures at admission time.
+
+```bash
+cat infra/cosign.pub
+grep -A5 "publicKeys" infra/policies/require-signed-images.yaml
+```
+
+The policy ships with a placeholder — you **must** paste your key before applying. Open `infra/policies/require-signed-images.yaml`, replace `PASTE_YOUR_COSIGN_PUBLIC_KEY_HERE` with the full contents of `infra/cosign.pub` (including the `-----BEGIN PUBLIC KEY-----` lines):
+
+```yaml
+                - keys:
+                    publicKeys: |-
+                      -----BEGIN PUBLIC KEY-----
+                      MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE...
+                      -----END PUBLIC KEY-----
+```
+
+Your key will differ from the example above — it must match the key your CI uses to sign images in Stage 3.
+
+---
+
+### 4.3 — Apply the five core policies
+
+Apply the five policies that map to CIS controls. **Do not** apply `verify-slsa-provenance.yaml` yet — it is an optional SLSA attestation policy (Audit mode) for a later enhancement.
+
+The `require-signed-images` policy includes `failurePolicy: Fail` and `webhookTimeoutSeconds: 30` — without these, Kyverno may allow pods through when signature verification cannot reach the registry.
+
+```bash
+kubectl apply \
+  -f infra/policies/disallow-root.yaml \
+  -f infra/policies/disallow-privilege-escalation.yaml \
+  -f infra/policies/drop-all-capabilities.yaml \
+  -f infra/policies/require-resource-limits.yaml \
+  -f infra/policies/require-signed-images.yaml
+```
+
+Wait a few seconds, then confirm all policies show `READY: True` and `VALIDATE ACTION: Enforce`:
+
+```bash
+kubectl get clusterpolicy
+```
+
+```
+NAME                            ADMISSION   BACKGROUND   VALIDATE ACTION   READY   AGE
+disallow-privilege-escalation   true        true         Enforce           True    10s
+disallow-root-containers        true        true         Enforce           True    10s
+drop-all-capabilities           true        true         Enforce           True    10s
+require-resource-limits         true        true         Enforce           True    10s
+require-signed-images           true        false        Enforce           True    10s
+```
+
+If `READY` stays empty, check Kyverno logs: `kubectl logs -n kyverno -l app.kubernetes.io/component=admission-controller --tail=50`.
+
+---
+
+### 4.4 — Break it on purpose (the aha moment)
+
+These three scenarios are deliberate **negative tests**. You submit a manifest you *know* is bad and confirm Kyverno rejects it **before the pod exists**. That is different from CI: Checkov told you the problem in a report; Kyverno stops the cluster from ever running the workload.
+
+Each scenario removes or violates one control. Read the denial message — it names the policy, the rule, and the field that failed. That message is audit evidence.
+
+| Scenario | What you simulate | Policy under test | Success looks like |
+|---|---|---|---|
+| 1 | Attacker applies a bare pod (no hardening) | Root, caps, privilege, limits | Four policies fire; pod `NotFound` |
+| 2 | Developer fixes securityContext but forgets limits | Resource limits only | One policy fires; pod `NotFound` |
+| 3 | Attacker pushes unsigned image to Docker Hub | Cosign signature | `require-signed-images` denies; pod `NotFound` |
+
+---
+
+#### Scenario 1 — root container (no securityContext)
+
+**What you are simulating:** Someone with `kubectl` access bypasses CI and applies a minimal pod — no `securityContext`, no resource limits. This is exactly what Stage 1 Checkov flagged as evidence; Stage 4 now **blocks** it.
+
+**What is wrong with this manifest:** The container has only a name and image. It will run as root by default, keep all Linux capabilities, and has no CPU/memory bounds.
 
 ```bash
 cat <<EOF | kubectl apply -f -
@@ -1477,18 +1980,232 @@ spec:
 EOF
 ```
 
-Expected error:
+**What you should see:**
 
 ```
-Error from server: admission webhook "validate.kyverno.svc" denied the request:
-Root containers are blocked in clearledger namespace.
+Error from server: error when creating "STDIN": admission webhook "validate.kyverno.svc-fail" denied the request:
+
+resource Pod/clearledger/root-test was blocked due to the following policies
+
+disallow-privilege-escalation:
+  check-allowPrivilegeEscalation: 'validation error: allowPrivilegeEscalation must
+    be set to false. rule check-allowPrivilegeEscalation failed at path /spec/containers/0/securityContext/'
+disallow-root-containers:
+  check-runAsNonRoot: |-
+    validation error: Root containers are blocked in the clearledger namespace. Set securityContext.runAsNonRoot: true on the pod or container.
+    . rule check-runAsNonRoot failed at path /spec/containers/0/securityContext/
+drop-all-capabilities:
+  check-capabilities: 'validation error: All containers must drop ALL capabilities.
+    rule check-capabilities failed at path /spec/containers/0/securityContext/'
+require-resource-limits:
+  check-resources: 'validation error: Resource requests and limits are required for
+    all containers. rule check-resources failed at path /spec/containers/0/resources/limits/'
 ```
 
-The pod was never created. Kyverno intercepted the request and rejected it because the manifest did not specify `runAsNonRoot: true`. This is enforcement, not just detection — the pod does not exist.
+**How to read this output:**
 
-**Take a screenshot of that error.** It is compliance evidence. It proves CIS Kubernetes Benchmark 5.2.6 is enforced — not just configured, enforced. Auditors care about the difference.
+- `validate.kyverno.svc-fail denied the request` — the API server rejected the create; nothing was stored in etcd as a running pod.
+- Four separate policies each list a **rule name** and the **JSON path** that failed (`/spec/containers/0/securityContext/` etc.).
+- One sloppy manifest hits four CIS-aligned controls at once — that is defense in depth.
 
-### 4.1 — Admission Control Exceptions
+**Verify enforcement worked:**
+
+```bash
+kubectl get pod root-test -n clearledger
+# Error from server (NotFound): pods "root-test" not found
+```
+
+If you see a pod in `Running` or `Pending`, policies are not enforcing — re-check `kubectl get clusterpolicy` shows all five `READY: True`.
+
+**Take a screenshot.** This is portfolio evidence for CIS Kubernetes Benchmark 5.2.6 — enforced, not just configured.
+
+---
+
+#### Scenario 2 — missing resource limits
+
+**What you are simulating:** A developer who read the securityContext requirements and fixed root/caps/privilege — but skipped resource limits. Common in real teams: “we hardened the container” but forgot CPU/memory bounds.
+
+**What is wrong with this manifest:** `securityContext` is correct, but there is no `resources.requests` or `resources.limits`. A container without limits can starve other workloads on the node.
+
+```bash
+cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nolimits-test
+  namespace: clearledger
+spec:
+  containers:
+    - name: test
+      image: nginx:alpine
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+EOF
+```
+
+**What you should see:**
+
+```
+Error from server: error when creating "STDIN": admission webhook "validate.kyverno.svc-fail" denied the request:
+
+resource Pod/clearledger/nolimits-test was blocked due to the following policies
+
+require-resource-limits:
+  check-resources: 'validation error: Resource requests and limits are required for
+    all containers. rule check-resources failed at path /spec/containers/0/resources/limits/'
+```
+
+**How to read this output:**
+
+- Only **one** policy appears this time — the earlier securityContext fields satisfied the other four rules.
+- The failure path `/spec/containers/0/resources/limits/` tells you exactly what to add to fix the manifest.
+- Compare this denial to Scenario 1: same webhook, fewer policies — Kyverno evaluates each rule independently.
+
+**Verify:**
+
+```bash
+kubectl get pod nolimits-test -n clearledger
+# Error from server (NotFound): pods "nolimits-test" not found
+```
+
+---
+
+#### Scenario 3 — unsigned ClearLedger image
+
+**What you are simulating:** A supply-chain attack — someone pushes a malicious image to Docker Hub under your repo name (`clearledger-auth-service`) without going through your signed CI pipeline. Stage 3 made Cosign signing possible; Stage 4 makes it **mandatory** at the cluster gate.
+
+**Why this scenario needs setup:** Kyverno verifies signatures against the **registry**, not your local machine. The image tag must **exist on Docker Hub**. A fake tag like `:unsigned` that was never pushed causes `ImagePullBackOff` after admission — that looks like a broken deploy, not a security block.
+
+**Step 1 — push a deliberately unsigned test image** (one-time):
+
+```bash
+export DOCKER_USERNAME=your-dockerhub-username   # e.g. veeno
+
+docker pull nginx:alpine
+docker tag nginx:alpine ${DOCKER_USERNAME}/clearledger-auth-service:unsigned-test
+docker push ${DOCKER_USERNAME}/clearledger-auth-service:unsigned-test
+
+# Must fail — proves the image has no Cosign signature from your pipeline key:
+cosign verify --key infra/cosign.pub \
+  index.docker.io/${DOCKER_USERNAME}/clearledger-auth-service:unsigned-test
+# Error: no signatures found
+```
+
+**Step 2 — try to deploy it with a compliant pod spec:**
+
+The pod manifest is fully hardened (securityContext + limits) so **only** the signature policy can fail. Use `index.docker.io/` in the image URL — on Kyverno 1.12, `docker.io/...` may not trigger `verifyImages` matching.
+
+```bash
+cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: Pod
+metadata:
+  name: unsigned-test
+  namespace: clearledger
+spec:
+  containers:
+    - name: test
+      image: index.docker.io/${DOCKER_USERNAME}/clearledger-auth-service:unsigned-test
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+      resources:
+        requests:
+          memory: "64Mi"
+          cpu: "50m"
+        limits:
+          memory: "128Mi"
+          cpu: "200m"
+EOF
+```
+
+**What you should see:**
+
+```
+Error from server: error when creating "STDIN": admission webhook "mutate.kyverno.svc-fail" denied the request:
+
+resource Pod/clearledger/unsigned-test was blocked due to the following policies
+
+require-signed-images:
+  verify-cosign-signature: 'failed to verify image index.docker.io/veeno/clearledger-auth-service:unsigned-test:
+    .attestors[0].entries[0].keys: no signatures found'
+```
+
+**How to read this output:**
+
+- Note the webhook name is `mutate.kyverno.svc-fail`, not `validate` — image verification runs in Kyverno’s mutate pass (digest + signature check) before the pod is admitted.
+- `no signatures found` means Kyverno reached Docker Hub, found the image, and confirmed it was **not** signed with your `infra/cosign.pub` key.
+- The pod never exists — the attacker cannot get a shell even if the image is pullable.
+
+**Verify:**
+
+```bash
+kubectl get pod unsigned-test -n clearledger
+# Error from server (NotFound): pods "unsigned-test" not found
+```
+
+**What you should NOT see** (these mean the test did not prove signature enforcement):
+
+| Symptom | What went wrong |
+|---|---|
+| Pod created, then `ImagePullBackOff` | Tag does not exist on Docker Hub — complete Step 1 first |
+| Pod created and `Running` | Image used `docker.io/...` instead of `index.docker.io/...` |
+| No `require-signed-images` in the error | Policy not applied, or `cosign.pub` not embedded in the policy YAML |
+
+**Contrast — signed image is allowed:**
+
+When the image **is** signed by your pipeline and the pod spec is compliant, admission succeeds:
+
+```bash
+# Your deployed tag (signed in CI) — should start if spec is compliant:
+kubectl get deployment auth-service -n clearledger \
+  -o jsonpath='{.spec.template.spec.containers[0].image}'
+# docker.io/veeno/clearledger-auth-service:v0.1.0
+```
+
+Existing Deployments synced before policies existed keep running. New pods using your signed tags pass verification.
+
+**Take a screenshot of the Scenario 3 denial** — it proves supply-chain enforcement, not just CI signing.
+
+---
+
+### 4.5 — Verify ClearLedger still works
+
+Kyverno enforces on **new** pod creation. Existing deployments that already passed admission (or were synced before policies existed) keep running. Confirm your app pods are healthy:
+
+```bash
+kubectl get pods -n clearledger
+```
+
+```
+NAME                                    READY   STATUS    RESTARTS   AGE
+auth-service-...                        1/1     Running   0          ...
+frontend-...                            1/1     Running   0          ...
+ledger-service-...                      1/1     Running   0          ...
+notification-service-...                1/1     Running   0          ...
+postgres-0                              1/1     Running   0          ...
+redis-...                               1/1     Running   0          ...
+```
+
+If ingress is configured:
+
+```bash
+curl -s http://clearledger.local/auth/health | jq .
+# {"status": "ok", "service": "auth-service"}
+```
+
+ArgoCD should still show **Synced** and **Healthy** — GitOps and admission control work together, not against each other.
+
+---
+
+### 4.6 — Policy exceptions (when a legitimate workload needs a bypass)
 
 Kyverno blocks every pod that violates a policy. But what happens when a legitimate workload needs to bypass a specific rule?
 
@@ -1534,11 +2251,7 @@ annotations:
   review-date: "2026-01-01"
 ```
 
-- `reason` — why the exception exists
-- `approved-by` — who authorised it
-- `review-date` — when someone should revisit whether it is still needed
-
-These have no technical effect — Kyverno ignores them. They exist so that six months from now, when someone asks "why does Postgres bypass this rule?", the answer is right there in the file. This is standard enterprise security practice.
+These have no technical effect — Kyverno ignores them. They exist so that six months from now, when someone asks "why does Postgres bypass this rule?", the answer is right there in the file.
 
 **The rules for safe exceptions:**
 
@@ -1547,16 +2260,15 @@ These have no technical effect — Kyverno ignores them. They exist so that six 
 3. **Never weaken the policy itself** — the rule stays strict for everything else
 4. **Review periodically** — exceptions should be temporary if possible, and re-evaluated on a schedule
 
-Apply the exception only if Kyverno blocks your postgres pods:
+Apply the exception **only if** Kyverno blocks your postgres pods:
 
 ```bash
 kubectl apply -f infra/policies/exceptions/postgres-root-exception.yaml
 ```
 
-Verify Kyverno still blocks other non-compliant pods:
+Verify Kyverno still blocks other non-compliant pods (same denial as Scenario 1):
 
 ```bash
-# This should still be rejected — only postgres gets the exception
 cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: Pod
@@ -1570,19 +2282,93 @@ spec:
 EOF
 ```
 
-The exception allows Postgres through while everything else remains blocked. That is the principle: exceptions are small, controlled, auditable, and as temporary as possible.
+---
+
+### 4.7 — CIS benchmark evidence (kube-bench)
+
+Kyverno enforces *what workloads* are allowed to run. **kube-bench** audits *how the cluster itself is configured* against the CIS Kubernetes Benchmark. These are two different layers — both matter for compliance evidence.
+
+```bash
+bash stages/stage-4-admission-control/scripts/run-kube-bench.sh
+```
+
+This applies a Job, waits for completion, saves JSON to `stages/stage-4-admission-control/scripts/kube-bench-report.json`, and compares against the committed baseline. On MicroK8s you will see WARN/FAIL items for flags under `/var/snap/microk8s/current/args/` — see [stage-4 README](../stages/stage-4-admission-control/README.md#48--prove-your-cluster-passes-cis-benchmark) for fixes.
+
+---
+
+### 4.8 — Health check
 
 ```bash
 make check-4
 ```
+
+**What you should see:**
+
+```
+▶ Stage 4 — Admission Control (Kyverno)
+  ✓ Kyverno is running
+  ✓ Policy disallow-root-containers — Enforce mode
+  ✓ Policy require-resource-limits — Enforce mode
+  ✓ Policy require-signed-images — Enforce mode
+  ✓ Policy disallow-privilege-escalation — Enforce mode
+  ✓ Policy drop-all-capabilities — Enforce mode
+  ✓ Kyverno correctly rejects pods without securityContext
+  ✓ kube-bench baseline exists (...)
+
+All checks passed. Ready for the next stage.
+```
+
+If kube-bench reports regressions, run the script manually and update the baseline after reviewing — that diff is audit evidence.
+
+If Kyverno install, policies, break-it scenarios, or `make check-4` fail, see [troubleshooting.md — Stage 4](troubleshooting.md#stage-4-admission-control-troubleshooting).
+
+---
+
+### Stage 4 complete — done checklist (move to Stage 5)
+
+You are **done with Stage 4** when all of these are true:
+
+| # | Check | How to verify |
+|---|---|---|
+| 1 | Kyverno running | `kubectl get pods -n kyverno` — four controllers `Running` |
+| 2 | Policies applied | `kubectl get clusterpolicy` — five policies, `READY: True`, `Enforce` |
+| 3 | Root pod blocked | Scenario 1 denial in terminal (screenshot for portfolio) |
+| 4 | Unsigned image blocked | Scenario 3 denial — push `unsigned-test` tag first, use `index.docker.io/` |
+| 5 | App still healthy | `kubectl get pods -n clearledger` — all app pods `Running` |
+| 6 | Health check green | `make check-4` ends with **`All checks passed. Ready for the next stage.`** |
+
+**Recommended for portfolio (optional):**
+
+- Screenshot of Kyverno blocking a root pod (§4.4 Scenario 1)
+- Screenshot of unsigned-image denial (§4.4 Scenario 3)
+- Screenshot of `kubectl get clusterpolicy` showing five `Enforce` policies
+
+**What Stage 4 does *not* require yet:**
+
+- `verify-slsa-provenance.yaml` (optional SLSA attestation — Audit mode, enable later)
+- Vault / runtime secrets (Stage 5)
+- Network policies (Stage 6)
+
+**What “move to Stage 5” means:** Pods are hardened and images are signed, but database passwords still live in Kubernetes Secrets committed to Git. Stage 5 moves credentials into Vault.
 
 ### What you learned in Stage 4
 
 - The difference between CI scanning (before merge) and admission control (at the cluster gate)
 - What Kyverno is: a policy engine that intercepts every Kubernetes API request
 - That enforcement means the bad resource never exists — not "we detected it after the fact"
+- How to read a Kyverno denial: policy name → rule name → JSON path that failed
 - How to write and apply cluster-wide security policies as YAML
-- **Why both CI and admission control are needed:** CI catches problems in your code, Kyverno catches everything else that touches the cluster
+- How to scope a PolicyException without weakening the policy for everyone else
+- That operational issues (Helm, image pulls, registry URL format) affect whether controls actually fire
+- **Why both CI and admission control are needed:** CI catches problems in your code; Kyverno catches everything else that touches the cluster
+
+### DevSecOps lesson — Stage 4
+
+**CI is the front door; admission control is the bouncer.** Stage 3 proved your pipeline signs images and scans manifests — but anyone with `kubectl apply` could bypass all of it. Kyverno closes that gap: every pod creation is evaluated against CIS-aligned policies before it runs. Checkov findings that were evidence-only in Stage 1 are now live enforcement. Cosign signatures that were non-blocking in Stage 1 are now required at deploy time.
+
+**Evidence beats configuration.** An auditor does not care that you *have* a policy file in Git — they care that a non-compliant pod is rejected when someone tries to create it. The break-it scenarios produce that evidence: a terminal error naming the policy, the rule, and the failed field. Screenshot those denials. They prove CIS 5.2.x and supply-chain controls are **enforced**, not just documented.
+
+**Defense in depth has a order.** CI → GitOps → admission control are three gates on the same path. Each catches what the previous one misses: CI never sees a manual `kubectl apply`; GitOps does not validate image signatures; Kyverno does not scan source code. Stacking all three is normal in regulated environments — no single gate is enough.
 
 ---
 
@@ -1590,66 +2376,336 @@ make check-4
 
 > No credentials in Git. No credentials in etcd. Vault injects them at runtime.
 
-**Goal:** delete the Kubernetes Secrets. The app keeps working. That is when secrets management clicks.
+**Goal:** delete the Kubernetes app Secrets. The app keeps working. That is when secrets management clicks.
 
 ### What you need to know first
 
 In Stage 0, you saw database passwords stored as base64-encoded strings in YAML files committed to Git. That is the default Kubernetes approach, and it has two problems:
 
-1. **Anyone with repo access can read them.** base64 is encoding, not encryption. Run `echo "..." | base64 -d` and the password is in plaintext.
-2. **Kubernetes stores Secrets in etcd unencrypted by default.** etcd is the cluster's database. Anyone with etcd access can read every Secret.
+1. **Anyone with repo access can read them.** base64 is encoding, not encryption.
+2. **Kubernetes stores Secrets in etcd unencrypted by default.**
 
-**HashiCorp Vault** is a dedicated secrets management system. Instead of storing credentials in YAML files, you store them in Vault. When a pod starts, a Vault agent sidecar (a small helper container) authenticates with Vault, retrieves the secrets, and writes them to a temporary file inside the pod. The secrets never exist in Git, never exist in etcd, and disappear when the pod stops.
+**HashiCorp Vault** holds credentials centrally. A **Vault agent** sidecar authenticates with Vault using the pod’s Kubernetes service account, reads KV secrets, and writes files under `/vault/secrets/`. The app reads those files — nothing is in Git or in `secretKeyRef` after migration.
 
-**Vault agent injection** works through Kubernetes annotations on your deployment. You add annotations like `vault.hashicorp.com/agent-inject-secret-db-password: "clearledger/auth-service"`, and Vault's admission webhook adds the sidecar container automatically.
+**Where secrets live after Stage 5:**
+
+| Location | App DB URL / JWT |
+|---|---|
+| Git / `clearledger-infra` | **No** |
+| Kubernetes `auth-service-secret` | **No** (deleted after migration) |
+| Vault KV `clearledger/data/auth-service` | **Yes** (source of truth) |
+| Pod filesystem `/vault/secrets/*` | **Yes** (injected at runtime, ephemeral) |
+
+Bootstrap values for the lab go in a **gitignored `.env`** file once — then into Vault with `seed-vault-secrets.sh`. They are **not** hardcoded in `setup.sh` or any committed file.
+
+**Order matters — do not skip steps:**
+
+```text
+.env → install Vault → setup.sh → seed-vault-secrets.sh → push clearledger-infra → wait for 2/2 pods → delete K8s app Secrets
+```
+
+If you GitOps-sync Vault deployments **before** Vault is installed and seeded, auth/ledger pods will fail until Vault is ready and KV paths exist.
 
 ---
 
+### 5.1 — Create `.env` (local only, never commit)
+
 ```bash
+cp stages/stage-5-secrets-management/.env.example \
+   stages/stage-5-secrets-management/.env
+```
+
+Edit `.env`:
+
+1. **`VAULT_TOKEN`** — choose a dev root token (same value you pass to Helm in §5.2).
+2. **`SEED_*`** — one-time values loaded **into Vault** (must match Postgres password + JWT so login still works after you delete K8s Secrets).
+
+**Copy from existing K8s Secrets** (after Stages 0–4):
+
+```bash
+kubectl get secret auth-service-secret -n clearledger \
+  -o jsonpath='{.data.database_url}' | base64 -d; echo
+kubectl get secret auth-service-secret -n clearledger \
+  -o jsonpath='{.data.jwt_secret}' | base64 -d; echo
+kubectl get secret ledger-service-secret -n clearledger \
+  -o jsonpath='{.data.database_url}' | base64 -d; echo
+```
+
+Paste into `.env` as `SEED_AUTH_DATABASE_URL`, `SEED_AUTH_JWT_SECRET`, `SEED_LEDGER_DATABASE_URL`.
+
+**If `auth-service-secret` is already gone** (you deleted too early):
+
+```bash
+# Build database URL from Postgres bootstrap secret (default lab password: changeme-stage0)
+PG_PASS=$(kubectl get secret postgres-secret -n clearledger \
+  -o jsonpath='{.data.password}' | base64 -d)
+echo "postgresql://clearledger:${PG_PASS}@postgres:5432/clearledger"
+
+# JWT: use the same value you used at Stage 0, or read from Vault if already seeded:
+kubectl exec -n vault vault-0 -- vault kv get -field=jwt_secret clearledger/auth-service 2>/dev/null \
+  || echo "(set SEED_AUTH_JWT_SECRET manually — must match tokens already issued)"
+```
+
+**Example `.env` shape** (values are yours — never commit this file):
+
+```text
+VAULT_TOKEN=my-dev-root-token
+SEED_AUTH_DATABASE_URL=postgresql://clearledger:changeme-stage0@postgres:5432/clearledger
+SEED_AUTH_JWT_SECRET=stage0-jwt-secret-change-in-production
+SEED_LEDGER_DATABASE_URL=postgresql://clearledger:changeme-stage0@postgres:5432/clearledger
+```
+
+---
+
+### 5.2 — Install Vault and the agent injector
+
+```bash
+set -a && source stages/stage-5-secrets-management/.env && set +a
+
 helm repo add hashicorp https://helm.releases.hashicorp.com && helm repo update
+
+# First install:
 helm install vault hashicorp/vault \
   --namespace vault --create-namespace \
   --set server.dev.enabled=true \
-  --set server.dev.devRootToken="root-dev-token" \
-  --set ui.enabled=true
-```
+  --set server.dev.devRootToken="${VAULT_TOKEN}" \
+  --set ui.enabled=true \
+  --set injector.enabled=true
 
-Apply the Vault Ingress so your browser can reach the UI:
+# If helm install fails with "cannot re-use a name", use upgrade instead:
+# helm upgrade --install vault hashicorp/vault \
+#   --namespace vault --create-namespace \
+#   --set server.dev.enabled=true \
+#   --set server.dev.devRootToken="${VAULT_TOKEN}" \
+#   --set ui.enabled=true \
+#   --set injector.enabled=true
 
-```bash
+kubectl wait --for=condition=ready pod \
+  -l app.kubernetes.io/name=vault -n vault --timeout=120s
+kubectl wait --for=condition=ready pod \
+  -l app.kubernetes.io/name=vault-agent-injector -n vault --timeout=120s
+
 kubectl apply -f stages/stage-5-secrets-management/infra/vault-ingress.yaml
 ```
 
-Open `http://vault.local` — token: `root-dev-token`.
+Open `http://vault.local` and sign in with **`VAULT_TOKEN` from your `.env`**.
 
-Configure Vault, store secrets, and set up Kubernetes authentication:
+**Expected — Vault pods:**
+
+```text
+NAME                                   READY   STATUS    RESTARTS   AGE
+vault-0                                1/1     Running   0          1m
+vault-agent-injector-8d6b668b4-xxxxx   1/1     Running   0          1m
+```
+
+**If `helm install` fails with “cannot re-use a name”** — Vault is already installed; use the `helm upgrade --install` block above.
+
+---
+
+### 5.3 — Configure Vault (platform + seed KV)
 
 ```bash
 bash stages/stage-5-secrets-management/infra/vault/setup.sh
+bash stages/stage-5-secrets-management/infra/vault/seed-vault-secrets.sh
 ```
 
-**IMPORTANT — update through Git, not kubectl directly.** ArgoCD has `selfHeal: true`. Any direct `kubectl apply` is reverted within 3 minutes. All changes go through Git now.
+| Script | Does | Does **not** |
+|---|---|---|
+| `setup.sh` | K8s auth, KV mount, policies, roles | Store app passwords in Git |
+| `seed-vault-secrets.sh` | `vault kv put` from `.env` `SEED_*` | Print secret values |
+
+Both scripts read **`VAULT_TOKEN` from `.env` only**.
+
+**Expected — `setup.sh` (tail):**
+
+```text
+==> Enabling Kubernetes auth method...
+==> Configuring Kubernetes auth...
+==> Enabling KV secrets engine...
+==> Creating Vault policies...
+==> Creating Kubernetes auth roles...
+==> Applying RBAC + ServiceAccounts...
+
+✓ Vault platform setup complete (no secrets written yet).
+  Next: bash stages/stage-5-secrets-management/infra/vault/seed-vault-secrets.sh
+```
+
+**Expected — `seed-vault-secrets.sh`:**
+
+```text
+==> Logging into Vault...
+==> Writing secrets to Vault KV (values are not printed)...
+======== Secret Path ========
+clearledger/data/auth-service
+======= Metadata =======
+Key                Value
+---                -----
+created_time       2026-06-01T15:31:53.538991153Z
+version            1
+✓ Secrets stored at clearledger/data/auth-service and clearledger/data/ledger-service
+```
+
+Re-running `setup.sh` / `seed-vault-secrets.sh` is safe (idempotent for the lab).
+
+**Verify metadata only** (no secret values printed):
 
 ```bash
+kubectl exec -n vault vault-0 -- vault kv metadata get clearledger/auth-service
+```
+
+```text
+Key                     Value
+---                     -----
+cas_required            false
+created_time            2026-06-01T15:31:53.538991153Z
+current_version         1
+delete_version_after    0s
+max_versions            0
+oldest_version          0
+updated_time            2026-06-01T15:31:53.538991153Z
+```
+
+---
+
+### 5.4 — GitOps: update `clearledger-infra` (fixes ArgoCD OutOfSync)
+
+ArgoCD watches **`clearledger-infra`**, not this app repo. Stage 5 must land there:
+
+1. Vault-enabled `deployment.yaml` for **auth** and **ledger**.
+2. **Delete** `manifests/auth-service/secret.yaml` and `manifests/ledger-service/secret.yaml` from the **infra repo**.
+
+**First push of Stage 5 to your infra repo:**
+
+```bash
+# Copy stage-5 deployments into this repo’s infra/ (edit DOCKER_USERNAME → your Docker Hub user)
 cp stages/stage-5-secrets-management/infra/manifests/auth-service/deployment.yaml \
    infra/manifests/auth-service/deployment.yaml
 cp stages/stage-5-secrets-management/infra/manifests/ledger-service/deployment.yaml \
    infra/manifests/ledger-service/deployment.yaml
+# sed -i '' 's/DOCKER_USERNAME/your-dockerhub-user/g' infra/manifests/auth-service/deployment.yaml
+# sed -i '' 's/DOCKER_USERNAME/your-dockerhub-user/g' infra/manifests/ledger-service/deployment.yaml
 
-# Push to infra repo — ArgoCD applies it
+git clone https://github.com/YOUR_USERNAME/clearledger-infra.git /tmp/clearledger-infra
+cp infra/manifests/auth-service/deployment.yaml /tmp/clearledger-infra/manifests/auth-service/
+cp infra/manifests/ledger-service/deployment.yaml /tmp/clearledger-infra/manifests/ledger-service/
+rm -f /tmp/clearledger-infra/manifests/auth-service/secret.yaml
+rm -f /tmp/clearledger-infra/manifests/ledger-service/secret.yaml
+
 cd /tmp/clearledger-infra
-git add manifests/ && git commit -m "feat: vault injection" && git push
+git add -A
+git status
+git commit -m "feat(stage-5): Vault injection; remove app secrets from GitOps"
+git push
 cd -
 ```
 
-Watch ArgoCD sync (2-3 minutes), then delete the K8s Secrets:
+**Expected — `git status` before commit:**
 
-```bash
-kubectl delete secret auth-service-secret -n clearledger
-kubectl delete secret ledger-service-secret -n clearledger
+```text
+modified:   manifests/auth-service/deployment.yaml
+modified:   manifests/ledger-service/deployment.yaml
+deleted:    manifests/auth-service/secret.yaml
+deleted:    manifests/ledger-service/secret.yaml
 ```
 
-**The aha moment:** run a login request — it still works:
+**If your infra repo already has Stage 5** (nothing to commit), verify ArgoCD only:
+
+```bash
+kubectl get application clearledger -n argocd \
+  -o jsonpath='sync={.status.sync.status} health={.status.health.status}{"\n"}'
+# sync=Synced health=Healthy
+```
+
+If **OutOfSync**, hard-refresh and sync:
+
+```bash
+kubectl annotate application clearledger -n argocd argocd.argoproj.io/refresh=hard --overwrite
+argocd app sync clearledger --grpc-web --prune
+```
+
+Wait until:
+
+```bash
+kubectl get application clearledger -n argocd \
+  -o jsonpath='{.status.sync.status} {.status.health.status}{"\n"}'
+# Synced Healthy
+```
+
+**Do not `kubectl apply` deployments** if ArgoCD manages the cluster — `selfHeal` reverts manual changes. Git is the contract (Stage 2).
+
+**Common rollout failures:**
+
+| Symptom | Fix |
+|---|---|
+| `Duplicate value: "vault-secrets"` | Do **not** declare a `vault-secrets` volume in `deployment.yaml` — the injector creates it |
+| `Service appeared 2 times` | Keep `Service` only in `service.yaml`, not at the bottom of `deployment.yaml` |
+| Kyverno `containers/0` `runAsNonRoot` | Add `runAsNonRoot: true` on the **app** container `securityContext`, not only on `spec.securityContext` |
+| Pods stuck `1/1` (no sidecar) | Confirm `injector.enabled=true` and deployment has `vault.hashicorp.com/agent-inject: "true"` |
+| `permission denied` in vault-agent-init | Run `setup.sh` — K8s auth role not bound to service account |
+
+---
+
+### 5.5 — Wait for Vault-injected pods, then delete K8s app Secrets
+
+**Wait until auth/ledger show Vault sidecars** (`READY 2/2` = app + vault-agent):
+
+```bash
+kubectl get pods -n clearledger -l app=auth-service
+kubectl get pods -n clearledger -l app=ledger-service
+```
+
+**Expected:**
+
+```text
+NAME                            READY   STATUS    RESTARTS   AGE
+auth-service-5756d9fcb9-bmdlr   2/2     Running   0          2m
+auth-service-5756d9fcb9-jtgss   2/2     Running   0          2m
+```
+
+Inspect sidecar pulled secrets (init container logs):
+
+```bash
+kubectl logs -n clearledger \
+  $(kubectl get pod -n clearledger -l app=auth-service -o name | head -1) \
+  -c vault-agent-init
+# ... Authentication successful, rendering templates ...
+```
+
+**Only after pods are 2/2**, delete app Secrets:
+
+```bash
+kubectl delete secret auth-service-secret ledger-service-secret -n clearledger
+```
+
+**Expected — secrets remaining:**
+
+```bash
+kubectl get secret -n clearledger
+```
+
+```text
+NAME              TYPE     DATA   AGE
+postgres-secret   Opaque   2      6d
+```
+
+`postgres-secret` is **Postgres bootstrap only** — not app credentials. That stays until you harden Postgres separately.
+
+**If delete says `NotFound`** — secrets were already removed. Continue to §5.6.
+
+---
+
+### 5.6 — The aha moment (login + injected files)
+
+```bash
+kubectl exec -n clearledger \
+  $(kubectl get pod -n clearledger -l app=auth-service -o name | head -1) \
+  -c auth-service -- ls /vault/secrets/
+```
+
+```text
+database_url
+jwt_secret
+```
 
 ```bash
 curl -s -X POST http://clearledger.local/auth/login \
@@ -1657,25 +2713,87 @@ curl -s -X POST http://clearledger.local/auth/login \
   -d '{"email":"test@clearledger.io","password":"SecurePass123"}' | jq .
 ```
 
-Now check what secrets remain in the cluster:
+**Expected:**
 
-```bash
-kubectl get secret -n clearledger
+```json
+{
+  "access_token": "<jwt-returned-by-auth-service>",
+  "token_type": "bearer"
+}
 ```
 
-The application-level secrets are gone. The credentials exist only in Vault, injected at pod startup as temporary files. Nothing in Git, nothing in etcd. **Take a screenshot** of the working login response next to the `kubectl get secret` output showing no app secrets.
+**Take a screenshot:** working login JSON + `kubectl get secret -n clearledger` showing **no** `auth-service-secret` / `ledger-service-secret`.
+
+---
+
+### 5.7 — Health check
 
 ```bash
 make check-5
 ```
 
+**What you should see:**
+
+```text
+▶ Stage 4 — Admission Control (Kyverno)
+  ✓ Kyverno is running
+  ✓ Policy disallow-root-containers — Enforce mode
+  ...
+  ✓ kube-bench matches baseline (no new FAIL regressions)
+
+▶ Stage 5 — Secrets Management (Vault)
+  ✓ Vault pod is running
+  ✓ Vault agent injector is running
+  ✓ Vault is unsealed
+  ✓ Vault Kubernetes auth method is enabled
+  ✓ auth-service-secret removed — Vault is the secret source
+  ✓ Vault injected /vault/secrets/database_url into auth-service
+
+All checks passed. Ready for the next stage.
+```
+
+If Vault injection or ArgoCD sync fails, see [troubleshooting.md — Vault Issues](troubleshooting.md#vault-issues).
+
+---
+
+### Stage 5 complete — done checklist (move to Stage 6)
+
+| # | Check | How to verify |
+|---|---|---|
+| 1 | Secrets in Vault only | `vault kv metadata get clearledger/auth-service` shows `current_version >= 1` |
+| 2 | No app secrets in infra Git | `secret.yaml` absent from `clearledger-infra/manifests/auth-service/` and `ledger-service/` |
+| 3 | ArgoCD synced | `Synced Healthy` on Application `clearledger` |
+| 4 | K8s app secrets deleted | `kubectl get secret -n clearledger` — no auth/ledger app secrets |
+| 5 | Injection works | Auth pods `2/2`; `ls /vault/secrets/` shows `database_url`, `jwt_secret` |
+| 6 | App works | Login curl returns `access_token` |
+| 7 | Health check | `make check-5` ends with **`All checks passed. Ready for the next stage.`** |
+
+**Recommended for portfolio (optional):**
+
+- Screenshot: login JSON beside `kubectl get secret -n clearledger` (only `postgres-secret` left)
+- Screenshot: auth pod `2/2` with Vault sidecar
+- Screenshot: Vault UI signed in (token from `.env`, not pasted in Git)
+
+**What Stage 5 does *not* require yet:**
+
+- Moving `postgres-secret` into Vault (Postgres bootstrap — optional hardening later)
+- Production Vault HA / auto-unseal (dev mode is intentional for the lab)
+- Falco / runtime detection (**Stage 6**)
+
+**What “move to Stage 6” means:** Credentials are out of Git and etcd, but a compromised pod can still read `/vault/secrets/*` at runtime. Stage 6 adds Falco to detect that.
+
 ### What you learned in Stage 5
 
-- Why Kubernetes Secrets are not real secrets management (base64 is not encryption, etcd stores them in plaintext)
-- What Vault does: stores secrets centrally, injects them into pods at startup via sidecar containers
-- How Vault agent injection works through deployment annotations
-- That the app keeps working after deleting K8s Secrets — the credentials now come from Vault
-- **The security improvement:** secrets are no longer in Git history, no longer in etcd, and disappear when the pod stops
+- Why Kubernetes Secrets are not secret management (encoding ≠ encryption; etcd exposure)
+- That **Vault KV** is the source of truth; `.env` is a one-time bootstrap channel, never committed
+- How Vault agent injection works via deployment annotations and service account JWT
+- That GitOps must drop `secret.yaml` from **`clearledger-infra`**, not only from the app repo
+- That **order matters**: Vault ready → seed KV → GitOps → healthy pods → delete K8s Secrets
+- **The security improvement:** app credentials are not in Git, not in etcd as K8s Secrets, and disappear when the pod stops
+
+### DevSecOps lesson — Stage 5
+
+**Secrets belong in a vault, not in YAML.** Stage 4 hardened *what runs*; Stage 5 removes *what attackers find in Git and etcd*. The migration pattern is: configure Vault → seed KV from a local `.env` once → deploy via GitOps without `secret.yaml` → delete K8s app Secrets → prove the app still works. Operational scripts configure the platform; they do not embed credentials. Rotation becomes updating Vault and letting the agent refresh files — not editing manifests in Git.
 
 ---
 
@@ -1683,7 +2801,9 @@ make check-5
 
 > The pipeline secured what enters the cluster. Falco watches what happens inside.
 
-**Goal:** exec into your own pod, trigger your own alert, find it in the Falco UI.
+**Goal:** Understand what runtime security *detects* and *why* — then prove it by triggering an alert and reading it like an operator would.
+
+This stage is not “install Falco and move on.” You are learning a **gap in the stack**: everything before Stage 6 secures **what gets deployed**; Falco secures **what running software actually does**. That is the same problem space as incident response, forensics, and zero-trust — not just another Helm chart.
 
 ### What you need to know first
 
@@ -1698,133 +2818,1164 @@ None of those actions involve creating new Kubernetes resources, so Kyverno will
 
 **Falco** is a runtime security tool that monitors system calls (syscalls) — the low-level operations every process uses to interact with the Linux kernel (opening files, spawning processes, making network connections). Falco uses **eBPF**, a Linux kernel technology that lets it observe syscalls with near-zero performance overhead, without modifying your containers.
 
-You write rules like "alert if a shell process is spawned in any container in the clearledger namespace." Falco watches every syscall and fires an alert the moment it matches a rule.
+**Network policies** complement Falco: Falco *detects* suspicious activity; network policies *block* unauthorized pod-to-pod traffic. Apply them **only in Stage 6** — before Vault and GitOps are stable they break DNS and legitimate traffic. Manifests: `infra/deferred-by-stage/stage-6-runtime-security/netpol/` (not in `clearledger-infra` until you choose).
 
-**Network policies** complement Falco. While Falco detects suspicious activity, network policies *prevent* unauthorized network connections. They are Kubernetes firewall rules: "auth-service can talk to Postgres, but nothing else can."
+**Order matters:**
+
+```text
+Install Falco → custom rules → ingress → break-it scenarios → network policies → verify app still works
+```
+
+### How Stage 6 fits the full stack (Stages 1–6)
+
+Each earlier stage guards a **different moment**. Stage 6 is the first that watches **inside a running pod**:
+
+| Stage | Layer | When it acts | Example threat it catches |
+|---|---|---|---|
+| **3 — CI gates** | Before merge / build | `git push` | Secret in code, CVE in image, bad Dockerfile |
+| **4 — Kyverno** | Pod creation (admission) | `kubectl apply` / ArgoCD sync | Root container, unsigned image, no limits |
+| **5 — Vault** | Secret storage & injection | Pod startup | Password in Git or etcd; credentials only in Vault KV |
+| **6 — Falco** | **Inside the running container** | After pod is Running | Shell spawn, read `/etc/passwd`, wget at runtime |
+| **6 — NetworkPolicy** | Pod-to-pod traffic | Every connection | ledger → notification direct call **blocked** |
+
+```text
+git push
+  → [Stage 3: Gitleaks, Trivy, Cosign …]     ← code & image
+  → [Stage 1–2: CI updates infra → ArgoCD]     ← desired state
+  → [Stage 4: Kyverno admission]               ← bad manifest never runs
+  → Pod starts
+  → [Stage 5: Vault agent injects secrets]     ← no creds in YAML
+  → App running
+  → [Stage 6: Falco eBPF] watches syscalls     ← NEW: in-container behavior
+  → [Stage 6: NetworkPolicy] filters traffic   ← NEW: east-west firewall
+```
+
+**Beginner takeaway:** Kyverno asked “Is this pod *allowed to be created*?” Falco asks “What is this pod *doing right now*?” Network policies ask “Who is this pod *allowed to talk to*?” All three are needed.
+
+**What Stage 6 does *not* replace:** Falco does not scan source code (Stage 3) or block bad manifests at create time (Stage 4). If you skip Stages 3–5, Falco still alerts — but you already shipped vulnerable code, unsigned images, and secrets in Git.
 
 ---
 
+### 6.1 — Install Falco and Falcosidekick UI
+
 ```bash
-helm repo add falcosecurity https://falcosecurity.github.io/charts && helm repo update
-helm install falco falcosecurity/falco \
-  --namespace falco --create-namespace \
-  --set driver.kind=modern_ebpf \
-  --set falcosidekick.enabled=true \
-  --set falcosidekick.webui.enabled=true \
-  --set tty=true
+bash stages/stage-6-runtime-security/scripts/install-falco.sh
 ```
 
-Apply the Falco Ingress so your browser can reach the UI:
+This runs `helm upgrade --install` with `modern_ebpf`, enables Falcosidekick + Web UI, enables the **k8s-metacollector** (`collectors.kubernetes.enabled: true`) so custom rules can match `k8smeta.ns.name = clearledger`, loads rules from `infra/falco/clearledger-rules-content.yaml`, applies the rules ConfigMap and ingress.
 
-```bash
-kubectl apply -f stages/stage-6-runtime-security/infra/falco-ingress.yaml
+**If Falco is already installed**, the script is safe to re-run (upgrade).
+
+**Expected — Falco pods:**
+
+```text
+NAME                                      READY   STATUS    RESTARTS   AGE
+falco-w4fh6                               2/2     Running   0          2m
+falco-falcosidekick-...                   1/1     Running   0          2m
+falco-falcosidekick-ui-...                1/1     Running   0          2m
+falco-falcosidekick-ui-redis-0            1/1     Running   0          2m
 ```
 
-Open `http://falco.local`.
+Open **`http://falco.local`** — Falcosidekick UI. Log in with the chart defaults:
 
-Load custom rules and apply network policies:
+| Field | Value |
+|---|---|
+| **Login** | `admin` |
+| **Password** | `admin` |
+
+To read the credentials from the cluster instead of trusting the lab defaults:
 
 ```bash
-kubectl apply -f stages/stage-6-runtime-security/infra/falco/clearledger-rules.yaml
-kubectl apply -f stages/stage-6-runtime-security/infra/netpol/network-policies.yaml
+kubectl get secret falco-falcosidekick-ui -n falco \
+  -o jsonpath='{.data.FALCOSIDEKICK_UI_USER}' | base64 -d && echo
+# admin:admin
 ```
 
-**Trigger alerts on purpose — this simulates an attacker:**
+#### Reading the Falcosidekick UI (first login)
+
+After login you land on the **Events** tab — a table of Falco detections from the last 24 hours. The UI can look busy even before you run any break-it scenario. Use this guide so you know what matters.
+
+**1. Know the columns**
+
+| Column | What to read |
+|---|---|
+| **Time** | When it happened — newest at top after refresh |
+| **Priority** | How serious Falco rated it (see below) |
+| **Rule** | The detection name — this is the headline |
+| **Output** | One-line detail: process, file, connection, pod name |
+| **Tags** (right) | Extra context — look for `clearledger` on lab alerts |
+
+**2. Priority levels (focus top-down)**
+
+| Priority | Meaning in this lab |
+|---|---|
+| **Critical** | Act on these first — shell spawn, sensitive file read, vault secrets tampering |
+| **Warning** | Suspicious but not always malicious — outbound connections, package managers |
+| **Notice** / **Info** | Often **background noise** — not what the break-it scenarios target |
+
+**3. Background noise vs alerts you caused**
+
+Right after install you may already see events such as **Contact K8S API Server From Container** with process `argocd-application-controller` and priority **Notice**. That is **normal**: ArgoCD pods talk to the Kubernetes API continuously. You did not break anything.
+
+**Ignore for Stage 6 demos:**
+
+- Rules whose **Output** mentions `argocd`, `kube-system`, or `falco` namespace pods
+- **Notice**-level stock Falco rules you did not trigger on purpose
+
+**Look for after you run §6.2 (demo) or §6.3 (manual scenarios)** (custom ClearLedger rules):
+
+| Rule name | Priority | You triggered it by… |
+|---|---|---|
+| **Shell Spawned in ClearLedger Container** | Critical | `kubectl exec … /bin/sh` (Scenario 1) |
+| **Sensitive File Read in ClearLedger** | Critical | `kubectl exec … cat /etc/passwd` (Scenario 2) |
+| **Package Manager Executed in ClearLedger Container** | Warning | `wget` / `curl` in exec (Scenario 3) |
+| **Unexpected Outbound Connection from ClearLedger** | Warning | Outbound call from app container (Scenario 3) |
+| **Unauthorized Write to Vault Secrets Directory** | Critical | Writing to `/vault/secrets` (advanced) |
+
+Custom rules include the tag **`clearledger`** in the Tags column. If you filter or scan for that tag, lab alerts stand out from cluster baseline noise.
+
+**4. Simple workflow (do this once)**
+
+1. Open **`http://falco.local`** and log in (`admin` / `admin`).
+2. Note any existing **Notice** events — baseline only; do not chase them yet.
+3. Run **`make demo-6`** (§6.2) or **Scenario 1** from §6.3 in your terminal.
+4. Wait **5–10 seconds**, then **refresh** the Events page.
+5. Find a new row: **Priority = Critical**, **Rule = Shell Spawned in ClearLedger Container**, **Output** contains `auth-service` and your pod name.
+6. Expand or read **Output** — it should show `cmd=sh -c id && exit` (proof Falco saw the exec).
+
+**5. If you only see Notice / ArgoCD events**
+
+- Confirm you ran the exec with **`-c auth-service`** (not the vault-agent sidecar).
+- Confirm custom rules loaded: `schema validation: ok` in Falco logs (command below).
+- Try Falco pod logs if the UI is slow: `kubectl logs -n falco -l app.kubernetes.io/name=falco -c falco --tail=50`
+
+**6. What “good” looks like for the portfolio**
+
+Screenshot a **Critical** row for **Shell Spawned in ClearLedger Container** or **Sensitive File Read in ClearLedger** — not the ArgoCD **Notice** rows. That shows runtime detection on *your app*, not generic cluster chatter.
+
+**Where alerts appear (read this before the break-it scenarios):**
+
+| Where | What you use it for |
+|---|---|
+| **`http://falco.local`** | Browse recent alerts (easiest for beginners) — open after each scenario |
+| **Falco pod logs** | Raw engine output if UI is empty: `kubectl logs -n falco -l app.kubernetes.io/name=falco -c falco --tail=50` |
+| **`make check-6`** | Confirms Falco + netpol installed — does not prove alerts fired |
+
+In the UI, use the workflow in §6.1 (“Reading the Falcosidekick UI”). After each scenario, refresh and look for **Critical** / **Warning** rows whose rule names contain **ClearLedger** — not **Notice** rows from ArgoCD or other cluster components.
+
+**Verify custom rules loaded:**
 
 ```bash
-# Scenario 1: shell in a running pod (an attacker gaining interactive access)
+kubectl get configmap clearledger-falco-rules -n falco
+# NAME                      DATA   AGE
+# clearledger-falco-rules   1      2m
+
+kubectl logs -n falco -l app.kubernetes.io/name=falco -c falco --tail=30 | grep clearledger_rules
+```
+
+**Expected:**
+
+```text
+/etc/falco/rules.d/clearledger_rules.yaml | schema validation: ok
+```
+
+If you see `LOAD_ERR_COMPILE_CONDITION` instead, the custom rule YAML uses an invalid field — see [troubleshooting.md — Stage 6](../docs/troubleshooting.md#stage-6--runtime-security-falco).
+
+---
+
+### 6.2 — Guided demo (see alerts appear — start here)
+
+**Recommended for first-time users.** Run this **after** §6.1 (Falco installed and UI reachable). The script simulates post-exploit behavior, triggers a real detection, and tells you how to read the alert in the UI.
+
+```bash
+make demo-6
+# or:
+bash stages/stage-6-runtime-security/scripts/demo-falco-alerts.sh
+```
+
+#### What the script does (step by step)
+
+| Step | What you see | What is happening |
+|---|---|---|
+| **1. Context** | “Why this demo exists” + attack story | Frames Stage 6 as runtime detection, not tool install |
+| **2. Preflight** | Target pod name printed | Checks Falco namespace, Falcosidekick Redis, and a running `auth-service` pod exist |
+| **3. Open UI** | Browser opens `http://falco.local` | Login: `admin` / `admin` — stay on **Events** tab |
+| **4. Pause** | `Press Enter when logged in…` | Waits until you are ready (skipped if `SKIP_PROMPT=1`) |
+| **5. Baseline** | `Events in UI now: N` | Records current event count; tells you to ignore Notice/argocd noise |
+| **6. Pause** | `Press Enter when… noted the current count…` | Second pause so you can watch the UI before the trigger |
+| **7. Countdown** | `3… 2… 1…` | Time to focus on the Events tab |
+| **8. Trigger** | `uid=1000…` in terminal | Runs the same exec as §6.3 Scenario 1 (see command below) |
+| **9. Confirm** | `Falco matching syscall → rule → UI store` then `✓ Runtime detection confirmed` | Polls Falcosidekick’s Redis store for a **new** event whose rule contains `Shell Spawned in ClearLedger` (not just a higher event count — ArgoCD Notice rows can inflate count without your alert) |
+| **10. Triage hints** | “Now read the alert like an operator” | Checklist of Priority, Rule, Output fields — full detail in **“After the demo”** below |
+
+**Exact command the script runs** (same as §6.3 Scenario 1):
+
+```bash
+kubectl exec -n clearledger \
+  auth-service-<pod-suffix> \
+  -c auth-service -- /bin/sh -c 'id && exit'
+```
+
+The script picks the pod name automatically (`-c auth-service` targets the app container, not the Vault sidecar).
+
+**Non-interactive** (CI or no Enter prompts): `SKIP_PROMPT=1 make demo-6`
+
+**Tip:** Split screen — terminal on the left, Events tab on the right. After step 9, **refresh the browser**; a new **Critical** row should appear at the top.
+
+#### After the demo — read your first alert (do not skip this)
+
+When the terminal prints `✓ Runtime detection confirmed`, **refresh the Events tab** and find the new row at the top. You are not checking a checkbox — you are practicing **incident triage** on a real detection.
+
+**What you just simulated (the attack story):**
+
+An attacker exploited a bug in `auth-service` (SQL injection, RCE, etc.). They did not change Git or create new pods — Kyverno and CI would never see it. They ran a shell inside the already-running container to see who they are (`id`) before going further. **Falco saw the syscall**, matched your custom rule, and recorded an event.
+
+**What Falco actually observed (the system layer):**
+
+| Layer | What happened |
+|---|---|
+| **Linux kernel** | A new process (`sh`) was created inside a container cgroup |
+| **eBPF probe** | Falco’s driver saw `spawned_process` without a container restart |
+| **Rule engine** | Condition matched: namespace `clearledger` + shell binary |
+| **Enrichment** | k8s-metacollector attached pod name `auth-service-…` |
+| **Falcosidekick** | Event stored and shown in the UI |
+
+**What the alert row looks like (Critical vs Notice):**
+
+Before the demo you may see rows like this — **Notice**, rule **Contact K8S API Server From Container**, process `argocd-applicat`:
+
+```text
+Priority: Notice          ← lower severity, often baseline cluster activity
+Rule:     Contact K8S API Server From Container
+Output:   … process=argocd-applicat … k8smeta_ns_name=argocd
+Tags:     mitre_discovery, k8s, network
+```
+
+After `make demo-6` you should see a **different** row — **Critical**, rule **Shell Spawned in ClearLedger Container**:
+
+```text
+Priority: Critical        ← act on this first
+Rule:     Shell Spawned in ClearLedger Container
+Output:   … pod=auth-service-5756d9fcb9-bmdlr cmd=sh -c id && exit
+          k8smeta_ns_name=clearledger
+Tags:     clearledger, shell, attack
+```
+
+**Field-by-field — what to look at on YOUR alert:**
+
+| Field | What to verify | Why it matters |
+|---|---|---|
+| **Priority** | `Critical` (red badge) | Triage order — shells in prod apps are high risk |
+| **Rule** | Contains `ClearLedger` | Your custom policy fired, not generic stock noise |
+| **Time** | Within last minute | Confirms this event is from *your* demo, not old ArgoCD rows |
+| **Output → `pod=`** | `auth-service-…` | Which workload is compromised or being investigated |
+| **Output → `cmd=`** | `sh -c id && exit` | Exact command — matches what you ran; proof of detection |
+| **Output → `k8smeta_ns_name=`** | `clearledger` | Scoped to your app namespace |
+| **Tags** | `clearledger`, `shell`, `attack` | Filtering and routing in Stage 7 (Grafana/Loki) |
+
+**Questions an operator asks (practice saying these out loud):**
+
+1. **Is this expected?** — No. Production app containers should not spawn interactive shells unless someone is debugging with approval.
+2. **Who did it?** — In the lab, *you* via `kubectl exec`. In a real incident, trace `user=` / audit logs / who has `exec` RBAC.
+3. **What stage failed?** — Not Kyverno (pod was compliant). Runtime behavior escaped pre-deploy controls.
+4. **What next?** — Snapshot the event, check other alerts on the same pod, review recent deploys, consider isolating the pod (netpol / scale-down) — Stage 6.4 adds *prevention* after you have seen *detection*.
+
+**What you should *not* chase in this lab:**
+
+- **Notice** rows from `argocd`, `kube-system`, or `falco` — normal GitOps/API traffic
+- Event count going up from ArgoCD alone — only your **Critical ClearLedger** row proves the demo worked
+
+**Portfolio screenshot:** Capture the **Critical** shell alert row with `cmd=sh -c id && exit` visible — not the ArgoCD Notice rows.
+
+---
+
+### 6.3 — Break-it scenarios (manual)
+
+Each simulates attacker behavior. After each command, check **`http://falco.local`** or Falco pod logs. Use these if you prefer step-by-step control instead of `make demo-6`.
+
+**Scenario 1 — Shell in a running pod (command injection simulation):**
+
+```bash
 kubectl exec -n clearledger \
   $(kubectl get pod -n clearledger -l app=auth-service -o name | head -1) \
-  -- /bin/sh -c "id && exit"
+  -c auth-service -- /bin/sh -c "id && exit"
 ```
 
-Open `http://falco.local` — you should see: **CRITICAL: Shell spawned in ClearLedger container**
+**Expected in Falco UI / logs** (within ~10 seconds):
 
-That alert tells you the exact pod, container, user, command, and timestamp. In a real environment, this would trigger an incident response process.
+```text
+CRITICAL: Shell spawned in ClearLedger container
+  user=... container=auth-service pod=auth-service-... cmd=sh -c id && exit
+```
+
+**What this means:** Stage 4 allowed the pod (it is compliant). Stage 6 detected *behavior inside* the pod — exactly what an attacker would do after command injection.
+
+**If you see no alert:** confirm the exec used `-c auth-service` (not the vault-agent sidecar), rules show `schema validation: ok`, and the pod image name contains `clearledger`.
+
+**Scenario 2 — Read a sensitive file (reconnaissance):**
 
 ```bash
-# Scenario 2: read a sensitive file (reconnaissance activity)
 kubectl exec -n clearledger \
   $(kubectl get pod -n clearledger -l app=auth-service -o name | head -1) \
-  -- cat /etc/passwd
+  -c auth-service -- cat /etc/passwd
 ```
 
-Falco fires: **CRITICAL: Sensitive file read in ClearLedger**
+**Expected:**
 
-**Take screenshots of both alerts in the Falco UI.**
+```text
+CRITICAL: Sensitive file read in ClearLedger
+  file=/etc/passwd container=auth-service pod=auth-service-...
+```
 
-After applying network policies, verify ClearLedger still works (network policies restrict traffic but should not break legitimate communication):
+**Scenario 3 — Download tool at runtime (optional):**
+
+```bash
+kubectl exec -n clearledger \
+  $(kubectl get pod -n clearledger -l app=auth-service -o name | head -1) \
+  -c auth-service -- sh -c "wget -q ifconfig.me -O - 2>/dev/null || true"
+```
+
+May fire **Package manager executed** and/or **Unexpected outbound connection** (WARNING).
+
+**Take screenshots of Scenarios 1 and 2** — portfolio evidence for runtime detection.
+
+---
+
+### 6.4 — Apply network policies (zero-trust segmentation)
+
+Network policies run **after** Falco demos so Stages 1–5 stay debuggable first (netpol too early breaks DNS and breaks the app — you saw that in Stage 2 if `netpol/` was in `clearledger-infra`).
+
+```bash
+kubectl apply -f infra/deferred-by-stage/stage-6-runtime-security/netpol/network-policies.yaml
+kubectl get networkpolicy -n clearledger
+```
+
+**Expected:**
+
+```text
+NAME                         POD-SELECTOR               AGE
+default-deny-all             <none>                     10s
+allow-auth-service           app=auth-service           10s
+allow-ledger-service         app=ledger-service         10s
+allow-notification-service   app=notification-service   10s
+```
+
+**Verify the app still works** (ingress + allowed east-west paths only):
 
 ```bash
 curl -s http://clearledger.local/auth/health | jq .
+# {"status":"ok","service":"auth-service"}
+
 curl -s http://clearledger.local/notifications/health | jq .
+# {"status":"ok",...}
 ```
 
-Both should return `{"status":"ok",...}`. If notification-service fails, check `kubectl get networkpolicy allow-notification-service -n clearledger`.
+**Scenario 4 — blocked cross-service traffic (optional):**
+
+```bash
+kubectl exec -n clearledger \
+  $(kubectl get pod -n clearledger -l app=ledger-service -o name | head -1) \
+  -c ledger-service -- sh -c "wget -q http://notification-service/ -O - --timeout=5" 2>&1
+# Expected: wget: download timed out  OR  Connection refused
+# NetworkPolicy default-deny-all + no allow rule for ledger → notification
+```
+
+**How this connects:** Falco **detected** the shell in §6.2/§6.3; netpol **prevents** ledger from reaching notification without going through allowed paths. Detection + prevention together.
+
+If notification health fails after netpol, see [troubleshooting.md — Stage 6](../docs/troubleshooting.md#stage-6--runtime-security-falco).
+
+---
+
+### 6.6 — Health check
 
 ```bash
 make check-6
 ```
 
+**What you should see:**
+
+```text
+▶ Stage 6 — Runtime Security (Falco)
+  ✓ Falco DaemonSet: 1/1 nodes
+  ✓ ClearLedger custom Falco rules ConfigMap exists
+  ✓ NetworkPolicy default-deny-all exists
+  ✓ NetworkPolicy allow-auth-service exists
+  ✓ NetworkPolicy allow-ledger-service exists
+  ✓ NetworkPolicy allow-notification-service exists
+  ✓ auth-service reachable after network policies
+  ✓ notification-service reachable after network policies
+
+All checks passed. Ready for the next stage.
+```
+
+---
+
+### Stage 6 complete — done checklist (move to Stage 6.5 / 7)
+
+| # | Check | How to verify |
+|---|---|---|
+| 1 | Falco running | `kubectl get pods -n falco` — DaemonSet `2/2` |
+| 2 | Custom rules loaded | `kubectl get configmap clearledger-falco-rules -n falco` |
+| 3 | Shell alert fired **and you read it** | `make demo-6` → Critical row with `cmd=sh -c id && exit`, pod `auth-service-…`, tags `clearledger` — see §6.2 “After the demo” |
+| 4 | Network policies applied | `kubectl get networkpolicy -n clearledger` — four policies |
+| 5 | App still healthy | `curl` auth + notification health return 200 |
+| 6 | Health check | `make check-6` green |
+
+**Recommended for portfolio:** screenshots of shell + sensitive-file alerts in Falco UI.
+
+**What “move to Stage 6.5 / 7” means:** Falco *detects* runtime threats; Stage 6.5 (optional) proves *resilience* under failure; Stage 7 correlates alerts in Grafana.
+
 ### What you learned in Stage 6
 
 - What runtime security catches that CI and admission control cannot: threats inside running containers
-- What Falco is: a syscall monitoring tool that uses eBPF to watch every process in every container
-- What network policies are: Kubernetes-level firewall rules that restrict which pods can talk to each other
-- How to trigger and interpret security alerts — the exact skills you need for incident response
-- **The security layers so far:** code scanning → admission control → secrets management → runtime detection. Each layer catches what the previous ones miss.
+- What Falco is: eBPF syscall monitoring with custom YAML rules
+- What network policies are: Kubernetes firewall rules between pods
+- How to trigger and interpret alerts — incident response skills
+- **The full stack:** code scanning → admission control → secrets management → runtime detection → (next) observability
+
+### DevSecOps lesson — Stage 6
+
+**Detection at runtime closes the last gap on the node.** CI and Kyverno guard the path in; Vault guards credentials at rest in Git/etcd; Falco watches what processes *do* after a pod is running. Network policies add **prevention** while Falco adds **detection** — both are normal in regulated environments. The break-it scenarios produce audit evidence: named rules, pod, container, and command — exactly what you need when triaging a real incident.
 
 ---
 
 ## Stage 6.5 — Chaos Engineering (Optional)
 
-> Falco detects failures. Chaos engineering proves you survive them.
+> Falco detects threats. Chaos engineering proves you **survive** failure.
 
-**Goal:** deliberately break parts of the system and verify it stays available. Detection is not the same as resilience.
+**Goal:** Understand the difference between **detection** and **resilience**, then prove auth-service stays available when a pod is killed.
+
+**Why the Litmus UI looked empty:** ChaosCenter is a **control plane**. It does not know about your cluster until an **agent** (subscriber pod) registers. Install now connects the agent automatically; you then **run chaos from the UI** while watching the terminal.
+
+**Path:**
+
+```bash
+make fix-65-prereqs
+export LITMUS_PASSWORD='your-password'   # only if you changed it from default litmus
+bash stages/stage-6.5-chaos-engineering/scripts/install-litmus.sh
+# → open http://litmus.local
+# → follow §6.5.1c (navigate) + §6.5.2 (ChaosHub → Launch Experiment)
+# → optional §6.5.3 (make demo-65 — same test from terminal)
+```
+
+| Section | Content |
+|---------|---------|
+| [§6.5.0](#650--before-you-start-fix-auth-service-restarts) | `make fix-65-prereqs` — auth 2/2 Ready |
+| [§6.5.1](#651--install-litmuschaos-operator-ui-cluster-connection) | One install script + expected pods |
+| [§6.5.1c](#651c--how-to-navigate-the-litmus-ui-read-before-you-click) | Sidebar, status badges, click order |
+| [§6.5.1d](#651d--why-infrastructure-shows-pending) | Fix **PENDING** infrastructure |
+| [§6.5.2](#652--how-to-use-chaoshub-and-run-your-first-chaos-experiment) | **ChaosHub → Pod Delete → Launch Experiment** + terminals |
+| [§6.5.3](#653--same-experiment-from-the-terminal-make-demo-65) | `make demo-65` (YAML path) |
+| [§6.5.3a](#653a--real-output-examples-verified-on-the-lab-cluster) | Real terminal output samples |
+
+This stage is not “install Litmus and move on.” You deliberately kill a pod, watch health stay **200**, and watch Kubernetes recover — in the **UI and terminal together**.
 
 ### What you need to know first
 
-You know the system can detect threats (Falco) and block bad deployments (Kyverno). But what happens when things fail? A pod crashes, the network gets slow, a node runs out of memory. Does the system recover automatically, or does it go down?
+| Question | Stage 6 (Falco) | Stage 6.5 (Chaos) |
+|---|---|---|
+| Did something bad happen? | Yes — alerts on shells, file reads | Not the focus |
+| Did the **service stay up** when a pod died? | No — Falco does not answer this | **Yes — this is the point** |
+| Did the system **recover** automatically? | No | **Yes — measure MTTR** |
 
-**Chaos engineering** answers that question by deliberately injecting failures into a running system and measuring the impact. If auth-service has two replicas and you kill one, does login still work? If ledger-service has 2 seconds of network latency, does the frontend timeout gracefully?
+**Chaos engineering** deliberately injects controlled failures (pod kill, latency, memory pressure) and you observe:
 
-**LitmusChaos** is a Kubernetes-native chaos engineering platform. You define experiments as YAML (e.g. "kill one auth-service pod" or "inject 2 seconds of network delay to ledger-service") and Litmus executes them while you monitor the results.
+1. **Availability** — do users still get HTTP 200 during the failure?
+2. **Recovery** — does Kubernetes recreate the pod?
+3. **Blast radius** — does one broken pod take down the whole app?
+
+**LitmusChaos** runs experiments defined as Kubernetes YAML (`ChaosEngine`). The operator creates a short-lived **runner pod** that executes the failure (e.g. delete one pod) while you watch health checks and `kubectl get pods`.
+
+**Why this matters for DevOps:** You already proved security controls (Stages 3–6). Regulators and DORA Pillar 3 also ask: *did you test that the system survives failure?* This stage produces that evidence.
+
+### How Stage 6.5 fits the stack
+
+```text
+Stage 6 Falco     → "We saw suspicious behavior"
+Stage 6.5 Chaos   → "We killed a pod and login still worked"
+Stage 7 Grafana   → "We can graph MTTR and error rates over time"
+```
+
+**Kyverno interaction (important):** Stage 4 policies block non-compliant pods in `clearledger`. Litmus runner pods do not pass those checks. Therefore **ChaosEngine YAML lives in the `litmus` namespace** but **targets** apps in `clearledger` via `spec.appinfo.appns`. This is a real-world pattern: platform tools run in a platform namespace.
 
 ---
 
+### 6.5.0 — Before you start (fix auth-service restarts)
+
+Chaos kills pods. **Replacement pods must start cleanly** or the lab becomes “debugging CrashLoopBackOff” instead of learning resilience.
+
+**Symptoms:** `auth-service` **1/2 Ready**, **CrashLoopBackOff**, many ReplicaSets, ArgoCD **503**, `connection to postgres timed out` in logs.
+
+**Common causes:**
+
+| Cause | Fix |
+|---|---|
+| Stage 6 `default-deny-all` without **postgres ingress** | `make fix-65-prereqs` (adds `allow-postgres`) |
+| ArgoCD syncing old deployment (no `startupProbe`, 256Mi) | `make fix-65-prereqs` |
+| Cold-start slower than liveness probe | `startupProbe` in `infra/manifests/auth-service/deployment.yaml` |
+
+**One command:**
+
 ```bash
-helm repo add litmuschaos https://litmuschaos.github.io/litmus-helm/ && helm repo update
-helm install chaos litmuschaos/litmus \
-  --namespace litmus --create-namespace \
-  -f stages/stage-6.5-chaos-engineering/infra/chaos/litmus-values.yaml
+make fix-65-prereqs
+kubectl get pods -n clearledger -l app=auth-service
 ```
 
-Run the experiments:
+**Pass:** exactly **2 pods**, both **2/2 Ready**. Do not run chaos until this is true.
+
+> **ArgoCD users:** If your app syncs from `clearledger-infra.git`, copy `infra/manifests/auth-service/deployment.yaml` and the Stage 6 netpol files into that repo and sync — otherwise self-heal may revert the fix within minutes.
+
+---
+
+### 6.5.1 — Install LitmusChaos (operator, UI, cluster connection)
+
+One script installs everything and connects your cluster to the UI:
 
 ```bash
-bash stages/stage-6.5-chaos-engineering/scripts/run-chaos.sh
+export LITMUS_PASSWORD='your-password'   # only if you changed it from default litmus
+bash stages/stage-6.5-chaos-engineering/scripts/install-litmus.sh
+make open-litmus   # http://litmus.local
 ```
 
-The script runs three experiments:
+| Component | Role |
+|-----------|------|
+| `litmus-core` + `kubernetes-chaos` | Chaos **operator** — runs `ChaosEngine` YAML (`make demo-65`) |
+| `chaos` (ChaosCenter) | Web UI + MongoDB — **§6.5.2** |
+| `litmus-ingress.yaml` | Exposes **http://litmus.local** |
+| `connect-litmus-infra.sh` (end of install) | Registers agent — Overview **Active 1** |
 
-| Experiment | What it does | What it proves |
+**What the install script does (step by step):**
+
+| Step | Action | Purpose |
+|------|--------|---------|
+| 1 | `kubectl apply` → `litmus-install.yaml` | Creates `litmus` namespace |
+| 2 | `kubectl apply` → `litmus-rbac.yaml` | `litmus-admin` SA (pod delete in `clearledger`) |
+| 3 | `helm install litmus-core` | Watches `ChaosEngine` CRs, creates runner pods |
+| 4 | `helm install litmus-k8s` | Installs `pod-delete`, latency, memory-hog experiments |
+| 5 | `helm install chaos` | ChaosCenter UI + MongoDB |
+| 6 | `kubectl apply` → `litmus-ingress.yaml` | UI at **http://litmus.local** (+ `/backend/` for API) |
+| 7 | `connect-litmus-infra.sh` | Subscriber agent → infrastructure **Active** (not Pending) |
+
+**Login:**
+
+| Field | Value |
+|-------|-------|
+| URL | **http://litmus.local** |
+| Username | `admin` |
+| Password | `litmus` (or the password you set at first login) |
+
+**Expected pods after install:**
+
+```text
+kubectl get pods -n litmus
+NAME                                            READY   STATUS
+litmus-f95fd6fc4-xxxxx                          1/1     Running    ← litmus-core operator
+chaos-litmus-frontend-xxxxx                     1/1     Running    ← UI
+chaos-litmus-server-xxxxx                       1/1     Running    ← GraphQL API
+chaos-mongodb-0                                 1/1     Running
+clearledger-chaos-infra-subscriber-xxxxx        1/1     Running    ← cluster connected
+clearledger-chaos-infra-chaos-operator-xxxxx    1/1     Running
+```
+
+**Pass before §6.5.2:** open **http://litmus.local** → **Overview** shows **Infrastructures: Active 1**. If **0** or infrastructure **Pending**, see §6.5.1b / §6.5.1d.
+
+---
+
+### 6.5.1b — If Overview still shows “0 infrastructures”
+
+The UI cannot run experiments until the cluster agent is connected.
+
+```bash
+export LITMUS_PASSWORD='your-password'   # default is litmus
+bash stages/stage-6.5-chaos-engineering/scripts/connect-litmus-infra.sh
+kubectl get pods -n litmus | grep subscriber    # should be Running
+```
+
+Hard-refresh the browser (`Cmd+Shift+R`). **Do not** bookmark `/account/.../settings` URLs — start at **http://litmus.local** only.
+
+---
+
+### 6.5.1c — How to navigate the Litmus UI (read before you click)
+
+Think of ChaosCenter as **three layers**:
+
+```text
+1. Project (admin-project)     ← top-left dropdown
+2. Environment (clearledger-lab) ← where your cluster is registered
+3. Infrastructure (clearledger-cluster) ← the agent on YOUR Kubernetes cluster
+```
+
+#### Left sidebar — what each item is for
+
+| Nav item | What it is | When you use it |
+|----------|------------|-----------------|
+| **Overview** | Dashboard: how many infrastructures are **Active** | First stop after login — must show **Active 1** |
+| **Environments** | Groups infrastructures (e.g. Pre-Prod lab) | Click **clearledger-lab** to see your cluster |
+| **ChaosHub** | Catalog of fault templates (pod-delete, latency, …) | Pick **pod-delete** before creating an experiment |
+| **Chaos Experiments** | Your saved tests + **Run** button | Where you actually start chaos |
+| **Resilience Probes** | Health checks during experiments | Optional; skip in this lab |
+
+#### Status badges — what to look for
+
+| Badge | Meaning | What to do |
+|-------|---------|------------|
+| **PENDING** (purple) | Agent registered in UI but **not confirmed** yet — subscriber has not finished handshake | Wait 1–2 min, refresh. Still PENDING? Run §6.5.1d |
+| **Active** (green) | Cluster connected — you can run experiments | Go to §6.5.2 |
+| **Overview: 0 infrastructures** | No agent installed | `make connect-litmus` |
+| **Blank white page** | Wrong URL or API not reachable | Use **http://litmus.local** only; re-apply `litmus-ingress.yaml` |
+
+#### Quick map of the left nav
+
+| Item | Use in this lab |
+|------|-----------------|
+| **Overview** | Is the cluster connected? Must show **Infrastructures: Active 1** |
+| **Environments** | **clearledger-lab** → **clearledger-cluster** — status must be **Active** |
+| **ChaosHubs** | Pick **Pod Delete** → **Launch Experiment** (main UI path — §6.5.2) |
+| **Chaos Experiments** | List past runs; open one to see the timeline after you click **Run** |
+| **Resilience Probes** | Skip for now |
+| **Project Setup** | Skip for now |
+
+#### Navigation path for this lab (click order)
+
+1. **http://litmus.local** → log in
+2. **Overview** → confirm **Infrastructures: Active 1**
+3. **Environments** → **clearledger-lab** → **clearledger-cluster** → **Active** (not Pending)
+4. **ChaosHubs** → default hub → **Pod Delete** → **Launch Experiment** (§6.5.2)
+5. **Chaos Experiments** → watch status **Running → Completed**
+
+You do **not** need deep **Settings** URLs (`/account/.../settings/...`) — they often show a blank page.
+
+---
+
+### 6.5.1d — Why infrastructure shows **PENDING**
+
+**PENDING** means: Litmus created the infrastructure record in MongoDB, but the **subscriber** has not yet confirmed that all agent pods on your cluster are healthy.
+
+Common cause in this lab: the **event-tracker** pod crashes (missing CRD when we skip duplicate CRD install). The subscriber waits for event-tracker → never confirms → UI stays **PENDING**.
+
+**Fix (already in `connect-litmus-infra.sh`):**
+
+```bash
+export LITMUS_PASSWORD='your-password'
+make connect-litmus
+```
+
+**Verify from terminal:**
+
+```bash
+kubectl get pods -n litmus | grep -E 'subscriber|event-tracker'
+# subscriber: Running
+# event-tracker: should be gone or not required
+
+kubectl logs -n litmus -l app.kubernetes.io/name=subscriber --tail=5
+# look for: "AgentID: ... has been confirmed"
+
+kubectl get cm subscriber-config -n litmus -o jsonpath='{.data.IS_INFRA_CONFIRMED}'
+# true
+```
+
+Refresh **Environments → clearledger-lab** — **clearledger-cluster** should change from **PENDING** to **Active**.
+
+---
+
+### 6.5.2 — How to use ChaosHub and run your first chaos experiment
+
+**Time:** ~20 minutes. **You need:** browser at **http://litmus.local** + two terminal windows on your Mac (where `kubectl` and `/etc/hosts` for `clearledger.local` work).
+
+> **One-line lesson:** Stage 6 (Falco) asks *“did something bad happen?”* Stage 6.5 asks *“did we stay up when a pod died?”*
+
+#### Where you are in the UI
+
+You are in the right place when you see:
+
+**ChaosHubs → default hub → Chaos Experiments (10)**
+
+That page lists experiment **cards** (Pod Delete, Pod CPU Hog, Pod Memory Hog, …). Each card is a reusable fault template.
+
+#### ChaosHub screen — what you see
+
+| What you see | What it means |
+|--------------|---------------|
+| **Pod Delete** card | Kills pod(s) matching a label — **use this one for the lab** |
+| **Launch Experiment** (purple button) | Opens the wizard to target **your** app on **clearledger-cluster** |
+| **Pod CPU Hog** / **Pod Memory Hog** / others | Optional follow-ups — run **one experiment at a time**, only after pod-delete succeeds |
+| **Chaos Faults (53)** tab | Low-level faults; skip — use **Chaos Experiments** cards instead |
+| Search box | Filter cards by name (e.g. type `pod delete`) |
+
+#### Step 0 — Open the right page
+
+| Do | Don't |
+|----|-------|
+| Go to **http://litmus.local** | Open old `/account/.../settings/projects` bookmarks (blank page) |
+| Log in: `admin` + your password | Expect data before login |
+
+**After login you should see:**
+
+- Left nav: **Overview**, **Environments**, **ChaosHub**, **Chaos Experiments**
+- **Overview** card: **Infrastructures → Active 1** (if **0**, run §6.5.1b first)
+
+**What “connected” means:** A `subscriber` pod in `litmus` talks to ChaosCenter. The UI is no longer an empty shell — it can schedule experiments on **your** cluster.
+
+```bash
+kubectl get pods -n litmus | grep subscriber
+# clearledger-chaos-infra-subscriber-...   1/1   Running
+```
+
+#### Step 1 — Understand the map (2 min)
+
+```text
+Litmus ChaosCenter (litmus.local)     ← you click "Run" here
+        │
+        ▼
+subscriber / chaos-operator (litmus ns)  ← agent on YOUR cluster
+        │
+        ▼
+auth-service pods (clearledger ns)    ← target: kill 50%, watch recovery
+```
+
+**Stage 6 (Falco)** asked: *did something suspicious happen?*
+**Stage 6.5** asks: *if a pod dies, do users still get HTTP 200?*
+
+#### Step 2 — Open terminals before you click Run (2 min)
+
+**Terminal A — watch pods:**
+
+```bash
+kubectl get pods -n clearledger -l app=auth-service -w
+```
+
+**Terminal B — watch health every 5 seconds:**
+
+```bash
+while true; do
+  date +%H:%M:%S
+  curl -s -o /dev/null -w "health=%{http_code}\n" http://clearledger.local/auth/health
+  sleep 5
+done
+```
+
+Leave both running. You will correlate what the UI shows with what Kubernetes actually does.
+
+#### Step 3 — Launch pod-delete from ChaosHub (10 min)
+
+> **Litmus UI note:** ChaosCenter labels change between versions (e.g. “Tune fault”, “Target selection”, “Chaos Experiment”). Follow the **concepts** below — match fields by meaning, not exact button text. If your wizard has extra steps (probes, hooks), accept defaults unless the lab table lists a value.
+
+**Click path:**
+
+1. Left nav → **ChaosHubs** (or **Chaos Hub**) → open the **default** hub
+2. Tab **Chaos Experiments** — find the **Pod Delete** card (*injects random pod delete failures…*)
+3. Click **Launch Experiment** (purple button on the card — may say **Create** or **Use** on older builds)
+
+**Wizard — map each screen to these values:**
+
+| Concept (what Litmus is asking) | Set to | UI labels you might see |
+|---------------------------------|--------|-------------------------|
+| **Where to run** | Infrastructure **clearledger-cluster** (**Active**, not Pending) | “Infrastructure”, “Chaos Infrastructure”, “Execution plane” |
+| **Target namespace** | `clearledger` | “Namespace”, “Application namespace” |
+| **Target selector** | Label `app=auth-service` | “Label”, “App label”, “Target application” |
+| **Workload type** | **Deployment** | “Kind”, “Workload type”, “Resource type” |
+| **Blast radius** | **50%** pods affected | “Pods affected”, “Percentage”, “PODS_AFFECTED_PERC” |
+| **Duration** | **30** seconds | “Total chaos duration”, “Duration”, “Chaos interval” |
+| **Fault name** | `pod-delete` (usually pre-filled from hub) | “Experiment name”, “Fault” |
+
+**Typical wizard flow (screens may merge or reorder):**
+
+```text
+1. Select infrastructure  → clearledger-cluster (Active)
+2. Target application     → namespace clearledger, label app=auth-service, kind Deployment
+3. Tune fault / parameters → 50% pods, 30s duration
+4. Save / Create experiment
+5. Run now (not Schedule)
+```
+
+**Finish:**
+
+1. Click **Save** / **Create** / **Finish** (whatever completes the wizard)
+2. Click **Run** / **Execute** / **Start** on the experiment (not **Schedule** for this lab)
+3. Left nav → **Chaos Experiments** → open your run → status **Running → Completed** (or **Succeeded**)
+
+**Alternate path:** **Chaos Experiments** → **+ New Experiment** / **New Chaos Experiment** → search **pod-delete** → same values as the table above.
+
+#### What to look for (UI + terminals together)
+
+Run the terminals from **Step 2** on your Mac before you click **Run** in the UI.
+
+| Where | Good sign | Bad sign |
+|-------|-----------|----------|
+| **Terminal A** (`kubectl … -w`) | One pod **Terminating**, then a new pod → **2/2 Ready** | 0 Running pods, or stuck CrashLoopBackOff |
+| **Terminal B** (`curl …/auth/health`) | `health=200` **while** one pod is down | `502` / `503` / timeout during chaos |
+| **UI — Chaos Experiments** | Status **Running** → **Completed** | Stuck **Running** forever, or Error |
+| **UI — experiment timeline** | Steps/probes advance during the 30s window | Blank timeline (infra not connected) |
+
+**Write this in your notes (DORA / resilience evidence):**
+
+> We deleted 50% of auth-service pods; `/auth/health` stayed 200; Kubernetes recreated the pod within ~2 minutes.
+
+#### Step 4 — Confirm recovery (3 min)
+
+```bash
+kubectl get pods -n clearledger -l app=auth-service
+# exactly 2 pods, both 2/2 Ready
+```
+
+In the UI: **Environments** → **clearledger-lab** → your infrastructure → past runs should list the experiment.
+
+#### Step 5 — What you learned (say it out loud)
+
+1. **Replicas matter** — one dead pod ≠ outage if the Service has another healthy endpoint.
+2. **Probes matter** — unhealthy pods are removed from the Service endpoints.
+3. **Detection ≠ resilience** — Falco would not prove `health=200` during a pod kill; chaos did.
+
+#### Step 6 — Optional second demo (only after Step 3 succeeds)
+
+Wait until auth is back to **2/2 Ready**, then try **one** more card from ChaosHub:
+
+| Card | Target | What it teaches |
+|------|--------|-----------------|
+| **Pod Memory Hog** | `notification-service` in `clearledger` | Memory pressure → OOMKill → restart |
+| **Pod CPU Hog** | `auth-service` | CPU saturation under load |
+
+Or apply the YAML equivalents (one at a time):
+
+```bash
+kubectl apply -f stages/stage-6.5-chaos-engineering/infra/chaos/notification-service-memory-hog.yaml
+# wait for recovery, then:
+kubectl apply -f stages/stage-6.5-chaos-engineering/infra/chaos/ledger-service-network-latency.yaml
+```
+
+---
+
+### 6.5.3 — Same experiment from the terminal (`make demo-65`)
+
+Use this **after** the ChaosHub exercise (§6.5.2), or if you prefer a scripted demo first. It runs the **same pod-delete test** without clicking through the UI wizard.
+
+```bash
+make fix-65-prereqs    # if auth pods are not 2/2 Ready
+make demo-65
+```
+
+**What the script does:**
+
+| Step | What happens |
+|------|----------------|
+| Preflight | Checks Litmus is installed and 2 `auth-service` pods are Running |
+| Apply | `kubectl apply -f auth-service-pod-delete.yaml` (ChaosEngine in namespace `litmus`) |
+| Watch | Prints `/auth/health` every 10s for ~60s |
+| Report | Shows recovery pod count + `ChaosResult` verdict |
+
+**Expected results on the cluster:**
+
+| Signal | Expected |
+|--------|----------|
+| `ChaosEngine` | `auth-service-pod-delete` in namespace `litmus` |
+| `ChaosResult` | **Completed** / **Pass** |
+| Auth pods after demo | **2** pods **2/2 Ready** (one was killed and replaced) |
+| Events | `Killing` on old pod → `Scheduled` / `Started` on new pod |
+
+```bash
+kubectl get chaosresult -n litmus
+kubectl get pods -n clearledger -l app=auth-service
+```
+
+**Pass criteria for `make demo-65`:**
+
+| Signal | Pass? |
+|--------|-------|
+| Script ends with **PASS** | Required |
+| `ChaosResult` **Completed / Pass** | Required |
+| **2** auth pods **Running** after demo | Required |
+| `health=200` on most checks | Ideal; script also passes if ChaosResult is Pass and pods recovered |
+
+**See the run in the UI after the terminal demo:** **Chaos Experiments** (left nav) → refresh → open the latest run.
+
+**Stage 6 netpol:** Re-apply if new auth pods stuck in `Init:0/1`:
+
+```bash
+kubectl apply -f infra/deferred-by-stage/stage-6-runtime-security/netpol/network-policies.yaml
+```
+
+---
+
+### 6.5.3a — Real output examples (verified on the lab cluster)
+
+These samples were captured from a working cluster after `make fix-65-prereqs`, `make connect-litmus`, and `make demo-65`.
+
+#### `make check-65`
+
+```text
+▶ Stage 6.5 — Chaos Engineering (LitmusChaos)
+  ✓ litmus namespace exists
+  ✓ litmus-admin ServiceAccount exists in litmus
+  ✓ pod-delete ChaosExperiment installed in litmus
+  ✓ Litmus chaos operator is running
+  ✓ Litmus ChaosCenter reachable at http://litmus.local
+  ✓ Litmus subscriber running (UI connected to cluster)
+  ✓ auth-service healthy (baseline before chaos)
+  ✓ auth-service has 2/2 Ready replicas (stable for chaos)
+  ✓ allow-postgres NetworkPolicy exists (Stage 6 fix)
+
+All checks passed. Ready for the next stage.
+```
+
+#### `make demo-65` — captured from a real run (2026-06-01)
+
+```text
+Stage 6.5 — auth-service pod-delete
+
+Preflight: 2 auth-service pods Running
+
+Applying ChaosEngine auth-service-pod-delete (namespace litmus)
+
+Watching http://clearledger.local/auth/health
+
+  10s  health=200  pods=2
+  20s  health=200  pods=1
+  30s  health=200  pods=1
+  40s  health=200  pods=2
+  50s  health=200  pods=2
+  60s  health=200  pods=2
+
+Result:
+  ChaosResult: Completed / Pass
+  Recovery:    2 auth-service pod(s) Running
+  Health:      6/6 checks returned 200
+
+PASS
+```
+
+> If health lines show `000`, run `bash scripts/setup-hosts.sh` on your Mac and re-run. The script also tries `multipass exec clearledger -- curl` when the VM is present.
+
+#### Terminal B on your Mac (expected when hosts are correct)
+
+```text
+22:05:01
+health=200
+22:05:06
+health=200
+22:05:11
+health=200
+```
+
+> Pod count may show **1** while the replacement pod is still starting — that is expected.
+
+#### Terminal A during chaos (`kubectl get pods -w`)
+
+```text
+NAME                            READY   STATUS        RESTARTS   AGE
+auth-service-84cc988c4d-hdb45   2/2     Running       0          67m
+auth-service-84cc988c4d-b59sj   2/2     Terminating   0          15m    ← killed
+auth-service-84cc988c4d-dxz9q   0/2     Pending       0          0s     ← replacement
+auth-service-84cc988c4d-dxz9q   0/2     Init:0/1      0          2s
+auth-service-84cc988c4d-dxz9q   2/2     Running       0          90s
+```
+
+#### Terminal B on your Mac (manual health loop)
+
+```text
+22:05:01
+health=200
+22:05:06
+health=200
+22:05:11
+health=200
+```
+
+#### After demo — verify
+
+```bash
+kubectl get chaosresult -n litmus
+# auth-service-pod-delete-pod-delete   Completed   Pass
+
+kubectl get pods -n clearledger -l app=auth-service
+# auth-service-84cc988c4d-xxxxx   2/2   Running
+# auth-service-84cc988c4d-yyyyy   2/2   Running
+
+kubectl get cm subscriber-config -n litmus -o jsonpath='{.data.IS_INFRA_CONFIRMED}'
+# true
+```
+
+#### Subscriber connected (infrastructure Active in UI)
+
+```text
+kubectl logs -n litmus -l app.kubernetes.io/name=subscriber --tail=3
+level=info msg="AgentID: a63c2a2c-... has been confirmed"
+level=info msg="Server connection established, Listening...."
+```
+
+---
+
+### 6.5.4 — Understand the YAML files (read before running)
+
+Each file is a **`ChaosEngine`** — a request to Litmus: “run experiment X against app Y for Z seconds.”
+
+#### `litmus-install.yaml`
+
+Creates the `litmus` namespace only. Platform workloads live here, separate from `clearledger` app pods.
+
+#### `litmus-rbac.yaml`
+
+| Resource | What it does |
+|---|---|
+| `ServiceAccount litmus-admin` (namespace `litmus`) | Identity for Litmus runner pods |
+| `ClusterRoleBinding → cluster-admin` | Allows deleting pods / injecting faults in `clearledger` (lab simplification; production would use least-privilege) |
+
+#### `auth-service-pod-delete.yaml` (Experiment 1 — used by demo)
+
+```yaml
+metadata:
+  namespace: litmus          # engine lives here (Kyverno-safe)
+spec:
+  appinfo:
+    appns: clearledger       # target app namespace
+    applabel: app=auth-service
+    appkind: deployment
+  experiments:
+    - name: pod-delete
+      spec:
+        components:
+          env:
+            - name: PODS_AFFECTED_PERC
+              value: "50"    # 50% of 2 replicas = 1 pod killed
+            - name: TOTAL_CHAOS_DURATION
+              value: "30"    # chaos window in seconds
+```
+
+**What happens when applied:**
+
+1. Operator reads `ChaosEngine` → creates `auth-service-pod-delete-runner` pod in `litmus`
+2. Runner selects one `auth-service` pod in `clearledger` → sends SIGTERM / delete
+3. Kubernetes Deployment controller sees 1/2 replicas → schedules a replacement pod
+4. Service routes traffic to the **surviving** replica during recovery
+5. `ChaosResult` CR records pass/fail from Litmus’s perspective
+
+#### `ledger-service-network-latency.yaml` (Experiment 2 — manual)
+
+Adds **2000 ms** network latency to `ledger-service` pods for 60 seconds. Proves timeouts return **503** instead of hanging the UI.
+
+#### `notification-service-memory-hog.yaml` (Experiment 3 — manual)
+
+Fills **80%** of pod memory limit for 60 seconds. Proves OOMKill + restart behavior.
+
+> **Never apply all three at once.** Run one experiment, verify recovery, then the next.
+
+---
+
+### 6.5.5 — After the demo — what to look for (do not skip)
+
+**1. During chaos — availability**
+
+| Signal | Good | Bad |
 |---|---|---|
-| Pod kill | Kills one auth-service pod | Kubernetes restarts it, the second replica handles traffic during recovery |
-| Network latency | Injects 2 seconds of delay into ledger-service | The frontend handles slow responses without crashing |
-| Memory stress | Fills notification-service memory to 80% | The pod stays running and does not get OOM-killed at normal load |
+| `curl http://clearledger.local/auth/health` | **200** while one pod is down | 502/503/timeout |
+| `kubectl get pods -l app=auth-service` | 1 Running + 1 Init/Pending (replacement starting) | 0 Running |
 
-After each experiment, the script verifies `http://clearledger.local/auth/health` returns 200.
+**Why 200 is enough:** The Kubernetes **Service** load-balances to healthy endpoints. One replica dying should not kill the Service if the other passes readiness probes.
+
+**2. After chaos — recovery**
+
+| Signal | Good | Bad |
+|---|---|---|
+| Pod count | 2/2 **Ready** (may take 1–2 min — Vault agent init) | Stuck at 1 replica |
+| Events | `Killing` then `Scheduled` / `Started` on new pod | Repeated CrashLoopBackOff |
+| ArgoCD | Synced (if you deleted a pod, Deployment controller heals — GitOps desired state unchanged) | — |
+
+**3. Litmus `ChaosResult` verdict**
+
+```bash
+kubectl get chaosresult -n litmus
+```
+
+Verdict may show **Error** if Litmus targets a pod still in `Init:0/1` (Vault agent starting). That is a Litmus timing issue, not necessarily failed resilience.
+
+**Your pass criteria for this lab:**
+
+- `/auth/health` returned **200** at least once during the chaos window
+- A pod was **Killed** (see events)
+- Deployment returned to **2 replicas**
+
+**4. Falco during chaos**
+
+Falco may or may not alert on pod delete — that is normal. Pod deletion by the kubelet/Litmus is not the same as an attacker shell. No ClearLedger Critical alerts is **expected**.
+
+**Optional second terminal during demo:**
+
+```bash
+kubectl get pods -n clearledger -l app=auth-service -w
+```
+
+Watch one pod terminate and a new one appear — that is Kubernetes self-healing in real time.
+
+---
+
+### 6.5.6 — Manual experiments (after Experiment 1 succeeds)
+
+Wait until both auth-service pods show **2/2 Ready**, then run **one** experiment at a time:
+
+```bash
+# Experiment 2 — 2s network latency on ledger-service (60s)
+kubectl delete chaosengine ledger-service-network-latency -n litmus --ignore-not-found
+kubectl apply -f stages/stage-6.5-chaos-engineering/infra/chaos/ledger-service-network-latency.yaml
+
+# Experiment 3 — memory pressure on notification-service (60s)
+kubectl delete chaosengine notification-service-memory-hog -n litmus --ignore-not-found
+kubectl apply -f stages/stage-6.5-chaos-engineering/infra/chaos/notification-service-memory-hog.yaml
+```
+
+| Experiment | File | What to verify |
+|---|---|---|
+| Pod delete | `auth-service-pod-delete.yaml` | Health 200 during kill; 2 replicas after |
+| Network latency | `ledger-service-network-latency.yaml` | API returns 503/timeout, not infinite hang |
+| Memory hog | `notification-service-memory-hog.yaml` | Pod OOMKills and restarts; Redis subscription recovers |
+
+Clean up an experiment:
+
+```bash
+kubectl delete chaosengine auth-service-pod-delete -n litmus
+```
+
+---
+
+### 6.5.7 — Health check
 
 ```bash
 make check-65
 ```
 
+**Expected:** see full sample in [§6.5.3a](#653a--real-output-examples-verified-on-the-lab-cluster) (`make check-65` block). Minimum:
+
+```text
+▶ Stage 6.5 — Chaos Engineering (LitmusChaos)
+  ✓ Litmus subscriber running (UI connected to cluster)
+  ✓ auth-service has 2/2 Ready replicas (stable for chaos)
+  ...
+All checks passed. Ready for the next stage.
+```
+
+---
+
+### Stage 6.5 complete — done checklist
+
+| # | Check | How to verify |
+|---|---|---|
+| 1 | Litmus operator running | `kubectl get pods -n litmus` — `litmus-*` Running |
+| 2 | Experiments installed | `kubectl get chaosexperiment pod-delete -n litmus` |
+| 3 | Pod-delete demo run | `make demo-65` — health 200 during chaos |
+| 4 | Recovery observed | 2 auth-service replicas Ready; Killing/Scheduled events |
+| 5 | Evidence saved | Terminal output from `run-chaos.sh` (DORA artifact) |
+| 6 | Health check | `make check-65` green |
+| 7 | UI infrastructure connected | Overview → **Active: 1** (§6.5.2) |
+
 ### What you learned in Stage 6.5
 
-- The difference between detection (Falco sees a failure) and resilience (the system survives a failure)
-- What chaos engineering is: deliberately injecting failures to verify recovery
-- Why Kubernetes replicas matter — one pod dying does not mean downtime if another replica is serving traffic
-- **An interview talking point:** "I ran chaos experiments against a live system and proved it survived pod failures, network latency, and memory pressure"
+- **Detection ≠ resilience** — Falco alerts do not prove HA
+- **Replicas + Services + probes** — why `replicas: 2` is not cosmetic
+- **ChaosEngine YAML** — declarative failure injection as code
+- **Platform vs app namespaces** — Kyverno blocks chaos runners in `clearledger`; engines run in `litmus`
+- **MTTR** — time from pod kill to 2/2 Ready again (Stage 7 graphs this)
+
+### DevSecOps lesson — Stage 6.5
+
+Security tooling tells you when something looks wrong. **Resilience testing** tells you whether the business keeps running anyway. Together they match what production teams and DORA expect: detect incidents *and* prove you tested recovery before auditors ask.
 
 ---
 

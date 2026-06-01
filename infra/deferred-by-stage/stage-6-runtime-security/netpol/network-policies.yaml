@@ -1,6 +1,7 @@
 # INTRODUCED: Stage 6 — Runtime Security
 # PURPOSE: Zero-trust network segmentation within the clearledger namespace
-# FRAMEWORK: SOC2 CC6.6 — Logical and physical access controls
+# APPLY:   kubectl apply -f infra/deferred-by-stage/stage-6-runtime-security/netpol/network-policies.yaml
+# NOT in clearledger-infra until you deliberately add them in Stage 6+.
 #
 # Default: deny all ingress and egress. Everything below is an explicit allow.
 apiVersion: networking.k8s.io/v1
@@ -14,8 +15,8 @@ spec:
     - Ingress
     - Egress
 ---
-# auth-service: accepts traffic from ledger-service and ingress-nginx;
-# egresses only to postgres and DNS
+# auth-service: accepts traffic from ledger-service and the ingress controller;
+# egresses to postgres, Vault (secrets init), and DNS
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -35,7 +36,8 @@ spec:
               app: ledger-service
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: ingress-nginx
+              # MicroK8s lab uses namespace "ingress". Standard nginx installs use "ingress-nginx".
+              kubernetes.io/metadata.name: ingress
   egress:
     - to:
         - podSelector:
@@ -44,11 +46,66 @@ spec:
       ports:
         - port: 5432
     - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: vault
+      ports:
+        - port: 8200
+    - to:
         - namespaceSelector: {}
       ports:
-        - port: 53
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
 ---
-# ledger-service: accepts from ingress-nginx; talks to auth-service, postgres, redis
+# postgres: accepts DB connections from app tiers only
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-postgres
+  namespace: clearledger
+spec:
+  podSelector:
+    matchLabels:
+      app: postgres
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: auth-service
+        - podSelector:
+            matchLabels:
+              app: ledger-service
+      ports:
+        - port: 5432
+---
+# redis: accepts from ledger-service and notification-service
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-redis
+  namespace: clearledger
+spec:
+  podSelector:
+    matchLabels:
+      app: redis
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: ledger-service
+        - podSelector:
+            matchLabels:
+              app: notification-service
+      ports:
+        - port: 6379
+---
+# ledger-service: accepts from ingress; talks to auth-service, postgres, redis
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -65,7 +122,7 @@ spec:
     - from:
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: ingress-nginx
+              kubernetes.io/metadata.name: ingress
   egress:
     - to:
         - podSelector:
@@ -88,9 +145,12 @@ spec:
     - to:
         - namespaceSelector: {}
       ports:
-        - port: 53
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
 ---
-# notification-service: subscribes to redis; accepts from ingress-nginx
+# notification-service: subscribes to redis; accepts from ingress
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -107,7 +167,7 @@ spec:
     - from:
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: ingress-nginx
+              kubernetes.io/metadata.name: ingress
   egress:
     - to:
         - podSelector:
@@ -118,4 +178,7 @@ spec:
     - to:
         - namespaceSelector: {}
       ports:
-        - port: 53
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

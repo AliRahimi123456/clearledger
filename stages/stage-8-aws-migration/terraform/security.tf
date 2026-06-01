@@ -435,4 +435,3 @@ resource "aws_config_config_rule" "s3_public_read_prohibited" {
   }
   tags = local.common_tags
 }
-

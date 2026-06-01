@@ -1,7 +1,6 @@
 # INTRODUCED: Stage 0 — Raw Kubernetes
-# UPDATED:    Stage 5 — copy stages/stage-5-secrets-management/infra/manifests/auth-service/deployment.yaml
-#             over this file to add Vault agent injection and remove secretKeyRef
-# PURPOSE: Auth service deployment with security context hardening
+# UPDATED:    Stage 5 — Vault agent sidecar injection (no secretKeyRef)
+# PURPOSE: Auth service deployment with Vault secret injection and security hardening
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -12,6 +11,7 @@ metadata:
     version: v0.1.0
 spec:
   replicas: 2
+  revisionHistoryLimit: 3
   selector:
     matchLabels:
       app: auth-service
@@ -20,66 +20,92 @@ spec:
       labels:
         app: auth-service
         version: v0.1.0
+      annotations:
+        vault.hashicorp.com/agent-inject: "true"
+        vault.hashicorp.com/role: "auth-service"
+        vault.hashicorp.com/agent-inject-secret-database_url: "clearledger/data/auth-service"
+        vault.hashicorp.com/agent-inject-template-database_url: |
+          {{- with secret "clearledger/data/auth-service" -}}
+          {{ .Data.data.database_url }}
+          {{- end }}
+        vault.hashicorp.com/agent-inject-secret-jwt_secret: "clearledger/data/auth-service"
+        vault.hashicorp.com/agent-inject-template-jwt_secret: |
+          {{- with secret "clearledger/data/auth-service" -}}
+          {{ .Data.data.jwt_secret }}
+          {{- end }}
+        vault.hashicorp.com/agent-pre-populate-only: "false"
+        # Kyverno (Stage 4): injected agent containers need the same pod security baseline
+        vault.hashicorp.com/agent-set-security-context: "true"
+        vault.hashicorp.com/agent-run-as-user: "1000"
+        vault.hashicorp.com/agent-run-as-group: "1000"
+        vault.hashicorp.com/agent-requests-cpu: "50m"
+        vault.hashicorp.com/agent-requests-mem: "64Mi"
+        vault.hashicorp.com/agent-limits-cpu: "200m"
+        vault.hashicorp.com/agent-limits-mem: "128Mi"
     spec:
       serviceAccountName: auth-service
-      # CIS 5.1.6 — app does not call the Kubernetes API; disable default token mount.
-      # Stage 5 Vault: set automountServiceAccountToken: true on the Deployment used with Vault
-      # (see stages/stage-5-secrets-management/...) so the agent can read the projected SA JWT.
-      automountServiceAccountToken: false
+      automountServiceAccountToken: true
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
         runAsGroup: 1000
+        fsGroup: 1000
+      # vault-secrets volume + /vault/secrets mount are injected by the Vault agent webhook
+      volumes:
+        - name: tmp
+          emptyDir: {}
       containers:
         - name: auth-service
-          # Replace veeno with your Docker Hub username.
-          # This is updated automatically by the CI pipeline after Stage 1.
           image: veeno/clearledger-auth-service:v0.1.0
           ports:
             - containerPort: 8000
           env:
-            - name: DATABASE_URL
-              valueFrom:
-                secretKeyRef:
-                  name: auth-service-secret
-                  key: database_url
-            - name: JWT_SECRET
-              valueFrom:
-                secretKeyRef:
-                  name: auth-service-secret
-                  key: jwt_secret
-            # OTLP gRPC endpoint for the in-cluster OpenTelemetry Collector
+            - name: DATABASE_URL_FILE
+              value: "/vault/secrets/database_url"
+            - name: JWT_SECRET_FILE
+              value: "/vault/secrets/jwt_secret"
+            - name: SERVICE_NAME
+              value: "auth-service"
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: "http://otel-collector.monitoring.svc.cluster.local:4317"
-            # service.name label on every trace span in Tempo
             - name: OTEL_SERVICE_NAME
               value: "auth-service"
-            # Additional resource attributes for trace filtering in Grafana
             - name: OTEL_RESOURCE_ATTRIBUTES
               value: "k8s.namespace=clearledger,k8s.deployment.name=auth-service"
-            # deployment.environment resource attribute (production vs dev)
             - name: ENV
               value: "production"
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
           resources:
             requests:
               memory: "128Mi"
               cpu: "100m"
             limits:
-              memory: "256Mi"
+              memory: "384Mi"
               cpu: "500m"
+          # startupProbe: Python + OTEL + Vault sidecar need time before :8000 listens.
+          # Without this, liveness kills the container during cold start (CrashLoopBackOff).
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 5
+            failureThreshold: 24
           livenessProbe:
             httpGet:
               path: /health
               port: 8000
-            initialDelaySeconds: 15
             periodSeconds: 10
+            failureThreshold: 3
           readinessProbe:
             httpGet:
               path: /health
               port: 8000
-            initialDelaySeconds: 5
             periodSeconds: 5
+            failureThreshold: 6
           securityContext:
+            runAsNonRoot: true
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities:

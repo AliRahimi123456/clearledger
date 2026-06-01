@@ -25,6 +25,7 @@ if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
     "grafana.local"
     "vault.local"
     "falco.local"
+    "litmus.local"
   )
   for domain in "${DOMAINS[@]}"; do
     sudo sed -i '' "/$domain/d" /etc/hosts 2>/dev/null || \

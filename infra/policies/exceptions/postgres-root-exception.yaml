@@ -49,7 +49,8 @@ spec:
     # ruleNames lists the specific rules inside that policy to skip.
     - policyName: disallow-root-containers
       ruleNames:
-        - check-runAsNonRoot
+        - check-runAsNonRoot-containers
+        - check-runAsNonRoot-initcontainers
 
   match:
     any:

@@ -34,9 +34,9 @@ header() { echo -e "\n${CYAN}${BOLD}▶ $1${NC}"; }
 
 # ── Helper functions ──────────────────────────────────────────────────────────
 pod_running() {
-  local label=$1 namespace=${2:-clearledger}
+  local label=$1 namespace=${2:-clearledger} label_key=${3:-app}
   local count
-  count=$(kubectl get pods -n "$namespace" -l "app=$label" \
+  count=$(kubectl get pods -n "$namespace" -l "${label_key}=${label}" \
     --field-selector=status.phase=Running \
     --no-headers 2>/dev/null | wc -l)
   [ "$count" -gt 0 ]
@@ -226,18 +226,29 @@ check_stage_0() {
 check_stage_1() {
   header "Stage 1 — CI Pipeline (GitHub Actions + Self-Hosted Runner)"
 
-  # GitHub Actions self-hosted runner inside VM
-  local runner_status
-  runner_status=$(multipass exec clearledger -- \
-    sudo systemctl is-active actions.runner.*.service 2>/dev/null || echo "inactive")
+  local runner_check
+  runner_check=$(bash scripts/runner-vm-state.sh state 2>/dev/null || echo "missing")
 
-  if [ "$runner_status" = "active" ]; then
-    pass "GitHub Actions self-hosted runner is active"
-  else
-    fail "GitHub Actions runner is not running inside the VM.
-    Fix: multipass exec clearledger -- sudo systemctl start actions.runner.*.service
+  case "$runner_check" in
+    systemd:active:*)
+      pass "GitHub Actions self-hosted runner is active (${runner_check#systemd:active:})"
+      ;;
+    process:running)
+      pass "GitHub Actions runner process is running"
+      warn "Runner is not managed by systemd — CI works now but will not survive a VM reboot. Fix: bash scripts/runner-vm-state.sh start (see stages/stage-1-ci-pipeline/README.md section 2)"
+      ;;
+    no-multipass)
+      fail "multipass not found on this machine — install Multipass first (macOS/Linux/Windows: https://multipass.run)"
+      ;;
+    no-vm)
+      fail "Multipass VM 'clearledger' not found — launch the VM first (see QUICKSTART.md)"
+      ;;
+    *)
+      fail "GitHub Actions runner is not running inside the VM.
+    Fix: bash scripts/runner-vm-state.sh start
     Setup: see stages/stage-1-ci-pipeline/README.md section 2"
-  fi
+      ;;
+  esac
 
   # Remind the learner what to verify on GitHub (cannot check these from the host)
   echo ""
@@ -252,7 +263,7 @@ check_stage_1() {
 check_stage_2() {
   header "Stage 2 — GitOps (ArgoCD)"
 
-  if pod_running "argocd-server" "argocd"; then
+  if pod_running "argocd-server" "argocd" "app.kubernetes.io/name"; then
     pass "ArgoCD server is running"
   else
     fail "ArgoCD not running — install from stable manifest"
@@ -324,7 +335,7 @@ check_stage_3() {
         warn "pre-commit hooks found issues — run: pre-commit run --all-files"
       fi
     else
-      warn "pre-commit not installed on host — run: pip install pre-commit && pre-commit install"
+      warn "pre-commit not installed on host — macOS: brew install pre-commit && pre-commit install"
     fi
   else
     warn ".pre-commit-config.yaml not found"
@@ -342,10 +353,10 @@ check_stage_3() {
 check_stage_4() {
   header "Stage 4 — Admission Control (Kyverno)"
 
-  if pod_running "kyverno" "kyverno"; then
+  if pod_running "admission-controller" "kyverno" "app.kubernetes.io/component"; then
     pass "Kyverno is running"
   else
-    fail "Kyverno not running — helm install kyverno kyverno/kyverno -n kyverno --create-namespace"
+    fail "Kyverno not running — see stages/stage-4-admission-control/README.md (helm upgrade --install kyverno ... --version 3.2.8)"
   fi
 
   # Policies
@@ -418,10 +429,17 @@ TESTPOD
 check_stage_5() {
   header "Stage 5 — Secrets Management (Vault)"
 
-  if pod_running "vault" "vault"; then
+  if pod_running "vault" "vault" "app.kubernetes.io/name"; then
     pass "Vault pod is running"
   else
     fail "Vault not running — helm install vault hashicorp/vault ..."
+  fi
+
+  # Vault agent injector (required for pod secret injection)
+  if pod_running "vault-agent-injector" "vault" "app.kubernetes.io/name"; then
+    pass "Vault agent injector is running"
+  else
+    fail "Vault injector not running — helm install with injector.enabled=true"
   fi
 
   # Vault unsealed
@@ -497,7 +515,7 @@ check_stage_6() {
     if kubectl get networkpolicy "$policy" -n clearledger &>/dev/null; then
       pass "NetworkPolicy $policy exists"
     else
-      fail "NetworkPolicy $policy missing — apply infra/manifests/netpol/"
+      fail "NetworkPolicy $policy missing — apply infra/deferred-by-stage/stage-6-runtime-security/netpol/"
     fi
   done
 
@@ -525,23 +543,56 @@ check_stage_65() {
     fail "litmus namespace missing — install LitmusChaos (Stage 6.5 README)"
   fi
 
-  if kubectl get serviceaccount litmus-admin -n clearledger &>/dev/null; then
-    pass "litmus-admin ServiceAccount exists in clearledger"
+  if kubectl get serviceaccount litmus-admin -n litmus &>/dev/null; then
+    pass "litmus-admin ServiceAccount exists in litmus"
   else
     fail "litmus-admin SA missing — apply stages/stage-6.5-chaos-engineering/infra/chaos/litmus-rbac.yaml"
   fi
 
-  if kubectl get pods -n litmus --field-selector=status.phase=Running \
-    --no-headers 2>/dev/null | grep -q "."; then
-    pass "LitmusChaos pods are running"
+  if kubectl get chaosexperiment pod-delete -n litmus &>/dev/null; then
+    pass "pod-delete ChaosExperiment installed in litmus"
   else
-    warn "No LitmusChaos pods running — helm install may be pending"
+    fail "pod-delete experiment missing — run install-litmus.sh"
+  fi
+
+  if kubectl get pods -n litmus -l app=litmus --field-selector=status.phase=Running \
+    --no-headers 2>/dev/null | grep -q .; then
+    pass "Litmus chaos operator is running"
+  else
+    warn "Litmus operator pod not found — run install-litmus.sh"
+  fi
+
+  if http_ok "http://litmus.local"; then
+    pass "Litmus ChaosCenter reachable at http://litmus.local"
+  else
+    warn "Litmus UI not reachable — kubectl apply -f stages/stage-6.5-chaos-engineering/infra/chaos/litmus-ingress.yaml"
+  fi
+
+  if kubectl get pods -n litmus 2>/dev/null | grep -E 'subscriber.*Running' | grep -q .; then
+    pass "Litmus subscriber running (UI connected to cluster)"
+  else
+    fail "Litmus subscriber missing — UI will be empty: make connect-litmus (set LITMUS_PASSWORD if needed)"
   fi
 
   if http_ok "http://clearledger.local/auth/health"; then
     pass "auth-service healthy (baseline before chaos)"
   else
-    fail "auth-service not reachable — fix Stage 6 before chaos testing"
+    fail "auth-service not reachable — run: make fix-65-prereqs"
+  fi
+
+  local auth_ready
+  auth_ready=$(kubectl get pods -n clearledger -l app=auth-service \
+    --no-headers 2>/dev/null | awk '$2=="2/2" && $3=="Running"' | wc -l | tr -d ' ')
+  if [ "${auth_ready:-0}" -ge 2 ]; then
+    pass "auth-service has 2/2 Ready replicas (stable for chaos)"
+  else
+    fail "auth-service not 2/2 Ready (${auth_ready:-0} ready) — run: make fix-65-prereqs"
+  fi
+
+  if kubectl get networkpolicy allow-postgres -n clearledger &>/dev/null; then
+    pass "allow-postgres NetworkPolicy exists (Stage 6 fix)"
+  else
+    warn "allow-postgres missing — postgres may block auth DB connections: make fix-65-prereqs"
   fi
 }
 

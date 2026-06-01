@@ -96,4 +96,3 @@ Rollback example:
 Note: We wrote both NEW and OLD jwt_secret values for an overlap window so existing tokens remain valid.
 After your token TTL expires, rotate again and write only the new secret.
 EOF
-

@@ -27,6 +27,14 @@ spec:
           {{- with secret "clearledger/data/ledger-service" -}}
           {{ .Data.data.database_url }}
           {{- end }}
+        vault.hashicorp.com/agent-pre-populate-only: "false"
+        vault.hashicorp.com/agent-set-security-context: "true"
+        vault.hashicorp.com/agent-run-as-user: "1000"
+        vault.hashicorp.com/agent-run-as-group: "1000"
+        vault.hashicorp.com/agent-requests-cpu: "50m"
+        vault.hashicorp.com/agent-requests-mem: "64Mi"
+        vault.hashicorp.com/agent-limits-cpu: "200m"
+        vault.hashicorp.com/agent-limits-mem: "128Mi"
     spec:
       serviceAccountName: ledger-service
       automountServiceAccountToken: true
@@ -34,6 +42,10 @@ spec:
         runAsNonRoot: true
         runAsUser: 1000
         runAsGroup: 1000
+        fsGroup: 1000
+      volumes:
+        - name: tmp
+          emptyDir: {}
       containers:
         - name: ledger-service
           # Replace DOCKER_USERNAME with your Docker Hub username.
@@ -46,6 +58,9 @@ spec:
               value: "http://auth-service.clearledger.svc.cluster.local"
             - name: REDIS_URL
               value: "redis://redis.clearledger.svc.cluster.local:6379"
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
           resources:
             requests:
               memory: "128Mi"
@@ -66,19 +81,8 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 5
           securityContext:
+            runAsNonRoot: true
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities:
               drop: [ALL]
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: ledger-service
-  namespace: clearledger
-spec:
-  selector:
-    app: ledger-service
-  ports:
-    - port: 80
-      targetPort: 8000

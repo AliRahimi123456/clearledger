@@ -1,4 +1,6 @@
-# INTRODUCED: Stage 4 (enhanced) — SLSA Provenance Verification
+# OPTIONAL — not part of Stage 4 core apply set.
+# Apply only after require-signed-images is working and CI generates SLSA attestations.
+# Requires mutateDigest: false when validationFailureAction is Audit (see Kyverno docs).
 # PURPOSE: Verify that images have valid SLSA provenance attestations,
 #          not just signatures. This is SLSA Level 2.
 #          Signatures prove WHO signed. Attestations prove HOW it was built.

@@ -1,0 +1,23 @@
+# Experiment 3 — memory pressure on notification-service (manual, one at a time)
+# Run only after prior experiments complete and pods have recovered.
+apiVersion: litmuschaos.io/v1alpha1
+kind: ChaosEngine
+metadata:
+  name: notification-service-memory-hog
+  namespace: litmus
+spec:
+  appinfo:
+    appns: clearledger
+    applabel: app=notification-service
+    appkind: deployment
+  engineState: active
+  chaosServiceAccount: litmus-admin
+  experiments:
+    - name: pod-memory-hog
+      spec:
+        components:
+          env:
+            - name: MEMORY_CONSUMPTION
+              value: "80"
+            - name: TOTAL_CHAOS_DURATION
+              value: "60"

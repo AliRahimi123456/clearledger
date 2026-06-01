@@ -19,6 +19,8 @@ metadata:
 spec:
   validationFailureAction: Enforce
   background: false
+  webhookTimeoutSeconds: 30
+  failurePolicy: Fail
   rules:
     - name: verify-cosign-signature
       match:
@@ -28,8 +30,7 @@ spec:
               namespaces: [clearledger]
       verifyImages:
         - imageReferences:
-            # index.docker.io is Docker Hub's canonical registry URL used by Kyverno.
-            # The * before clearledger-* matches any Docker Hub username.
+            # Use index.docker.io — Kyverno 1.12 matches this form reliably for verifyImages.
             - "index.docker.io/*/clearledger-auth-service*"
             - "index.docker.io/*/clearledger-ledger-service*"
             - "index.docker.io/*/clearledger-notification-service*"
@@ -39,6 +40,4 @@ spec:
               entries:
                 - keys:
                     publicKeys: |-
-                      -----BEGIN PUBLIC KEY-----
                       PASTE_YOUR_COSIGN_PUBLIC_KEY_HERE
-                      -----END PUBLIC KEY-----

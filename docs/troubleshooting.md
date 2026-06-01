@@ -446,6 +446,165 @@ kubectl get deployment auth-service -n clearledger \
 
 ---
 
+---
+
+<a id="stage-4-admission-control-troubleshooting"></a>
+
+## Stage 4 — Admission Control (Kyverno)
+
+Stage 4 installs Kyverno, applies five ClusterPolicies, and runs break-it scenarios to prove enforcement. The failures below were hit during lab setup on MicroK8s — they are the same class of issues you see rolling admission control into a real cluster.
+
+### Quick reference
+
+| Problem | Symptom | Root cause | Fix |
+|---|---|---|---|
+| Kyverno cleanup pods | `ImagePullBackOff` on `bitnami/kubectl:1.28.5` | Bitnami removed public images from Docker Hub | Lab values file (see below) |
+| Helm upgrade stuck | `pending-upgrade`, duplicate pods, `ErrImagePull` | Slow `ghcr.io` pulls + partial upgrade | Full teardown, reinstall chart 3.2.8 |
+| Helm upgrade to 3.6.4 | CRD patch error (`selectableFields`) | Kyverno 1.16 needs Kubernetes ≥1.30 | Stay on chart 3.2.8 / Kyverno 1.12.x |
+| Signature policy silent | Unsigned pod admitted with `docker.io/...` | `verifyImages` matches `index.docker.io/*` reliably | Use full registry URL + `failurePolicy: Fail` |
+| Scenario 3 false negative | Pod created, then `ImagePullBackOff` | Tag never pushed to Docker Hub | Push `unsigned-test` tag; verify with `cosign verify` |
+| `make check-4` kube-bench fail | Script exits immediately on macOS | Empty baseline; `grep` + `pipefail` | Run baseline scan; script compares regressions only |
+| Health check false negative | “Kyverno not running” | Wrong pod label selector | Use `app.kubernetes.io/component=admission-controller` |
+
+---
+
+### Kyverno cleanup pods in ImagePullBackOff
+
+**Symptom:**
+
+```bash
+kubectl get pods -n kyverno
+# kyverno-cleanup-admission-reports-...   ImagePullBackOff
+# ... pulling bitnami/kubectl:1.28.5
+```
+
+**Cause:** Kyverno Helm chart ≤3.5 uses `bitnami/kubectl` for cleanup CronJobs and uninstall hooks. Bitnami removed those images from `docker.io/bitnami`.
+
+**Fix:** Install with the lab values file — it disables cleanup CronJobs (they only prune old PolicyReports) and points Helm hooks at `bitnamilegacy/kubectl`:
+
+```bash
+helm upgrade --install kyverno kyverno/kyverno \
+  --version 3.2.8 \
+  --namespace kyverno --create-namespace \
+  -f stages/stage-4-admission-control/infra/kyverno/values.yaml \
+  --wait --timeout=600s
+```
+
+If Helm uninstall hangs on a scale-to-zero hook, force-delete stuck jobs/pods in `kyverno` namespace, then delete the namespace.
+
+---
+
+### Helm upgrade stuck or duplicate Kyverno pods
+
+**Symptom:** `helm list -n kyverno` shows `failed` or `pending-upgrade`; old and new admission-controller pods coexist; some in `ErrImagePull`.
+
+**Cause:** Upgrading to chart 3.5.3+ on a slow connection while images pull from `ghcr.io/kyverno`; or layering upgrades without cleaning up a failed release.
+
+**Fix — clean reinstall (MicroK8s / Kubernetes 1.29):**
+
+```bash
+helm uninstall kyverno -n kyverno || true
+kubectl delete jobs -n kyverno --all --force --grace-period=0 2>/dev/null || true
+kubectl delete namespace kyverno --force --grace-period=0
+kubectl delete clusterpolicy --all
+kubectl get crd | grep kyverno | awk '{print $1}' | xargs kubectl delete crd
+
+helm upgrade --install kyverno kyverno/kyverno \
+  --version 3.2.8 \
+  --namespace kyverno --create-namespace \
+  -f stages/stage-4-admission-control/infra/kyverno/values.yaml \
+  --wait --timeout=600s
+```
+
+**Do not** upgrade to chart 3.6.4 on Kubernetes 1.29 — CRD patch fails with `selectableFields: field not declared in schema`.
+
+---
+
+### Signature policy does not block unsigned images
+
+**Symptom:** Scenario 3 pod is **created** (Running or ImagePullBackOff) instead of admission denial naming `require-signed-images`.
+
+**Causes and fixes:**
+
+1. **Image URL format** — use `index.docker.io/${DOCKER_USERNAME}/clearledger-auth-service:unsigned-test`, not `docker.io/...` alone. Kyverno 1.12 `verifyImages` matching is reliable on the canonical form.
+
+2. **Tag does not exist** — if the tag was never pushed, the pod may be admitted then fail at pull (`ImagePullBackOff`). That is not signature enforcement. Push the unsigned test image first:
+
+```bash
+docker pull nginx:alpine
+docker tag nginx:alpine ${DOCKER_USERNAME}/clearledger-auth-service:unsigned-test
+docker push ${DOCKER_USERNAME}/clearledger-auth-service:unsigned-test
+cosign verify --key infra/cosign.pub \
+  index.docker.io/${DOCKER_USERNAME}/clearledger-auth-service:unsigned-test
+# Expected: Error: no signatures found
+```
+
+3. **Policy missing fail-closed settings** — `infra/policies/require-signed-images.yaml` must include:
+
+```yaml
+spec:
+  webhookTimeoutSeconds: 30
+  failurePolicy: Fail
+```
+
+Re-apply: `kubectl apply -f infra/policies/require-signed-images.yaml`
+
+**Expected denial:**
+
+```text
+admission webhook "mutate.kyverno.svc-fail" denied the request:
+require-signed-images:
+  verify-cosign-signature: 'failed to verify image ... no signatures found'
+```
+
+---
+
+### `make check-4` fails on kube-bench
+
+**Symptom:** Health check reports `kube-bench regressions detected` or the script exits with no summary.
+
+**Cause:** Baseline file was empty on first run; on macOS, `run-kube-bench.sh` used `grep` with `set -o pipefail` and exited when no `INFO` statuses existed.
+
+**Fix:**
+
+```bash
+kubectl delete job -n kube-system kube-bench --ignore-not-found
+bash stages/stage-4-admission-control/scripts/run-kube-bench.sh
+make check-4
+```
+
+The script compares against `kube-bench-baseline.json` and only fails on **new** regressions (PASS/WARN → FAIL). Known MicroK8s FAILs documented in the baseline are acceptable.
+
+---
+
+### Health check says Kyverno not running
+
+**Symptom:** `make check-4` fails “Kyverno not running” but `kubectl get pods -n kyverno` shows controllers Running.
+
+**Cause:** Health check looked for label `app=kyverno`; Kyverno pods use `app.kubernetes.io/component=admission-controller`.
+
+**Fix:** Verify manually:
+
+```bash
+kubectl get pods -n kyverno -l app.kubernetes.io/component=admission-controller
+```
+
+Ensure you are on a current `scripts/health-check.sh` (Stage 4 check uses the correct label).
+
+---
+
+### Policies not READY
+
+```bash
+kubectl get clusterpolicy
+# READY column empty or False
+kubectl logs -n kyverno -l app.kubernetes.io/component=admission-controller --tail=50
+```
+
+Common causes: admission controller not Running; typo in policy YAML; applying `verify-slsa-provenance.yaml` before it is configured (skip it for Stage 4 — apply only the five core policies listed in LAB-GUIDE §4.3).
+
+---
+
 ## Kyverno Issues
 
 ### Kyverno blocking a deployment you expect to pass
@@ -476,7 +635,60 @@ kubectl describe policyreport -n clearledger
 
 ---
 
+## Stage 6 — Runtime Security (Falco)
+
+> Full walkthrough: [LAB-GUIDE.md § Stage 6](../docs/LAB-GUIDE.md#stage-6--runtime-security-falco)
+
+### Common issues
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| Falco pod CrashLoopBackOff | Invalid rule field in custom rules | Check `kubectl logs -n falco -l app.kubernetes.io/name=falco -c falco`; use `k8smeta.ns.name = clearledger` (requires `collectors.kubernetes.enabled: true` in Helm values) |
+| `helm install` “cannot re-use a name” | Falco already installed | Re-run `bash stages/stage-6-runtime-security/scripts/install-falco.sh` |
+| No alerts after `kubectl exec` | Rules not loaded or wrong namespace | Confirm `clearledger_rules.yaml \| schema validation: ok` in Falco logs |
+| Auth/notification health fails after netpol | Ingress namespace label or missing allow rule | Confirm `ingress` namespace has `kubernetes.io/metadata.name=ingress` |
+| Falco UI unreachable | Ingress not applied | `kubectl apply -f stages/stage-6-runtime-security/infra/falco-ingress.yaml` |
+| Falco UI shows login form / "can't be empty" | UI has basic auth enabled (default) | Login **admin**, password **admin** — or `kubectl get secret falco-falcosidekick-ui -n falco -o jsonpath='{.data.FALCOSIDEKICK_UI_USER}' \| base64 -d` |
+
+## Stage 6.5 — Chaos Engineering (LitmusChaos)
+
+> Full walkthrough: [LAB-GUIDE.md § Stage 6.5](../docs/LAB-GUIDE.md#stage-65--chaos-engineering-optional)
+
+### Common issues
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `no matches for kind "ChaosEngine"` | Operator not installed | `bash stages/stage-6.5-chaos-engineering/scripts/install-litmus.sh` (needs **litmus-core**, not ChaosCenter UI alone) |
+| `Unable to get chaos resources` | Experiments not in `litmus` namespace | Re-run install script; `kubectl get chaosexperiment pod-delete -n litmus` |
+| Kyverno denies `*-runner` pod in clearledger | Stage 4 policies block non-compliant pods | **Expected** — keep `ChaosEngine` in `litmus` namespace (see LAB-GUIDE §6.5.2) |
+| `serviceaccount "litmus-admin" not found` | RBAC applied to wrong namespace | `kubectl apply -f stages/stage-6.5-chaos-engineering/infra/chaos/litmus-rbac.yaml` (SA in **litmus**) |
+| ChaosResult verdict **Error** but health stayed 200 | Litmus targeted pod in Vault Init | Pass criteria = health during chaos + 2 replicas recovered (see LAB-GUIDE §6.5.4) |
+| `/auth/health` fails during chaos | Only 1 replica or probe misconfigured | `kubectl get deploy auth-service -n clearledger` — need `replicas: 2` |
+| New auth pod stuck `Init:0/1` | Vault agent init after recreate | Wait 1–2 min; normal after pod delete in Stage 5 |
+| Litmus UI not reachable | Ingress not applied | `kubectl apply -f stages/stage-6.5-chaos-engineering/infra/chaos/litmus-ingress.yaml`; add `litmus.local` to `/etc/hosts` |
+| Litmus UI **blank** / empty Overview (**0** infrastructures) | Cluster not connected — no subscriber agent | `export LITMUS_PASSWORD='your-password'` then `make connect-litmus`; open **http://litmus.local** (not `/account/.../settings` URLs) |
+| Infrastructure stuck **PENDING** | Subscriber waiting for unhealthy `event-tracker` pod | `make connect-litmus` (disables event-tracker + patches subscriber); confirm `IS_INFRA_CONFIRMED=true` in `subscriber-config` |
+| Litmus wizard labels differ from LAB-GUIDE | ChaosCenter UI changes between 3.x versions | Match fields by **meaning** (namespace, label, 50%, 30s) — see LAB-GUIDE §6.5.2 Step 3 concept table |
+| Litmus UI loads but API errors | Ingress missing `/backend/` route | Re-apply `litmus-ingress.yaml`; `kubectl set env deployment/chaos-litmus-server -n litmus --containers=graphql-server INGRESS=true INGRESS_NAME=litmus-ingress` |
+| Litmus UI login fails | Wrong credentials | Default **admin** / **litmus** (see `litmus-values.yaml`) |
+| ArgoCD **Progressing**, many `auth-service` ReplicaSets | Auth pods 1/2 or OOM; repeated failed rollouts | `make fix-argocd` — applies startupProbe + 384Mi + postgres netpol; prunes old ReplicaSets |
+
 ## Vault Issues
+
+> Full Stage 5 walkthrough: [LAB-GUIDE.md § Stage 5](../docs/LAB-GUIDE.md#stage-5--secrets-management-vault)
+
+### Stage 5 — common issues
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `auth-service-secret` not found when building `.env` | Secret deleted too early | Use §5.1 fallback (postgres-secret) or read from Vault KV |
+| `helm install` “cannot re-use a name” | Vault already installed | `helm upgrade --install vault ...` (see LAB-GUIDE §5.2) |
+| `kubectl delete secret` → `NotFound` | Secrets already deleted | OK — continue to §5.6 |
+| Auth pods stuck `1/1` | Injector off or no Vault annotations | `injector.enabled=true`; check deployment annotations |
+| Auth pods `FailedCreate` duplicate `vault-secrets` | Manual volume + injector volume | Remove `vault-secrets` from deployment.yaml |
+| Kyverno denies new auth pods | Missing container `runAsNonRoot` | Add on app container; Vault agent excluded by name |
+| Login fails after migration | `SEED_*` mismatch with Postgres | Re-run `seed-vault-secrets.sh` with correct `.env` |
+| ArgoCD OutOfSync on deleted secrets | Infra repo still has `secret.yaml` | Remove from `clearledger-infra` and push |
 
 ### Vault agent not injecting secrets
 
@@ -510,9 +722,9 @@ kubectl exec -n vault vault-0 -- vault operator unseal
 ### Secrets not appearing in /vault/secrets
 
 ```bash
-# Verify Vault has the secret at the expected path
-kubectl exec -n vault vault-0 -- vault login root-dev-token
-kubectl exec -n vault vault-0 -- vault kv get clearledger/auth-service
+# Verify Vault has the secret at the expected path (use VAULT_TOKEN from .env — not from Git)
+kubectl exec -n vault vault-0 -- vault login "$VAULT_TOKEN"
+kubectl exec -n vault vault-0 -- vault kv metadata get clearledger/auth-service
 
 # Verify the annotation path matches the actual Vault path
 # deployment.yaml annotation:
@@ -590,6 +802,18 @@ kubectl get pod -n clearledger -l app=auth-service \
 
 ## ArgoCD Issues
 
+### CLI warning: "Failed to invoke grpc call. Use flag --grpc-web"
+
+When the ArgoCD CLI talks to the server through the nginx Ingress (`argocd.local`),
+native gRPC often fails; the CLI falls back and login may still succeed, but you will
+see a warning.
+
+**Fix:** pass `--grpc-web` on login and other CLI commands:
+
+```bash
+argocd login argocd.local --username admin --password YOUR_PASSWORD --insecure --grpc-web
+```
+
 ### Application stuck in OutOfSync
 
 ```bash
@@ -602,6 +826,44 @@ kubectl get events -n clearledger --sort-by='.lastTimestamp'
 # Check if the infra repo is reachable
 argocd repo list
 ```
+
+### Drift demo: kubectl set image does nothing / ArgoCD stays Synced
+
+**Symptom:** You change a deployment image with `kubectl set image`, but ArgoCD UI stays **Synced** and the image is not reverted after a few minutes.
+
+**Cause:** ArgoCD is only watching top-level manifests (`namespace.yaml`, `ingress.yaml`), not files under `manifests/auth-service/`, etc. Without `directory.recurse: true`, deployments you applied in Stage 0 are invisible to ArgoCD.
+
+**Fix:**
+
+```bash
+# Application spec must include:
+#   directory:
+#     recurse: true
+kubectl apply -f stages/stage-2-gitops/argocd/clearledger-app.yaml
+argocd app sync clearledger --grpc-web
+argocd app resources clearledger --grpc-web | grep Deployment
+```
+
+**Expected:** `auth-service`, `ledger-service`, and other Deployments appear in the list. Then re-run the drift demo.
+
+**Note:** Git (`clearledger-infra`) should not change during the demo — only the live cluster drifts, then ArgoCD corrects it.
+
+### ArgoCD Synced but red pods / Health "Progressing" (Stage 2)
+
+**Symptom:** After enabling `directory.recurse: true` or the first full sync, `auth-service` / `ledger-service` show red in the ArgoCD tree, new pods are `0/1`, app health is **Progressing** while sync is **Synced**.
+
+**Cause:** `manifests/netpol/` in `clearledger-infra` (Stage 6 material; should live in `infra/deferred-by-stage/` only) was applied by ArgoCD. `default-deny-all` blocks DNS; new pods fail with `could not translate host name "postgres"`.
+
+**Fix (Stage 2 — defer netpol to Stage 6):**
+
+1. Delete folder `manifests/netpol/` in `clearledger-infra` on GitHub and push.
+2. `argocd app sync clearledger --grpc-web`
+3. If needed: `kubectl rollout restart deployment/auth-service deployment/ledger-service -n clearledger`
+4. Optional immediate cleanup: `kubectl delete networkpolicy -n clearledger --all` (only helps once Git no longer contains netpol — otherwise ArgoCD recreates them).
+
+**Expected:** App **Healthy**, green pods, then continue with the drift demo.
+
+See [LAB-GUIDE.md — Stage 2 red pods section](../docs/LAB-GUIDE.md#if-the-ui-shows-red-pods-or-progressing-read-this-before-the-screenshot).
 
 ### selfHeal reverting your manual changes
 
@@ -683,7 +945,7 @@ kubectl delete networkpolicy default-deny-all -n clearledger
 curl -s http://clearledger.local/auth/health
 
 # Re-apply when done testing
-kubectl apply -f infra/manifests/netpol/network-policies.yaml
+kubectl apply -f infra/deferred-by-stage/stage-6-runtime-security/netpol/network-policies.yaml
 ```
 
 ---

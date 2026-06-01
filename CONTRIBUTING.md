@@ -6,7 +6,7 @@ All changes go through a pull request. Direct pushes to main are blocked.
 
 1. Create a branch: git checkout -b fix/description-of-change
 2. Make your change
-3. Push: git push origin fix/description-of-change  
+3. Push: git push origin fix/description-of-change
 4. Open a pull request
 5. Wait for pipeline to pass
 6. Get at least one review

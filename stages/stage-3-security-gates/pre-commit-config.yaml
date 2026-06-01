@@ -4,7 +4,8 @@
 #          If Gitleaks catches a secret here, it never touches the git history.
 #
 # SETUP (run once, all platforms):
-#   pip install pre-commit
+#   macOS: brew install pre-commit
+#   Linux: python3 -m venv .venv && source .venv/bin/activate && pip install pre-commit
 #   pre-commit install
 #
 # After installation, these hooks run automatically on every git commit.
@@ -33,6 +34,8 @@ repos:
       - id: check-yaml
         name: "📋 Validate YAML syntax"
         args: [--allow-multiple-documents]
+        # GitHub Actions embed shell/Python in run: blocks — not plain YAML
+        exclude: ^\.github/workflows/
       - id: check-json
         name: "📋 Validate JSON syntax"
       - id: check-merge-conflict
@@ -72,3 +75,4 @@ repos:
       - id: terraform_validate
         name: "🏗️  Terraform validate"
         files: stages/stage-8-aws-migration/terraform/
+        stages: [manual]

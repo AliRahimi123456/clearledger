@@ -90,4 +90,3 @@ Correct order matters:
   create new -> update Vault -> wait -> drop old
 
 EOF
-

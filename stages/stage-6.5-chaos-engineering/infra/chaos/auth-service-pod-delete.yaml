@@ -1,9 +1,11 @@
-# Experiment 1 only — used by run-chaos.sh (never run all experiments at once)
+# Experiment 1 — pod-delete against auth-service (2 replicas)
+# ChaosEngine lives in litmus namespace (Kyverno blocks runners in clearledger).
+# Targets app in clearledger via spec.appinfo.
 apiVersion: litmuschaos.io/v1alpha1
 kind: ChaosEngine
 metadata:
   name: auth-service-pod-delete
-  namespace: clearledger
+  namespace: litmus
 spec:
   appinfo:
     appns: clearledger

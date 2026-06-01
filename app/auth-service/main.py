@@ -129,6 +129,7 @@ def _load_jwt_secrets() -> list[str]:
 _ENGINE_URL: str | None = None
 _ENGINE = None
 _SessionLocal = None
+_TABLES_INITIALIZED = False
 
 
 def _ensure_engine() -> None:
@@ -143,8 +144,22 @@ def _ensure_engine() -> None:
         _ENGINE = create_engine(url)
         _SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=_ENGINE)
 
+
+def _ensure_tables() -> None:
+    """Create tables on first DB use — not at import time.
+
+    Stage 6 network policies can block postgres briefly during pod startup.
+    Import-time create_all() crashed the process before /health could respond,
+    which looked like random restarts under liveness probes.
+    """
+    global _TABLES_INITIALIZED
+    _ensure_engine()
+    if not _TABLES_INITIALIZED:
+        Base.metadata.create_all(bind=_ENGINE)
+        _TABLES_INITIALIZED = True
+
+
 # ── Database ──────────────────────────────────────────────────────────────────
-_ensure_engine()
 Base = declarative_base()
 
 
@@ -157,11 +172,8 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
-Base.metadata.create_all(bind=_ENGINE)
-
-
 def get_db():
-    _ensure_engine()
+    _ensure_tables()
     db = _SessionLocal()
     try:
         yield db
