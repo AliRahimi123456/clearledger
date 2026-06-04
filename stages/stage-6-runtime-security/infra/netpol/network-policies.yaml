@@ -105,7 +105,7 @@ spec:
       ports:
         - port: 6379
 ---
-# ledger-service: accepts from ingress; talks to auth-service, postgres, redis
+# ledger-service: accepts from ingress; talks to auth-service, postgres, redis, Vault
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -143,12 +143,36 @@ spec:
       ports:
         - port: 6379
     - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: vault
+      ports:
+        - port: 8200
+    - to:
         - namespaceSelector: {}
       ports:
         - protocol: UDP
           port: 53
         - protocol: TCP
           port: 53
+---
+# frontend: SPA served to browsers via ingress only (no backend egress required)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-frontend
+  namespace: clearledger
+spec:
+  podSelector:
+    matchLabels:
+      app: frontend
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress
 ---
 # notification-service: subscribes to redis; accepts from ingress
 apiVersion: networking.k8s.io/v1
