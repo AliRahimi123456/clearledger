@@ -1324,13 +1324,26 @@ kubectl -n argocd get secret argocd-initial-admin-secret \
   -o jsonpath="{.data.password}" | base64 -d && echo
 ```
 
-Apply the ArgoCD Ingress so your browser can reach it:
+Configure Argo CD for NGINX ingress (TLS at ingress, HTTP to the server — fixes `503` / `ERR_TOO_MANY_REDIRECTS` on `/api/v1/stream/*`):
+
+```bash
+kubectl apply -f stages/stage-2-gitops/infra/argocd-cmd-params.yaml
+kubectl apply -f stages/stage-2-gitops/infra/argocd-ingress.yaml
+kubectl rollout restart deployment/argocd-server -n argocd
+kubectl rollout status deployment/argocd-server -n argocd --timeout=180s
+```
+
+**Expected in `argocd-cmd-params-cm`:** `server.insecure: "true"`, `server.grpc.web: "true"`, `server.url: https://argocd.local`
+
+Apply the ArgoCD Ingress (HTTP backend on port 80 — do **not** use `ssl-passthrough`):
 
 ```bash
 kubectl apply -f stages/stage-2-gitops/infra/argocd-ingress.yaml
 ```
 
-Open **`https://argocd.local`** (not `http://`) — login: `admin` / the password from the command above. Accept the browser certificate warning (self-signed). If the login page refreshes after Sign In without entering the app, you are almost certainly on HTTP; use HTTPS or let the ingress redirect you.
+Open **`https://argocd.local`** in a **private/incognito** window (clears stale tokens that cause `401 Unauthorized`). Login: `admin` / the password from the command above. Accept the browser certificate warning (self-signed).
+
+**Expected:** After login, the Applications page loads with **no** red `401` or `ERR_HTTP2_PROTOCOL_ERROR` lines in the browser console (F12 → Console). If you still see them, see [troubleshooting.md — ArgoCD](troubleshooting.md#argocd-ui-401-or-err_http2_protocol_error).
 
 Connect ArgoCD to the infra repo and apply the Application manifest:
 
@@ -1444,12 +1457,277 @@ The image is back to the Git version. The cluster self-corrected without anyone 
 make check-2
 ```
 
+---
+
+### Rolling back a bad deploy
+
+> You just proved that ArgoCD reverts unauthorized cluster changes. Now flip it: **what if you pushed a bad commit yourself?** GitOps rollback is not a button — it is a git operation. This section explains why, shows you both methods, and has you practise each one before you need them under pressure.
+
+#### How you know you need to roll back
+
+These symptoms appearing within minutes of a push to `clearledger-infra` point at a bad commit:
+
+- Pods stuck in `CrashLoopBackOff` or `Error` — check with `kubectl get pods -n clearledger`
+- `kubectl logs <pod> -n clearledger --previous` shows startup errors that were not there before
+- ArgoCD health flips from `Healthy` to `Degraded` or stays on `Progressing` — check with `argocd app get clearledger --grpc-web`
+- The app returns 5xx errors or login stops working — check with `curl -I http://clearledger.local/health`
+
+If you see any of these within minutes of a push, assume the latest commit is the cause and roll back first — investigate second.
+
+---
+
+#### Why ArgoCD rollback is not just a button
+
+ArgoCD has a rollback button in the UI and an `argocd app rollback` command. Both work — but only if you understand the interaction with `selfHeal`.
+
+Your Application (`stages/stage-2-gitops/argocd/clearledger-app.yaml`) is configured with:
+
+```yaml
+syncPolicy:
+  automated:
+    selfHeal: true
+```
+
+`selfHeal: true` means ArgoCD continuously compares the cluster to Git. If they differ, it re-syncs the cluster back to match Git automatically. If you click the rollback button without disabling auto-sync first, ArgoCD will detect that the cluster no longer matches `HEAD` and silently undo your rollback within 3 minutes. You will think you rolled back. You did not.
+
+There are two correct ways to roll back, and the right one depends on how much time you have.
+
+---
+
+#### Method 1 — Git revert (preferred, always try this first)
+
+This is the GitOps way. You do not touch the cluster. You change Git, and ArgoCD syncs the fix.
+
+**When to use:** You have a few minutes. You can identify the bad commit in `clearledger-infra`.
+
+**How it works:**
+
+```
+Bad commit pushed to clearledger-infra
+        ↓
+ArgoCD auto-synced it (cluster is now broken)
+        ↓
+You run: git revert <bad-commit> && git push
+        ↓
+ArgoCD auto-syncs the revert (cluster is fixed, selfHeal works with you)
+        ↓
+Git history shows the bad deploy AND the revert — full audit trail
+```
+
+**Step-by-step:**
+
+```bash
+# 1. Go to your clearledger-infra repo (wherever you cloned it)
+cd ~/clearledger-infra      # adjust path if you cloned elsewhere
+git pull                    # make sure you are up to date
+
+# 2. Find the bad commit
+git log --oneline -10
+
+# Output looks like:
+# abc1234 update ledger-service image to v1.4.0   ← this broke prod
+# def5678 update auth-service image to v1.3.1     ← was fine
+# 9a1b2c3 add vault rotation cronjob
+
+# 3. Revert it — this creates a NEW commit, it does not delete history
+git revert abc1234 --no-edit
+
+# 4. Push — ArgoCD picks it up automatically within ~3 minutes
+git push
+
+# 5. Confirm the cluster recovered
+kubectl get pods -n clearledger
+argocd app get clearledger --grpc-web | grep -E "Sync Status|Health Status"
+# Expected: Sync Status: Synced, Health Status: Healthy
+```
+
+**Why this is preferred:**
+- `selfHeal` works *with* you — the new `HEAD` is already the reverted state, nothing fights you
+- Full audit trail — Git shows the bad deploy, the revert, and who did both
+- No cluster commands needed — ArgoCD applies everything
+- Compliant — regulators and on-call engineers can read exactly what happened from Git history alone
+
+---
+
+#### Method 2 — Emergency ArgoCD rollback (when the cluster is on fire)
+
+Use this when the cluster is broken right now and you do not have time to push a Git fix. It pins the cluster to a previous known-good deployment immediately. You will still fix Git afterward — this is a stabilise-first step, not a permanent fix.
+
+**When to use:** Incident in progress. Pods are crashing, users are affected, and you need the cluster back to a known-good state in under 30 seconds.
+
+> **Before you start:** confirm your ArgoCD CLI session is still valid. If it expired, re-login first — an expired session will silently fail every command below.
+> ```bash
+> argocd account get-user-info --grpc-web
+> # If you see "Unauthenticated", re-login:
+> ARGOCD_PASSWORD=$(kubectl -n argocd get secret argocd-initial-admin-secret \
+>   -o jsonpath="{.data.password}" | base64 -d)
+> argocd login argocd.local --username admin --password "$ARGOCD_PASSWORD" \
+>   --insecure --grpc-web
+> ```
+
+**Step 1 — Disable auto-sync** (critical — skip this and selfHeal will undo your rollback within 3 minutes)
+
+```bash
+argocd app set clearledger --sync-policy none --grpc-web
+# Confirm: automated sync is now off
+argocd app get clearledger --grpc-web | grep "Sync Policy"
+# Expected: Sync Policy: <none>
+```
+
+**Step 2 — Find the last known-good deployment ID**
+
+```bash
+argocd app history clearledger --grpc-web
+
+# Output looks like:
+# ID   DATE                           REVISION
+# 9    2026-06-05 10:12:00 +0000 UTC  abc1234  ← bad deploy (current)
+# 8    2026-06-04 14:46:06 +0000 UTC  def5678  ← known good
+# 7    2026-06-01 20:53:19 +0000 UTC  9a1b2c3
+
+# Or check via kubectl (no argocd CLI needed):
+kubectl get application clearledger -n argocd \
+  -o jsonpath='{range .status.history[*]}{.id}{"\t"}{.deployedAt}{"\t"}{.revision}{"\n"}{end}'
+```
+
+Use the ID (the number on the left), not the SHA.
+
+**Step 3 — Roll back to the known-good ID**
+
+```bash
+argocd app rollback clearledger 8 --grpc-web
+```
+
+**Step 4 — Confirm the cluster is stable**
+
+```bash
+kubectl get pods -n clearledger
+# All pods should be Running
+
+argocd app get clearledger --grpc-web | grep -E "Sync Status|Health Status"
+# Sync Status:   OutOfSync  ← expected — cluster is at rev 8, Git is still at the bad HEAD
+# Health Status: Healthy    ← this is what matters right now
+```
+
+`OutOfSync` is correct and expected at this point. The cluster is running the old known-good revision. Git still has the bad commit — you will fix that next.
+
+**Step 5 — Fix Git (do not leave it broken)**
+
+```bash
+cd ~/clearledger-infra
+git pull
+git revert <bad-commit-sha> --no-edit
+git push
+```
+
+**Step 6 — Re-enable auto-sync**
+
+```bash
+argocd app set clearledger \
+  --sync-policy automated \
+  --self-heal \
+  --auto-prune \
+  --grpc-web
+
+# Trigger an immediate sync so you do not wait for the next auto-check
+argocd app sync clearledger --grpc-web
+
+# Confirm everything is clean
+argocd app get clearledger --grpc-web | grep -E "Sync Status|Health Status"
+# Expected: Sync Status: Synced, Health Status: Healthy
+```
+
+> **Never leave auto-sync disabled longer than the incident.** It is your drift-detection and tamper-evidence mechanism — without it, unauthorized `kubectl` changes go undetected. Re-enable it the moment you push the Git fix.
+
+---
+
+#### Practise the rollback now (before you need it under pressure)
+
+Do not wait for a real incident to run this for the first time. The steps below simulate a bad image tag deploy and walk you through Method 1 (the preferred path).
+
+**Step 1 — Push a bad image tag to `clearledger-infra`**
+
+```bash
+cd ~/clearledger-infra
+git pull
+
+# Edit manifests/notification-service/deployment.yaml
+# Change the image tag to a tag that does not exist, e.g.:
+#   image: docker.io/veeno/clearledger-notification-service:broken-tag
+
+# Commit and push it
+git add manifests/notification-service/deployment.yaml
+git commit -m "test: simulate bad deploy with nonexistent image tag"
+git push
+```
+
+**Step 2 — Watch ArgoCD sync the bad state**
+
+```bash
+# Give ArgoCD ~3 minutes to pick it up, or trigger immediately:
+argocd app sync clearledger --grpc-web
+
+# Watch the notification-service pod fail
+kubectl get pods -n clearledger -w
+# You will see: notification-service pod stuck in ImagePullBackOff or ErrImagePull
+```
+
+**Step 3 — Roll back using Method 1**
+
+```bash
+cd ~/clearledger-infra
+
+# Revert the bad commit
+git revert HEAD --no-edit
+git push
+
+# ArgoCD will auto-sync — or trigger it:
+argocd app sync clearledger --grpc-web
+
+# Watch pods recover
+kubectl get pods -n clearledger -w
+# notification-service should return to Running
+```
+
+**Step 4 — Verify**
+
+```bash
+argocd app get clearledger --grpc-web | grep -E "Sync Status|Health Status"
+# Expected: Sync Status: Synced, Health Status: Healthy
+
+kubectl get pods -n clearledger
+# All pods Running, no ImagePullBackOff
+```
+
+You have now practised a rollback end-to-end. The `git revert` commit is permanently in the infra repo's history — a real audit record of a simulated recovery.
+
+---
+
+#### Quick reference
+
+**Use Method 1 (git revert) when:**
+- A bad image tag or manifest was pushed to `clearledger-infra` and you have a few minutes
+- Any config change in the infra repo caused pods to break
+- This is almost always the right answer — it is fast, safe, and leaves a clean audit trail
+
+**Use Method 2 (emergency ArgoCD rollback) when:**
+- The cluster is broken right now, users are affected, and you need it stable in under 30 seconds
+- You are not yet sure which commit caused the problem and need time to investigate — roll back to stabilise, then use `git log` to find the culprit, then fix forward with Method 1
+
+**Neither method applies when:**
+- A pod is crashing but nothing was pushed to the infra repo recently — this is not a rollback problem. Check `kubectl logs`, Vault connectivity, and network policies instead.
+
+`revisionHistoryLimit: 10` in `stages/stage-2-gitops/argocd/clearledger-app.yaml` means ArgoCD always has 10 previous deployments available for emergency rollback. Increase it if your release cadence is high.
+
+---
+
 ### What you learned in Stage 2
 
 - What GitOps means: Git is the single source of truth, and a tool enforces it
 - What ArgoCD does: watches Git, compares it to the cluster, corrects drift automatically
 - How the full flow works now: push code → CI builds image → CI updates infra repo → ArgoCD syncs cluster
 - **No one runs `kubectl` to deploy anymore.** The pipeline updates Git, ArgoCD does the rest.
+- **How to roll back safely:** `git revert` in the infra repo is the correct answer; ArgoCD emergency rollback is the break-glass option, and you must disable auto-sync first or selfHeal will silently undo it
 
 ### DevSecOps lesson — Stage 2 in one paragraph
 
@@ -3983,92 +4261,574 @@ Security tooling tells you when something looks wrong. **Resilience testing** te
 
 > Security you cannot measure you cannot prove.
 
-**Goal:** every security signal from the previous stages feeds into six Grafana dashboards with real data.
+**Goal:** Understand how **metrics**, **logs**, and **dashboards** fit together — then prove it by running commands in the terminal, watching the same events appear in Grafana, and explaining what each panel means.
 
-### What you need to know first
+This stage is **not** “install Grafana and move on.” **Stage 7 is not complete** until your dashboards show **real** Kyverno violations and Falco alerts that **you triggered** in §7.4 — plus portfolio screenshots (§7.6). `make check-7` only proves the stack is up; it does **not** prove you can detect security events.
 
-You have security tools running: Falco detecting threats, Kyverno blocking bad deployments, ArgoCD tracking drift. But where do you see all of this in one place? How do you prove to an auditor that Falco caught 3 shell exec attempts last month, or that Kyverno blocked 12 root container attempts?
-
-**Observability** is the practice of collecting, storing, and visualizing signals from your system. The monitoring stack in this stage has three components:
-
-| Tool | What it does | Analogy |
-|---|---|---|
-| **Prometheus** | Collects metrics — numeric measurements over time (CPU usage, request count, error rate, Falco alert count) | A thermometer that takes readings every 15 seconds |
-| **Loki** | Collects logs — text output from your applications and tools | A filing cabinet that stores every log line, searchable |
-| **Grafana** | Visualizes metrics and logs on dashboards — charts, tables, alerts | The monitoring screen in a control room |
-
-**ServiceMonitors** tell Prometheus where to scrape metrics from. Without a ServiceMonitor for ArgoCD, Prometheus does not know ArgoCD exists. Without one for Falco, Prometheus does not collect Falco alert counts. You are connecting the data sources to the collection system.
-
-**DORA metrics** are four measurements that high-performing engineering teams track: deployment frequency, lead time for changes, change failure rate, and mean time to recovery. Google's research shows these metrics correlate strongly with organizational performance. You will see them on a dashboard.
+> **Already installed?** If `kubectl get pods -n monitoring` shows Grafana **3/3** and Loki **1/1**, skip §7.1 and start at **§7.2** (verify the stack), then **§7.4** (hands-on lab).
 
 ---
 
-```bash
-helm repo add prometheus-community \
-  https://prometheus-community.github.io/helm-charts
-helm repo add grafana https://grafana.github.io/helm-charts
-helm repo update
+### What you need to know first
 
-helm install kube-prometheus-stack \
-  prometheus-community/kube-prometheus-stack \
-  --namespace monitoring --create-namespace \
-  --set grafana.ingress.enabled=true \
-  --set grafana.ingress.hosts[0]=grafana.local \
-  --set grafana.ingress.ingressClassName=nginx \
-  --set grafana.adminPassword=admin123
+Each earlier stage has its own view: CI logs, Kyverno CLI, Falco UI, `kubectl logs`. Stage 7 **correlates** them.
 
-helm install loki grafana/loki-stack \
-  --namespace monitoring \
-  --set grafana.enabled=false \
-  --set promtail.enabled=true \
-  --set loki.persistence.enabled=true \
-  --set loki.persistence.size=5Gi
-```
-
-Enable metrics scraping from ArgoCD and Falco. ServiceMonitors tell Prometheus "go collect metrics from these services":
-
-```bash
-kubectl apply -f stages/stage-7-observability/infra/monitoring/argocd-servicemonitor.yaml
-kubectl apply -f stages/stage-7-observability/infra/monitoring/falco-servicemonitor.yaml
-kubectl apply -f stages/stage-7-observability/infra/monitoring/alerting-rules.yaml
-```
-
-Open `http://grafana.local` (admin / admin123). Add Loki as a data source so Grafana can query logs: Configuration → Data Sources → Add → Loki → URL: `http://loki:3100` → Save and Test.
-
-**Import the dashboards** (Dashboards → Import → Upload JSON file):
-
-| File | What it shows | Why it matters |
+| Tool | What it stores | Think of it as… |
 |---|---|---|
-| `stages/stage-7-observability/infra/dashboards/01-security-event-timeline.json` | Falco alerts by priority and rule | See every security event across all pods in one view |
-| `stages/stage-7-observability/infra/dashboards/02-kyverno-violations.json` | Policy violations per day, trend | Prove to auditors that policy enforcement is active and measured |
-| `stages/stage-7-observability/infra/dashboards/03-service-health.json` | Request rate, error rate, failed logins | Detect availability and authentication issues in real time |
-| `stages/stage-7-observability/infra/dashboards/04-compliance-posture.json` | Security posture at a glance | Single-pane compliance view for management and auditors |
-| `stages/stage-7-observability/infra/dashboards/05-audit-log-analysis.json` | K8s API audit events | Who did what in the cluster and when |
-| `stages/stage-7-observability/infra/dashboards/06-dora-metrics.json` | Deployment frequency, lead time, CFR, MTTR | Prove your DevOps process is improving over time |
+| **Prometheus** | Numbers over time (counters, rates) | A spreadsheet of metrics scraped every 15–30s |
+| **Loki** | Log lines from pods (Falco, apps) | Searchable text — like `grep` across the cluster |
+| **Grafana** | Charts that query Prometheus + Loki | The screen you show an auditor |
 
-**Generate real data on the dashboards:** go back to Stage 6 and exec into a pod again:
+**ServiceMonitors / PodMonitors** tell Prometheus *where to scrape*. No monitor for Kyverno → Kyverno panels stay empty. No PodMonitor for `auth-service` → Request Rate stays empty until §7.6.
 
-```bash
-kubectl exec -n clearledger \
-  $(kubectl get pod -n clearledger -l app=auth-service -o name | head -1) \
-  -- /bin/sh -c "id && exit"
+**Promtail** ships container logs into Loki. No Loki → log panels say “No data” even when `kubectl logs` works.
+
+#### How Stage 7 fits the full stack
+
+| Stage | What happened | What shows up in Grafana |
+|---|---|---|
+| **3 — CI** | Scans in GitHub Actions | Compliance narrative (tools marked ACTIVE) |
+| **4 — Kyverno** | Blocked bad `kubectl apply` | **Kyverno Policy Violations** (Prometheus) |
+| **5 — Vault** | Secrets injected at runtime | Indirectly — fewer secret-in-Git incidents |
+| **6 — Falco** | Shell / sensitive file read | **Security Event Timeline** (Loki) |
+| **6 — NetworkPolicy** | Blocked pod traffic | Runtime layer in compliance view |
+| **Apps** | HTTP requests, failed logins | **Service Health** (Loki + Prometheus) |
+
+```text
+You run a command (terminal)
+  → Kyverno / Falco / app logs an event
+  → Prometheus or Loki stores it (15–90s later)
+  → Grafana panel updates
 ```
 
-Now open the Security Event Timeline dashboard. Find the Falco alert. The pod name, timestamp, and command are there. The system saw you.
+**Beginner takeaway:** The terminal proves the event happened. The dashboard proves you can **detect and measure** it later.
 
-**Take a screenshot of the Security Event Timeline with at least one alert.** This is powerful portfolio evidence — it shows end-to-end security observability.
+---
+
+### 7.1 — Install the observability stack
+
+```bash
+bash stages/stage-7-observability/scripts/install-observability.sh
+```
+
+The installer is idempotent: if everything is already healthy, it only refreshes dashboards and monitors. Use `FORCE=1` only when Helm values changed or Loki keeps restarting.
+
+**Expected — monitoring namespace pods (names vary):**
+
+```text
+NAME                                              READY   STATUS    RESTARTS   AGE
+kube-prometheus-stack-grafana-....                3/3     Running   0          5m
+kube-prometheus-stack-prometheus-....             2/2     Running   0          5m
+loki-0                                            1/1     Running   0          5m
+loki-promtail-....                                1/1     Running   0          5m
+```
+
+```bash
+kubectl get pods -n monitoring
+```
+
+**Expected — Loki healthy:**
+
+```bash
+kubectl exec -n monitoring loki-0 -- wget -qO- http://127.0.0.1:3100/ready
+```
+
+```text
+ready
+```
+
+**Expected — Grafana can reach Loki (same path log panels use):**
+
+```bash
+kubectl exec -n monitoring deploy/kube-prometheus-stack-grafana -c grafana -- \
+  wget -qO- --timeout=5 http://loki:3100/ready
+```
+
+```text
+ready
+```
+
+**Expected — Grafana UI reachable:**
+
+```bash
+curl -sI http://grafana.local | head -n 1
+```
+
+```text
+HTTP/1.1 302 Found
+```
+
+Log in: **http://grafana.local** — `admin` / `admin123`
+
+> Empty panels right after install are **normal**. You have not generated events yet. Continue to §7.2–§7.4.
+
+If Helm fails: wait 30s, then `FORCE=1 bash stages/stage-7-observability/scripts/install-observability.sh`. See [troubleshooting.md — Stage 7](troubleshooting.md#stage-7--observability-grafana--prometheus--loki).
+
+---
+
+### 7.2 — Verify Prometheus, Loki, and Grafana (before opening dashboards)
+
+Run these three checks so you know **which layer** is broken if a panel is empty.
+
+#### Check 1 — Prometheus has Kyverno metrics
+
+```bash
+kubectl exec -n monitoring deploy/kube-prometheus-stack-prometheus -c prometheus -- \
+  wget -qO- 'http://localhost:9090/api/v1/query?query=kyverno_admission_requests_total' 2>/dev/null \
+  | head -c 400
+```
+
+**Expected:** JSON with `"status":"success"` and a `"metric"` block (values may be `0` until you trigger a violation in §7.4).
+
+If you see `"status":"success"` but `"result":[]`, Prometheus is up but Kyverno has not recorded admissions yet — that is fine before the lab.
+
+#### Check 2 — Loki has Falco logs
+
+```bash
+kubectl exec -n monitoring loki-0 -- wget -qO- \
+  'http://127.0.0.1:3100/loki/api/v1/labels' 2>/dev/null | head -c 300
+```
+
+**Expected:** JSON listing labels such as `"namespace"` (and after Falco events, you will see `"falco"` in label values).
+
+Quick log search (may return empty lines until §7.4 Exercise B):
+
+```bash
+kubectl exec -n monitoring loki-0 -- wget -qO- \
+  'http://127.0.0.1:3100/loki/api/v1/query?query=%7Bnamespace%3D%22falco%22%7D&limit=3' 2>/dev/null \
+  | head -c 500
+```
+
+**Expected:** `"status":"success"` — `"result":[]` means no Falco lines in Loki yet, not a broken Loki.
+
+#### Check 3 — Grafana imported ClearLedger dashboards
+
+```bash
+curl -s -u admin:admin123 'http://grafana.local/api/search?tag=clearledger' | jq -r '.[].title'
+```
+
+**Expected — six titles:**
+
+```text
+ClearLedger - Compliance Posture
+ClearLedger - DORA Metrics
+ClearLedger - Kubernetes Audit Log Analysis
+ClearLedger - Kyverno Policy Violations
+ClearLedger - Security Event Timeline
+ClearLedger - Service Health + Auth Security
+```
+
+Or in the UI: **Dashboards** → filter tag **`clearledger`** → you should see exactly these six (no missing names).
+
+---
+
+### 7.3 — Your first 10 minutes in Grafana
+
+#### Where to go first
+
+Do not open all six dashboards at once — Loki can struggle on a small cluster. Use this order:
+
+| Order | Dashboard | Why start here |
+|---|---|---|
+| **1** | [Kyverno Policy Violations](http://grafana.local/d/clearledger-kyverno-violations) | You already practiced Kyverno in Stage 4 — easy win |
+| **2** | [Security Event Timeline](http://grafana.local/d/clearledger-security-events) | Ties to Stage 6 Falco — log-based |
+| **3** | [Service Health + Auth](http://grafana.local/d/clearledger-service-health) | App traffic and failed logins |
+| **4** | [Compliance Posture](http://grafana.local/d/clearledger-compliance) | Single pane — sums the story for auditors |
+| **5** | [Audit Log Analysis](http://grafana.local/d/clearledger-audit-logs) | Control-plane audit (often empty on MicroK8s) |
+| **6** | [DORA Metrics](http://grafana.local/d/clearledger-dora-metrics) | Deploy frequency / lead time proxies |
+
+**Always set time range:** top-right → **Last 15 minutes** (while learning).
+
+Use **UID links** above, not long auto-generated URLs — old cached slugs cause `not correct url` in the browser console.
+
+#### How to read a panel (30-second guide)
+
+| Panel type | Usually powered by | What you are looking for |
+|---|---|---|
+| **Stat** (big number) | Prometheus or Loki | Did count go **above 0** after your test? |
+| **Time series** (line chart) | Prometheus or Loki | Spike or new line **after** the timestamp you ran the command |
+| **Logs** (scrollable lines) | Loki | Your event text — rule name, `CRITICAL`, `Failed login attempt` |
+| **Pie / bar** | Prometheus or Loki | Which rule or priority dominated in the window |
+
+**Prometheus panels** = numbers scraped from `/metrics` endpoints (Kyverno, ArgoCD, apps).
+
+**Loki panels** = log lines (Falco JSON in `falco` namespace, auth-service stdout).
+
+If **only** log panels fail with `connection refused`, Loki is down or restarting — see §7.1 sanity checks. Metric panels can still work.
+
+#### What “good” looks like before vs after the lab
+
+| Dashboard | Before §7.4 | After §7.4 (success) |
+|---|---|---|
+| Kyverno | Violations = 0 or flat | **Policy Violations (last hour) > 0** |
+| Security Event Timeline | Empty log table | **CRITICAL** row with shell / `Terminal shell in container` |
+| Service Health | Failed logins = 0 | **Failed Login Attempts > 0** |
+| Compliance | Top stats zero | **Policy Violations**, **Runtime Threats**, **Failed Auth** non-zero |
+
+---
+
+### 7.4 — Hands-on lab: terminal → dashboard proof
+
+This is the core learning section. Each exercise: run the command, wait, then confirm in Grafana.
+
+**Timing:** wait **30–90 seconds** after each command for Prometheus scrape and Loki ingestion.
+
+> **Prefer a guided script?** The same steps run interactively with pauses:
+> `bash stages/stage-7-observability/scripts/generate-dashboard-data.sh`
+
+---
+
+#### Exercise A — Kyverno block → Prometheus → Kyverno dashboard
+
+**Terminal** — apply a pod that violates Stage 4 policy (runs as root):
+
+```bash
+cat <<'YAML' | kubectl apply -f -
+apiVersion: v1
+kind: Pod
+metadata:
+  name: stage7-kyverno-lab
+  namespace: clearledger
+spec:
+  containers:
+    - name: test
+      image: nginx:alpine
+YAML
+```
+
+**Expected terminal output (success = blocked):**
+
+```text
+Error from server: error when creating "STDIN": admission webhook "validate.kyverno.svc" denied the request:
+policy disallow-root-containers/validate-run-as-non-root fail: Running as root is not allowed
+```
+
+If the pod **creates** instead, Kyverno is not enforcing — run `make check-4` before continuing.
+
+**Confirm Prometheus saw it** (optional):
+
+```bash
+kubectl exec -n monitoring deploy/kube-prometheus-stack-prometheus -c prometheus -- \
+  wget -qO- 'http://localhost:9090/api/v1/query?query=kyverno_admission_requests_total{request_allowed="false"}' 2>/dev/null \
+  | grep -o '"value":\[[^]]*\]' | head -3
+```
+
+**Expected:** a `"value"` entry with a recent Unix timestamp and a number **greater than 0**.
+
+**Grafana** — open [Kyverno Policy Violations](http://grafana.local/d/clearledger-kyverno-violations?from=now-15m&to=now)
+
+| Panel | What to look for |
+|---|---|
+| Policy Violations (last hour) | Number **> 0** |
+| Violations by Policy | Bar for `disallow-root-containers` or similar |
+| Violation Rate | Line tick up in the last few minutes |
+
+---
+
+#### Exercise B — Falco shell → Loki → Security Event Timeline
+
+**Terminal** — exec into auth-service (Stage 6 same technique):
+
+```bash
+AUTH_POD=$(kubectl get pod -n clearledger -l app=auth-service \
+  --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
+echo "Using pod: $AUTH_POD"
+kubectl exec -n clearledger "$AUTH_POD" -c auth-service -- /bin/sh -c 'id && exit'
+```
+
+**Expected:** command prints `uid=0(root)` or similar and exits — Falco rules fire on shell spawn.
+
+**Confirm Falco logged it:**
+
+```bash
+kubectl logs -n falco -l app.kubernetes.io/name=falco --tail=5 | grep -i shell || \
+  kubectl logs -n falco -l app.kubernetes.io/name=falco --tail=5
+```
+
+**Expected:** a line containing `Terminal shell in container` or priority `Critical`.
+
+**Confirm Loki has it** (after ~60s):
+
+```bash
+kubectl exec -n monitoring loki-0 -- wget -qO- \
+  'http://127.0.0.1:3100/loki/api/v1/query?query=%7Bnamespace%3D%22falco%22%7D&limit=2' 2>/dev/null \
+  | grep -o 'Terminal shell[^"]*' | head -1
+```
+
+**Expected:** substring like `Terminal shell in container` (or non-empty grep output).
+
+**Grafana** — open [Security Event Timeline](http://grafana.local/d/clearledger-security-events?from=now-15m&to=now)
+
+| Panel | What to look for |
+|---|---|
+| Falco Alerts by Priority | **CRITICAL** line or spike |
+| Recent CRITICAL / WARNING Events | Log row with your pod name and shell rule |
+| CRITICAL Alerts (period) | Stat **≥ 1** |
+
+---
+
+#### Exercise C — Failed login → Loki → Service Health
+
+**Terminal** — send traffic and bad logins:
+
+```bash
+for i in $(seq 1 10); do
+  curl -s http://clearledger.local/auth/health >/dev/null
+  curl -s -X POST http://clearledger.local/auth/login \
+    -H 'Content-Type: application/json' \
+    -d '{"email":"lab-attacker@evil.com","password":"wrong"}' >/dev/null
+done
+echo "done"
+```
+
+**Expected:** `done` (no output per curl is fine).
+
+**Confirm auth-service logged failures:**
+
+```bash
+kubectl logs -n clearledger -l app=auth-service --tail=20 | grep -i 'Failed login' | tail -3
+```
+
+**Expected:**
+
+```text
+Failed login attempt for email: lab-attacker@evil.com
+```
+
+**Grafana** — open [Service Health](http://grafana.local/d/clearledger-service-health?from=now-15m&to=now)
+
+| Panel | What to look for |
+|---|---|
+| Failed Login Attempts | Stat **> 0** |
+| Successful Logins | May stay 0 — that is fine |
+| Auth Service Logs | Lines with `Failed login attempt` |
+
+---
+
+#### Exercise D — Compliance dashboard (auditor view)
+
+After A + B + C, open [Compliance Posture](http://grafana.local/d/clearledger-compliance?from=now-1h&to=now)
+
+**Expected — top row stats non-zero:**
+
+| Stat | Source exercise |
+|---|---|
+| Policy Violations | Exercise A (Kyverno) |
+| Runtime Threats | Exercise B (Falco) |
+| Failed Auth Attempts | Exercise C (auth logs) |
+
+This is the **one screenshot** that shows defense-in-depth: admission + runtime + application.
+
+---
+
+### 7.5 — Optional: Prometheus metrics for Request Rate
+
+Log panels work without image changes. **Request Rate** needs app images that expose `/metrics`.
+
+> Skip if `http_requests_total` already returns data in Prometheus.
+
+```bash
+export DOCKER_USERNAME=your-dockerhub-user
+bash stages/stage-7-observability/scripts/build-metrics-images.sh
+```
+
+**Expected — query after rollout (~60s):**
+
+```bash
+kubectl exec -n monitoring deploy/kube-prometheus-stack-prometheus -c prometheus -- \
+  wget -qO- 'http://localhost:9090/api/v1/query?query=http_requests_total' 2>/dev/null \
+  | grep -o '"__name__":"http_requests_total"' | head -1
+```
+
+```text
+"__name__":"http_requests_total"
+```
+
+Then refresh **Service Health** — **Request Rate** lines should appear.
+
+---
+
+### 7.6 — Stage 7 complete checklist + screenshots
+
+#### Done vs not done
+
+| Status | What you have |
+|---|---|
+| **Not done** | Grafana opens, six dashboards listed, panels empty or only old noise |
+| **Not done** | `make check-7` passes but you never ran §7.4 |
+| **Done** | You ran §7.4 (or `make demo-7`), waited 30–90s, panels show **your** events, three screenshots saved |
+
+#### Portfolio screenshots (required)
+
+Set time range to **Last 15 minutes** before each capture. Include the Grafana time picker and panel titles in the frame.
+
+| # | Open this URL | Exact panel(s) that must be visible | What the screenshot must show |
+|---|---|---|---|
+| **1** | http://grafana.local/d/clearledger-security-events | **Recent CRITICAL / WARNING Events** (log panel) | At least one row with **CRITICAL** and text like `Terminal shell in container` (from Exercise B) |
+| **2** | http://grafana.local/d/clearledger-kyverno-violations | **Violations (last hour)** (big stat, top row) | Number **≥ 1** (red background). Optional: **Violation Rate** chart ticked up in last 15m |
+| **3** | http://grafana.local/d/clearledger-compliance | Top row stats | **Policy Violations**, **Runtime Threats**, and **Failed Auth Attempts** all **> 0** after Exercises A–C |
+| **4 (optional)** | http://grafana.local/d/clearledger-service-health | **Failed Login Attempts** | Stat **> 0** and/or **Auth Service Logs** with `Failed login attempt` lines |
+
+**Where to save files:** e.g. `docs/evidence/stage-7-screenshot-1-falco.png` (or your portfolio folder). Filename should say what proof it is.
+
+**Stage 7 is done when:** `make check-7` passes **and** screenshots **1–3** show events from **your** §7.4 run — not from a demo video or someone else’s cluster.
+
+---
+
+### 7.7 — Verify
 
 ```bash
 make check-7
 ```
 
+**Expected:**
+
+```text
+▶ Stage 7 — Observability (Grafana + Prometheus + Loki)
+  ✓ Prometheus is running
+  ✓ Grafana reachable (http://grafana.local or in-cluster health OK)
+  ✓ Loki pod is running (0 restarts)
+  ✓ Loki reachable from Grafana (http://loki:3100/ready)
+  ✓ ClearLedger alerting rules exist
+  ✓ ClearLedger dashboards imported (6 found)
+```
+
+Warnings about Loki restarts or missing dashboards — fix with §7.1 before claiming Stage 7 complete.
+
+---
+
+### 7.8 — Technical issues we hit (and how to explain them in interviews)
+
+Use this when an interviewer asks *“What broke in observability?”* or *“How do Prometheus, Loki, and Grafana fit together?”*
+
+| Issue | What learners saw | Root cause | Fix (what we did) | Interview one-liner |
+|---|---|---|---|---|
+| **Empty dashboards after install** | Six dashboards exist, every panel says “No data” | Grafana is a **viewer** — it does not create events. Kyverno/Falco/app logs must happen first. | §7.4 lab: trigger denial, shell, failed login; set **Last 15 minutes** | *“Dashboards are empty until security events exist and the time range includes them.”* |
+| **Loki `connection refused` in browser** | Log panels red; metrics panels OK | Loki pod **crash-looping** under heavy LogQL; Kubernetes **liveness probe** killed it while busy (1s timeout, no memory cap) | More memory + slower probes in `loki-stack-values.yaml`; shorter default dashboard ranges; Grafana query timeout | *“We separated ‘pod Running’ from ‘service accepting queries’ and right-sized Loki for a single-node lab.”* |
+| **Opening all dashboards at once** | Loki restarts climb; everything goes empty | Six boards × 3h LogQL = query storm on one Loki replica | Open **one dashboard at a time**; default **1h/6h** not 3h/24h; cap `max_query_length` | *“We treated observability like production: rate-limit queries and load-test the path Grafana uses.”* |
+| **`make check-7` passes but Stage 7 not done** | Health check green, screenshots still empty | Health check only tests **pods + `/ready`**, not “Falco alert visible” | Done checklist in §7.6: require **your** events + screenshots 1–3 | *“Synthetic checks prove uptime; product proof needs correlated events on named dashboards.”* |
+| **Kyverno panel stays 0** | Terminal shows admission denied, Grafana shows 0 | Prometheus had not scraped yet, or no `request_allowed="false"` series in range | Wait 30–90s; use **Violations (last hour)** panel; confirm metric with PromQL in §7.2 | *“Admission denial is immediate; metrics are eventually consistent on scrape interval.”* |
+| **Request Rate panel always empty** | Failed logins work, HTTP rate flat | App images lacked `/metrics`; PodMonitor had nothing to scrape | `build-metrics-images.sh` + PodMonitor `clearledger-apps` | *“Logs and metrics are separate pipelines — Promtail does not replace Prometheus app metrics.”* |
+| **Wrong Grafana dashboard links** | Console: `not correct url` / `skipping rendering` | Old dashboard UID/slug cached (em-dash vs hyphen) | UID-only URLs in §7.3; installer purges stale UIDs | *“We standardized dashboard UIDs in Git and treated Grafana URLs like API contracts.”* |
+| **Only six dashboards (not 30+)** | “Where did Kubernetes / Node dashboards go?” | `defaultDashboardsEnabled: false` on purpose | ClearLedger sidecar imports only `clearledger` tag | *“We reduced noise for a security lab — one tag, six audit-focused boards.”* |
+| **Audit Log dashboard empty** | Expected on MicroK8s | Cluster audit logs not shipped to Loki yet | Documented as future work; Falco + Kyverno + app logs still prove the lab | *“We scoped MVP observability to signals we actually emit; audit log shipping is a Phase 2 sink.”* |
+| **Falco panels all "No data"** | Wrong rule names; libbpf noise; rules used only `k8smeta` | Promtail ships `falco` container JSON; custom rules output `Shell spawned in ClearLedger` | LogQL: `{namespace="falco", container="falco"} != "libbpf" \| json`; rules: `k8s.ns.name` OR `k8smeta.ns.name` | *“Dashboards must match the log line Promtail actually ingests.”* |
+| **Failed login stat empty, log stream OK** | Stat used `$__range` + wrong substring | App logs say `Failed login attempt for …` | `instant` + `[1h]` + `\|= "Failed login attempt"` | *“Stat and log panels need different Loki query windows.”* |
+| **Runtime Threats = No data** | PromQL metrics not in Prometheus | `falcosecurity_*` counters never scraped | Compliance panel uses Loki count of Falco `Critical` lines | *“Use logs when metrics are not wired.”* |
+| **Pod Status = No data** | Wrong `condition="true"` label on `kube_pod_status_ready` | Metric is 0/1 per pod, no condition label | `sum(kube_pod_status_ready{namespace="clearledger"} == 1)` | *“Validate PromQL in Prometheus Explore before pasting into Grafana.”* |
+| **Request Rate empty** | `http_requests_total` has no `namespace` label | PodMonitor only scrapes clearledger pods | `sum by (app) (rate(http_requests_total[$__rate_interval]))` | *“Counter labels must match what the app actually exports.”* |
+| **Runtime Threat Trend empty** | LogQL panel wired to Prometheus | Compliance dashboard panel id 6 | Datasource **Loki** + same Falco LogQL as timeline | *“Datasource type must match query language.”* |
+| **Kyverno stat 0, table > 0** | Stat used fixed `[1h]`, table used `$__range` | Align windows to dashboard time picker | Both use `$__range` after dashboard refresh | *“Stat and table panels must share the same time window.”* |
+| **Kyverno stat 0, table shows 1.07** | 24h window + sparse counter | Event outside stat window | `ceil(sum(increase(...[1h])))` on stat panels | *“Pick a PromQL window that includes your test.”* |
+| **Argo CD 503 / redirect loop** | Only `server.insecure` patched | Missing `server.grpc.web` and `server.url` | `stages/stage-2-gitops/infra/argocd-cmd-params.yaml` + ingress reload | *“Ingress-terminated TLS needs the full Argo CD server parameter set.”* |
+
+**Story arc for interviews (30 seconds):**
+
+> “We wired Stages 4–6 into Grafana with ServiceMonitors for Prometheus and Promtail for Loki. The hard part wasn’t Helm — it was proving the **full path**: terminal action → metric or log → panel. We hit Loki instability under query load, fixed probes and limits, and defined Stage 7 done only when **our** Kyverno denial and Falco CRITICAL alert appeared on named dashboards with screenshots.”
+
+---
+
+### 7.9 — Re-apply dashboards after wiring fixes
+
+If panels were empty before the query fixes in this repo:
+
+```bash
+bash stages/stage-7-observability/scripts/install-observability.sh
+SKIP_PROMPT=1 make demo-7
+```
+
+Set **Last 15 minutes**, then refresh each dashboard.
+
+---
+
+### 7.10 — After `make demo-7`: what each dashboard should look like
+
+Ran on this lab cluster after `SKIP_PROMPT=1 make demo-7` (same as §7.4). Use this to compare your screen.
+
+#### 1 — Kyverno Policy Violations
+
+**URL:** http://grafana.local/d/clearledger-kyverno-violations?from=now-15m&to=now
+
+| Panel | Expected appearance |
+|---|---|
+| **Policy Violations (24h)** | Large number ≥ 1 (may be red background) |
+| **Violations (last hour)** | **≥ 1** — primary proof after Exercise A |
+| **Active Policies** | Count of ready Kyverno policies (e.g. 5–10+, not zero) |
+| **Violation Rate** | Line with a bump in the last ~15 minutes |
+| **Top Violated Resource Kinds** | `Pod` bar visible |
+| **Violations by Namespace** | `clearledger` line or bar |
+
+**Terminal proof that matches:** `Error from server: admission webhook ... denied` listing `disallow-root-containers`, `require-resource-limits`, etc.
+
+---
+
+#### 2 — Security Event Timeline (Falco)
+
+**URL:** http://grafana.local/d/clearledger-security-events?from=now-15m&to=now
+
+| Panel | Expected appearance |
+|---|---|
+| **Falco Alerts by Priority** | Line or bar for **CRITICAL** (and maybe WARNING) in last 15m |
+| **Alerts by Rule Name** | Slice for rules like **Terminal shell in container** |
+| **Recent CRITICAL / WARNING Events** | Log lines: `priority=CRITICAL`, rule about **shell**, pod `auth-service-…` |
+| **CRITICAL Alerts (period)** | Stat **≥ 1** |
+| **WARNING Alerts (period)** | May be 0 or higher (background noise OK) |
+| **Total Events (period)** | ≥ 1 |
+
+**Terminal proof:** `kubectl exec … /bin/sh -c 'id && exit'` → Falco logs mention shell in container.
+
+---
+
+#### 3 — Service Health + Auth Security
+
+**URL:** http://grafana.local/d/clearledger-service-health?from=now-15m&to=now
+
+| Panel | Expected appearance |
+|---|---|
+| **Failed Login Attempts** | Stat **> 0** (after demo curl loop) |
+| **Successful Logins** | May stay **0** — OK |
+| **Transaction / large txn stats** | May stay 0 unless you generated ledger traffic |
+| **Request Rate** | **Often empty** until `build-metrics-images.sh` — not required for Stage 7 done |
+| **Auth Service Logs** | Lines containing `Failed login attempt` |
+
+---
+
+#### 4 — Compliance Posture (auditor one-pager)
+
+**URL:** http://grafana.local/d/clearledger-compliance?from=now-1h&to=now
+
+| Top stat | Expected after full demo |
+|---|---|
+| **Policy Violations** | > 0 |
+| **Runtime Threats** | > 0 |
+| **Failed Auth Attempts** | > 0 |
+| Control table lower on page | Tools listed **ACTIVE** (narrative, not live metrics) |
+
+This is screenshot **#3** — three defenses in one frame.
+
+---
+
+#### 5 — Audit Log Analysis
+
+Often **empty on MicroK8s** — no API audit stream in Loki yet. Do not use this alone to judge Stage 7.
+
+---
+
+#### 6 — DORA Metrics
+
+Needs **ArgoCD deploy activity** over days. May show low/zero on a fresh lab. Optional for Stage 7 completion.
+
+---
+
 ### What you learned in Stage 7
 
-- The three components of observability: metrics (Prometheus), logs (Loki), dashboards (Grafana)
-- What ServiceMonitors do: connect data sources to Prometheus
-- What DORA metrics are and why they matter for engineering performance
-- How to produce audit evidence — not just claims, but dashboards with real data
-- **The full picture:** you can now see every security event, policy violation, and deployment across the entire system in one place
+- **Prometheus** proves countable security events (Kyverno denials, HTTP rates)
+- **Loki** proves forensic detail (Falco JSON, auth log lines)
+- **Grafana** is the narrative layer — not a second install step after the lab
+- You can trace: **terminal action → backend signal → panel update**
+- ServiceMonitors / PodMonitors are what connect Stages 4–6 to charts
+- Empty dashboards mean “no events yet” or “wrong time range” — not “broken security”
+- Compliance posture is how you answer an auditor in **one screen**
 
 ---
 
