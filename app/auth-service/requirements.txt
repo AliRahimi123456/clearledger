@@ -20,3 +20,4 @@ opentelemetry-instrumentation-fastapi==0.63b1
 opentelemetry-instrumentation-sqlalchemy==0.63b1
 opentelemetry-instrumentation-httpx==0.63b1
 opentelemetry-exporter-otlp-proto-grpc==1.42.1
+prometheus-client==0.21.1

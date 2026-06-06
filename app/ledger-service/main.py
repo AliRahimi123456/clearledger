@@ -23,6 +23,8 @@ from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 from opentelemetry.instrumentation.redis import RedisInstrumentor
 from opentelemetry.sdk.resources import Resource
 
+from prom_metrics import install_prometheus
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -167,7 +169,8 @@ app = FastAPI(
     root_path="/ledger"
 )
 
-FastAPIInstrumentor.instrument_app(app, excluded_urls="health")
+FastAPIInstrumentor.instrument_app(app, excluded_urls="health,metrics")
+install_prometheus(app, settings.service_name)
 
 # With OTel instrumentation, POST /transactions generates a trace spanning
 # ledger-service → auth-service /verify → postgres INSERT → redis PUBLISH.

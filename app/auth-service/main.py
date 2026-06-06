@@ -21,6 +21,8 @@ from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
 from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 from opentelemetry.sdk.resources import Resource
 
+from prom_metrics import install_prometheus
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -272,7 +274,8 @@ app = FastAPI(
 
 # Auto-instrument FastAPI — every HTTP request generates a root span.
 # /health is excluded so liveness/readiness probes stay lightweight.
-FastAPIInstrumentor.instrument_app(app, excluded_urls="health")
+FastAPIInstrumentor.instrument_app(app, excluded_urls="health,metrics")
+install_prometheus(app, settings.service_name)
 
 # With OTel instrumentation, every request to /login generates a trace:
 # POST /login (auth-service)
