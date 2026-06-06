@@ -5,7 +5,88 @@ tty: true
 collectors:
   kubernetes:
     enabled: true
+metrics:
+  enabled: true
+falco:
+  json_output: true
+  json_include_output_property: true
+webserver:
+  enabled: true
+  prometheus_metrics_enabled: true
+customRules:
+  clearledger_rules.yaml: |-
+    - rule: Shell Spawned in ClearLedger Container
+      desc: >
+        A shell was spawned inside a clearledger container. This could indicate
+        an attacker gaining interactive access via command injection or a
+        compromised dependency executing arbitrary code.
+      condition: >
+        spawned_process and container
+        and (k8smeta.ns.name = clearledger or k8s.ns.name = clearledger)
+        and proc.name in (bash, sh, zsh, ash, dash)
+      output: >
+        CRITICAL: Shell spawned in ClearLedger container
+        (user=%user.name container=%container.name
+        pod=%k8smeta.pod.name cmd=%proc.cmdline)
+      priority: CRITICAL
+      tags: [clearledger, shell, attack]
+    - rule: Sensitive File Read in ClearLedger
+      desc: A ClearLedger container attempted to read a sensitive system file.
+      condition: >
+        open_read and container
+        and (k8smeta.ns.name = clearledger or k8s.ns.name = clearledger)
+        and fd.name in (/etc/shadow, /etc/passwd, /etc/sudoers, /root/.ssh/id_rsa)
+      output: >
+        CRITICAL: Sensitive file read in ClearLedger
+        (file=%fd.name container=%container.name pod=%k8smeta.pod.name)
+      priority: CRITICAL
+      tags: [clearledger, file-access]
+    - rule: Unexpected Outbound Connection from ClearLedger
+      desc: >
+        A ClearLedger container established a network connection to an unexpected
+        destination. Could indicate data exfiltration or C2 communication.
+      condition: >
+        outbound and container
+        and (k8smeta.ns.name = clearledger or k8s.ns.name = clearledger)
+        and not fd.sip.name in (postgres, redis, auth-service, ledger-service)
+        and not fd.rip in ("127.0.0.1")
+      output: >
+        WARNING: Unexpected outbound connection from ClearLedger
+        (container=%container.name dest=%fd.rip:%fd.rport pod=%k8smeta.pod.name)
+      priority: WARNING
+      tags: [clearledger, network, exfiltration]
+    - rule: Unauthorized Write to Vault Secrets Directory
+      desc: >
+        A process other than vault-agent attempted to write to /vault/secrets.
+      condition: >
+        open_write and container
+        and (k8smeta.ns.name = clearledger or k8s.ns.name = clearledger)
+        and fd.name startswith "/vault/secrets"
+        and not proc.name = "vault"
+      output: >
+        CRITICAL: Unauthorized write to vault secrets directory
+        (proc=%proc.name container=%container.name pod=%k8smeta.pod.name)
+      priority: CRITICAL
+      tags: [clearledger, vault, secrets]
+    - rule: Package Manager Executed in ClearLedger Container
+      desc: >
+        A package manager or download tool was run inside a running container.
+      condition: >
+        spawned_process and container
+        and (k8smeta.ns.name = clearledger or k8s.ns.name = clearledger)
+        and proc.name in (apt, apt-get, pip, pip3, curl, wget, yum, dnf)
+      output: >
+        WARNING: Package manager executed in running container
+        (proc=%proc.name container=%container.name pod=%k8smeta.pod.name)
+      priority: WARNING
+      tags: [clearledger, immutability]
+# Falcosidekick UI backs http://falco.local (ingress → falco-falcosidekick-ui:2802).
+# Stage 7 also ships Falco logs to Loki; keep sidekick for the Stage 6 lab UI.
 falcosidekick:
   enabled: true
+  replicaCount: 1
   webui:
     enabled: true
+    replicaCount: 1
+    redis:
+      storageEnabled: false
