@@ -268,31 +268,34 @@ jobs:
           export PROVENANCE_REPO="${{ github.repository }}"
           export PROVENANCE_REF="${{ github.ref }}"
           python3 << 'PYEOF'
-import json, os
-from datetime import datetime, timezone
-e = os.environ
-provenance = {
-  "_type": "https://in-toto.io/Statement/v0.1",
-  "predicateType": "https://slsa.dev/provenance/v0.2",
-  "subject": [{"name": e["REGISTRY"] + "/clearledger-auth-service",
-               "digest": {"sha1": e["PROVENANCE_SHA"]}}],
-  "predicate": {
-    "builder": {"id": "https://github.com/" + e["PROVENANCE_REPO"] + "/actions"},
-    "buildType": "https://github.com/actions/runner@v2",
-    "invocation": {"configSource": {
-      "uri": "git+https://github.com/" + e["PROVENANCE_REPO"] + "@" + e["PROVENANCE_REF"],
-      "digest": {"sha1": e["PROVENANCE_SHA"]},
-      "entryPoint": ".github/workflows/ci.yaml"
-    }},
-    "metadata": {
-      "buildStartedOn": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-      "reproducible": False
-    }
-  }
-}
-json.dump(provenance, open("/tmp/provenance.json", "w"), indent=2)
-print("✓ provenance.json written")
-PYEOF
+          import json, os
+          from datetime import datetime, timezone
+          e = os.environ
+          sha_digest = {"sha1": e["PROVENANCE_SHA"]}
+          subject = {"name": e["REGISTRY"] + "/clearledger-auth-service",
+                     "digest": sha_digest}
+          config_source = {
+            "uri": "git+https://github.com/" + e["PROVENANCE_REPO"] + "@" + e["PROVENANCE_REF"],
+            "digest": {"sha1": e["PROVENANCE_SHA"]},
+            "entryPoint": ".github/workflows/ci.yaml"
+          }
+          provenance = {
+            "_type": "https://in-toto.io/Statement/v0.1",
+            "predicateType": "https://slsa.dev/provenance/v0.2",
+            "subject": [subject],
+            "predicate": {
+              "builder": {"id": "https://github.com/" + e["PROVENANCE_REPO"] + "/actions"},
+              "buildType": "https://github.com/actions/runner@v2",
+              "invocation": {"configSource": config_source},
+              "metadata": {
+                "buildStartedOn": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "reproducible": False
+              }
+            }
+          }
+          json.dump(provenance, open("/tmp/provenance.json", "w"), indent=2)
+          print("✓ provenance.json written")
+          PYEOF
           cosign attest \
             --key /tmp/cosign.key \
             --predicate /tmp/provenance.json \
@@ -312,17 +315,17 @@ PYEOF
             --insecure-ignore-tlog \
             "${REGISTRY}/clearledger-auth-service:${IMAGE_TAG}" \
             | python3 -c "
-import sys,json,base64
-for line in sys.stdin:
-    line=line.strip()
-    if not line: continue
-    try:
-        obj=json.loads(line)
-        p=json.loads(base64.b64decode(obj['payload']+'=='))
-        print(p['predicate']['builder']['id'])
-    except Exception:
-        pass
-"
+          import sys,json,base64
+          for line in sys.stdin:
+              line=line.strip()
+              if not line: continue
+              try:
+                  obj=json.loads(line)
+                  p=json.loads(base64.b64decode(obj['payload']+'=='))
+                  print(p['predicate']['builder']['id'])
+              except Exception:
+                  pass
+          "
           echo "✓ SLSA provenance attestation verified"
           rm -f /tmp/cosign.key /tmp/cosign-verify.key /tmp/provenance.json
 
@@ -393,29 +396,32 @@ for line in sys.stdin:
           export PROVENANCE_REF="${{ github.ref }}"
           export PROVENANCE_SVC="${REGISTRY}/clearledger-ledger-service"
           python3 << 'PYEOF'
-import json, os
-from datetime import datetime, timezone
-e = os.environ
-provenance = {
-  "_type": "https://in-toto.io/Statement/v0.1",
-  "predicateType": "https://slsa.dev/provenance/v0.2",
-  "subject": [{"name": e["PROVENANCE_SVC"], "digest": {"sha1": e["PROVENANCE_SHA"]}}],
-  "predicate": {
-    "builder": {"id": "https://github.com/" + e["PROVENANCE_REPO"] + "/actions"},
-    "buildType": "https://github.com/actions/runner@v2",
-    "invocation": {"configSource": {
-      "uri": "git+https://github.com/" + e["PROVENANCE_REPO"] + "@" + e["PROVENANCE_REF"],
-      "digest": {"sha1": e["PROVENANCE_SHA"]},
-      "entryPoint": ".github/workflows/ci.yaml"
-    }},
-    "metadata": {
-      "buildStartedOn": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-      "reproducible": False
-    }
-  }
-}
-json.dump(provenance, open("/tmp/provenance.json", "w"), indent=2)
-PYEOF
+          import json, os
+          from datetime import datetime, timezone
+          e = os.environ
+          sha_digest = {"sha1": e["PROVENANCE_SHA"]}
+          subject = {"name": e["PROVENANCE_SVC"], "digest": sha_digest}
+          config_source = {
+            "uri": "git+https://github.com/" + e["PROVENANCE_REPO"] + "@" + e["PROVENANCE_REF"],
+            "digest": {"sha1": e["PROVENANCE_SHA"]},
+            "entryPoint": ".github/workflows/ci.yaml"
+          }
+          provenance = {
+            "_type": "https://in-toto.io/Statement/v0.1",
+            "predicateType": "https://slsa.dev/provenance/v0.2",
+            "subject": [subject],
+            "predicate": {
+              "builder": {"id": "https://github.com/" + e["PROVENANCE_REPO"] + "/actions"},
+              "buildType": "https://github.com/actions/runner@v2",
+              "invocation": {"configSource": config_source},
+              "metadata": {
+                "buildStartedOn": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "reproducible": False
+              }
+            }
+          }
+          json.dump(provenance, open("/tmp/provenance.json", "w"), indent=2)
+          PYEOF
           cosign attest --key /tmp/cosign.key --predicate /tmp/provenance.json \
             --type slsaprovenance --tlog-upload=false "${IMAGE}" \
             || echo "⚠ cosign attest skipped (Stage 1 — enforced in Stage 4)"
@@ -423,17 +429,17 @@ PYEOF
           cosign verify-attestation --key /tmp/cosign-verify.key --type slsaprovenance \
             --insecure-ignore-tlog "${IMAGE}" 2>/dev/null \
             | python3 -c "
-import sys,json,base64
-for line in sys.stdin:
-    line=line.strip()
-    if not line: continue
-    try:
-        obj=json.loads(line)
-        p=json.loads(base64.b64decode(obj['payload']+'=='))
-        print(p['predicate']['builder']['id'])
-    except Exception:
-        pass
-" || true
+          import sys,json,base64
+          for line in sys.stdin:
+              line=line.strip()
+              if not line: continue
+              try:
+                  obj=json.loads(line)
+                  p=json.loads(base64.b64decode(obj['payload']+'=='))
+                  print(p['predicate']['builder']['id'])
+              except Exception:
+                  pass
+          " || true
           rm -f /tmp/cosign.key /tmp/cosign-verify.key /tmp/provenance.json
 
   build-scan-notification:
@@ -494,29 +500,32 @@ for line in sys.stdin:
           export PROVENANCE_REF="${{ github.ref }}"
           export PROVENANCE_SVC="${REGISTRY}/clearledger-notification-service"
           python3 << 'PYEOF'
-import json, os
-from datetime import datetime, timezone
-e = os.environ
-provenance = {
-  "_type": "https://in-toto.io/Statement/v0.1",
-  "predicateType": "https://slsa.dev/provenance/v0.2",
-  "subject": [{"name": e["PROVENANCE_SVC"], "digest": {"sha1": e["PROVENANCE_SHA"]}}],
-  "predicate": {
-    "builder": {"id": "https://github.com/" + e["PROVENANCE_REPO"] + "/actions"},
-    "buildType": "https://github.com/actions/runner@v2",
-    "invocation": {"configSource": {
-      "uri": "git+https://github.com/" + e["PROVENANCE_REPO"] + "@" + e["PROVENANCE_REF"],
-      "digest": {"sha1": e["PROVENANCE_SHA"]},
-      "entryPoint": ".github/workflows/ci.yaml"
-    }},
-    "metadata": {
-      "buildStartedOn": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-      "reproducible": False
-    }
-  }
-}
-json.dump(provenance, open("/tmp/provenance.json", "w"), indent=2)
-PYEOF
+          import json, os
+          from datetime import datetime, timezone
+          e = os.environ
+          sha_digest = {"sha1": e["PROVENANCE_SHA"]}
+          subject = {"name": e["PROVENANCE_SVC"], "digest": sha_digest}
+          config_source = {
+            "uri": "git+https://github.com/" + e["PROVENANCE_REPO"] + "@" + e["PROVENANCE_REF"],
+            "digest": {"sha1": e["PROVENANCE_SHA"]},
+            "entryPoint": ".github/workflows/ci.yaml"
+          }
+          provenance = {
+            "_type": "https://in-toto.io/Statement/v0.1",
+            "predicateType": "https://slsa.dev/provenance/v0.2",
+            "subject": [subject],
+            "predicate": {
+              "builder": {"id": "https://github.com/" + e["PROVENANCE_REPO"] + "/actions"},
+              "buildType": "https://github.com/actions/runner@v2",
+              "invocation": {"configSource": config_source},
+              "metadata": {
+                "buildStartedOn": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "reproducible": False
+              }
+            }
+          }
+          json.dump(provenance, open("/tmp/provenance.json", "w"), indent=2)
+          PYEOF
           cosign attest --key /tmp/cosign.key --predicate /tmp/provenance.json \
             --type slsaprovenance --tlog-upload=false "${IMAGE}" \
             || echo "⚠ cosign attest skipped (Stage 1 — enforced in Stage 4)"
@@ -524,17 +533,17 @@ PYEOF
           cosign verify-attestation --key /tmp/cosign-verify.key --type slsaprovenance \
             --insecure-ignore-tlog "${IMAGE}" 2>/dev/null \
             | python3 -c "
-import sys,json,base64
-for line in sys.stdin:
-    line=line.strip()
-    if not line: continue
-    try:
-        obj=json.loads(line)
-        p=json.loads(base64.b64decode(obj['payload']+'=='))
-        print(p['predicate']['builder']['id'])
-    except Exception:
-        pass
-" || true
+          import sys,json,base64
+          for line in sys.stdin:
+              line=line.strip()
+              if not line: continue
+              try:
+                  obj=json.loads(line)
+                  p=json.loads(base64.b64decode(obj['payload']+'=='))
+                  print(p['predicate']['builder']['id'])
+              except Exception:
+                  pass
+          " || true
           rm -f /tmp/cosign.key /tmp/cosign-verify.key /tmp/provenance.json
 
   build-frontend:
