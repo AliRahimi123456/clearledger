@@ -218,6 +218,7 @@ jobs:
             curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
               | sh -s -- -b "$HOME/.local/bin"
           fi
+          grype db update
           grype sbom:sbom-auth.json \
             --fail-on high \
             --only-fixed \
