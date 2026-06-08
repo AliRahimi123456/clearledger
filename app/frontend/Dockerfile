@@ -1,9 +1,8 @@
 FROM nginx:1.27-alpine
 
-# Alpine security patches; pin libxml2 for CVE-2026-6732 (2.13.9-r0 → r1)
-RUN apk update && \
-    apk upgrade --no-cache && \
-    apk add --no-cache libxml2=2.13.9-r1
+# Upgrade all Alpine packages to latest security patches.
+# docker build --no-cache in CI ensures this always runs fresh (no stale layer).
+RUN apk update && apk upgrade --no-cache
 
 # Security: run as non-root
 RUN addgroup -S appuser && adduser -S appuser -G appuser
