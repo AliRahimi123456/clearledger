@@ -1,0 +1,7 @@
+ignore:
+  # Fix only available in Python 3.15.0b2 (pre-release).
+  # Running a beta CPython in production is not acceptable.
+  # Risk accepted: monitor python.org/dev/peps for stable 3.15 GA release
+  # and upgrade base image at that point.
+  - vulnerability: CVE-2026-7210
+    reason: fix-requires-prerelease
