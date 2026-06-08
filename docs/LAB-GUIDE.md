@@ -1115,24 +1115,36 @@ GitHub Actions starts workflow
         ↓
 Self-hosted runner inside the Multipass VM picks up the job
         ↓
-1. Scan secrets
+1. Scan secrets (Gitleaks)
         ↓
-2. Run code security scans (SAST)
+2. Run code security scans (Semgrep) + IaC scan (Checkov) — parallel
         ↓
-3. Scan Kubernetes and IaC files
+3. Prepare scanners (install Trivy/Syft/Grype/Cosign once; refresh Trivy DB once)
         ↓
-4. Build Docker images
+4. BUILD — docker build all four services (local tags only; nothing hits Docker Hub yet)
         ↓
-5. Scan images for vulnerabilities
+5. SCAN — Trivy on all images; Syft + Grype SBOM on auth-service; upload evidence
         ↓
-6. Generate a software inventory (SBOM)
+6. PUBLISH — push to Docker Hub + Cosign sign (only if scan passed)
         ↓
-7. Push images to Docker Hub with commit SHA tags
-        ↓
-8. Sign images with Cosign
-        ↓
-9. Produce supply-chain evidence for later verification
+7. UPDATE MANIFESTS — commit new image tags to clearledger-infra
 ```
+
+#### Build → scan → publish (prod-style gates)
+
+Real teams **never push first and scan later**. The pipeline separates three concerns into three jobs in `.github/workflows/ci.yaml`:
+
+| Job | What it does | If it fails… |
+|---|---|---|
+| `build-images` | `docker build` all services with tag `${{ github.sha }}` | No registry pollution — images never left the runner |
+| `scan-images` | Trivy (all 4 images); Syft + Grype (auth only) | Publish is skipped — bad images never reach Docker Hub |
+| `publish-images` | Runs `scripts/ci-publish-image.sh` — tag, push, Cosign sign | Only runs after scan passes |
+
+You do **not** run `scripts/ci-publish-image.sh` yourself before pushing code. GitHub Actions checks out the repo and calls it inside `publish-images`.
+
+On the self-hosted runner, images stay in the local Docker daemon between jobs (same VM, same daemon). That is why build and scan can be separate jobs without uploading multi-gigabyte tarballs — a lab shortcut that matches how a dedicated build VM works in production.
+
+Stage 8 AWS (`ci-aws.yaml`) uses the same pattern on GitHub-hosted runners: `build-images` saves `images.tar` as an artifact, `scan-images` loads and scans it, `publish-images` loads and pushes to ECR.
 
 Then comes the GitOps handoff:
 
@@ -1156,8 +1168,10 @@ The pipeline does **not** deploy to Kubernetes directly. It only updates `clearl
 |---|---|---|
 | `on: push: branches: [main]` | Triggers on every push to main | Every change gets built automatically |
 | `runs-on: [self-hosted, clearledger]` | Uses your local runner | Needed to reach the local cluster and Docker daemon |
-| `docker/login-action` | Logs in to Docker Hub | Runner needs auth to push images |
-| Build jobs | Builds and pushes each service image | Same work as Stage 0, but repeatable and tied to a commit |
+| `prepare-scanners` | Installs scanner CLIs; downloads Trivy DB once per workflow | Avoids repeating ~95MB DB download per service |
+| `build-images` | Builds all service images locally | Produces artifacts before any registry write |
+| `scan-images` | Trivy + SBOM gates | Blocks publish if CVEs are found |
+| `publish-images` | Docker Hub login + `ci-publish-image.sh` | Push and sign only after scan passes |
 | `update-manifests` | Updates image tags in clearledger-infra on GitHub | Records the desired new version in Git |
 
 The Kubernetes Checkov scan in Stage 1 is evidence-only. It uploads findings so you can see the hardening work ahead, but it does not block the first CI pipeline run. That is intentional: Stage 1 proves the build-push-update flow. Later stages tighten Kubernetes policy with security gates, admission control, and secrets management.
@@ -4279,7 +4293,7 @@ Each earlier stage has its own view: CI logs, Kyverno CLI, Falco UI, `kubectl lo
 | **Loki** | Log lines from pods (Falco, apps) | Searchable text — like `grep` across the cluster |
 | **Grafana** | Charts that query Prometheus + Loki | The screen you show an auditor |
 
-**ServiceMonitors / PodMonitors** tell Prometheus *where to scrape*. No monitor for Kyverno → Kyverno panels stay empty. No PodMonitor for `auth-service` → Request Rate stays empty until §7.6.
+**ServiceMonitors / PodMonitors** tell Prometheus *where to scrape*. No monitor for Kyverno → Kyverno panels stay empty. No PodMonitor for `auth-service` → Request Rate stays empty until §7.5 (metrics-enabled images deployed via GitOps).
 
 **Promtail** ships container logs into Loki. No Loki → log panels say “No data” even when `kubectl logs` works.
 
@@ -4625,7 +4639,19 @@ This is the **one screenshot** that shows defense-in-depth: admission + runtime 
 
 Log panels work without image changes. **Request Rate** needs app images that expose `/metrics`.
 
-> Skip if `http_requests_total` already returns data in Prometheus.
+The `/metrics` endpoint is already in the app source (`app/*/prom_metrics.py`) and is included in every CI build. If your cluster still runs **old image tags** from before that code landed, Prometheus has nothing to scrape.
+
+**Preferred — GitOps (same path as Stage 1–2):**
+
+```bash
+git push origin main
+# CI builds signed images → updates clearledger-infra → ArgoCD syncs
+# Wait for ArgoCD Synced + Healthy, then verify (~60s after rollout):
+```
+
+> Skip this section if `http_requests_total` already returns data in Prometheus.
+
+**Lab shortcut only** — bypasses Git; ArgoCD `selfHeal` may revert within ~3 minutes unless you update `clearledger-infra` or temporarily disable self-heal (see §2 rollback):
 
 ```bash
 export DOCKER_USERNAME=your-dockerhub-user
@@ -4708,7 +4734,7 @@ Use this when an interviewer asks *“What broke in observability?”* or *“Ho
 | **Opening all dashboards at once** | Loki restarts climb; everything goes empty | Six boards × 3h LogQL = query storm on one Loki replica | Open **one dashboard at a time**; default **1h/6h** not 3h/24h; cap `max_query_length` | *“We treated observability like production: rate-limit queries and load-test the path Grafana uses.”* |
 | **`make check-7` passes but Stage 7 not done** | Health check green, screenshots still empty | Health check only tests **pods + `/ready`**, not “Falco alert visible” | Done checklist in §7.6: require **your** events + screenshots 1–3 | *“Synthetic checks prove uptime; product proof needs correlated events on named dashboards.”* |
 | **Kyverno panel stays 0** | Terminal shows admission denied, Grafana shows 0 | Prometheus had not scraped yet, or no `request_allowed="false"` series in range | Wait 30–90s; use **Violations (last hour)** panel; confirm metric with PromQL in §7.2 | *“Admission denial is immediate; metrics are eventually consistent on scrape interval.”* |
-| **Request Rate panel always empty** | Failed logins work, HTTP rate flat | App images lacked `/metrics`; PodMonitor had nothing to scrape | `build-metrics-images.sh` + PodMonitor `clearledger-apps` | *“Logs and metrics are separate pipelines — Promtail does not replace Prometheus app metrics.”* |
+| **Request Rate panel always empty** | Failed logins work, HTTP rate flat | Cluster runs old images without `/metrics`; PodMonitor had nothing to scrape | `git push` (CI → infra repo → ArgoCD) or lab shortcut `build-metrics-images.sh` + PodMonitor `clearledger-apps` | *“Logs and metrics are separate pipelines — Promtail does not replace Prometheus app metrics.”* |
 | **Wrong Grafana dashboard links** | Console: `not correct url` / `skipping rendering` | Old dashboard UID/slug cached (em-dash vs hyphen) | UID-only URLs in §7.3; installer purges stale UIDs | *“We standardized dashboard UIDs in Git and treated Grafana URLs like API contracts.”* |
 | **Only six dashboards (not 30+)** | “Where did Kubernetes / Node dashboards go?” | `defaultDashboardsEnabled: false` on purpose | ClearLedger sidecar imports only `clearledger` tag | *“We reduced noise for a security lab — one tag, six audit-focused boards.”* |
 | **Audit Log dashboard empty** | Expected on MicroK8s | Cluster audit logs not shipped to Loki yet | Documented as future work; Falco + Kyverno + app logs still prove the lab | *“We scoped MVP observability to signals we actually emit; audit log shipping is a Phase 2 sink.”* |
@@ -4788,7 +4814,7 @@ Ran on this lab cluster after `SKIP_PROMPT=1 make demo-7` (same as §7.4). Use t
 | **Failed Login Attempts** | Stat **> 0** (after demo curl loop) |
 | **Successful Logins** | May stay **0** — OK |
 | **Transaction / large txn stats** | May stay 0 unless you generated ledger traffic |
-| **Request Rate** | **Often empty** until `build-metrics-images.sh` — not required for Stage 7 done |
+| **Request Rate** | **Often empty** until CI deploys metrics-enabled images (§7.5) — not required for Stage 7 done |
 | **Auth Service Logs** | Lines containing `Failed login attempt` |
 
 ---
@@ -4885,7 +4911,251 @@ make check-75
 
 **Goal:** the same application, the same security layers, running on AWS managed services instead of your laptop.
 
-### What you need to know first
+### Demo stack vs production
+
+| | Demo stack (`make aws-up`) | Production add-ons (documented, not auto-applied) |
+|---|---|---|
+| Label | **Demo stack** — production-*shaped*, not production-*ready* | Production hardening checklist below |
+| Deploy | ArgoCD app `clearledger-aws` → `stages/stage-8-aws-migration/manifests/` | Staging env → promote same SHA |
+| TLS | HTTP ALB | `ingress-aws-https.example.yaml` + ACM |
+| Observability | Stage 7 stack installed by spinup | Same + alert routing |
+| CI | `ci-aws.yaml` — Gitleaks, Semgrep, Checkov, Trivy, Cosign | + full DAST against `AWS_DAST_BASE_URL` |
+
+> **Do not** `kubectl apply` app Deployments on AWS after bootstrap. Git + ArgoCD is the contract (Stage 2). Spinup may apply kustomize **once** if Git is not pushed yet; push `kustomization.yaml` and let ArgoCD own the cluster.
+
+### Secrets: three patterns (Vault → ESO → CSI)
+
+| Pattern | Where | How pods get secrets |
+|---|---|---|
+| **1. Vault agent** | Homelab Stages 5–7 | Sidecar injects **files** at `/vault/secrets/*` |
+| **2. ESO** | AWS Stage 8 (**this lab**) | Syncs Secrets Manager → **K8s Secret** → `secretKeyRef` / env |
+| **3. CSI Driver** | AWS Stage 8 (installed + §8.5 exercise) | Mounts SM secrets as **files** — no Secret object in etcd |
+
+```text
+Vault:  SM/Vault KV → agent sidecar → /vault/secrets/database_url (file)
+ESO:    Secrets Manager → ESO (IRSA) → K8s Secret → DATABASE_URL env
+CSI:    Secrets Manager → CSI volume (IRSA on app SA) → /mnt/secrets/database_url (file)
+```
+
+**This lab uses ESO by default** (`manifests/deployments/auth-service.yaml` + `external-secrets.yaml`). **CSI is installed on every AWS spinup** (step 11) — SecretProviderClasses are in Git; the §8.5 exercise swaps auth to file mounts. See `manifests/csi/` and `docs/secrets-patterns.md`.
+
+**IRSA** is how AWS trusts Kubernetes identities (ESO pod or app pod). No `AWS_ACCESS_KEY_ID` in Git or cluster config.
+
+---
+
+### 8.1 — Two ways through Stage 8
+
+| Path | When to use it |
+|---|---|
+| **Quick** — `make aws-up` | You want the full demo stack fast (~45–60 min). Read §8.2 so you know what ran. |
+| **Manual** — §8.3 step by step | You are learning AWS migration mechanics, interviewing, or debugging a failed spinup. |
+
+> **Do not skip the manual section if you only ran `make aws-up`.** The Makefile wraps `aws-spinup.sh`; without §8.2–§8.5 you will not know what Terraform, ESO, CSI, or ArgoCD each contributed.
+
+**Quick path:**
+
+```bash
+# Edit terraform/secrets.tf first — replace CHANGE_ME_BEFORE_APPLY
+make aws-up    # wraps stages/stage-8-aws-migration/scripts/aws-spinup.sh
+make aws-down  # destroys billable resources
+```
+
+---
+
+### 8.2 — What `make aws-up` runs (15 steps)
+
+| Step | Script banner | What it does |
+|---|---|---|
+| 1 | Prerequisites | `aws`, `terraform`, `kubectl`, `docker`, `helm`, `git`, `kustomize`; `aws sts get-caller-identity` |
+| 2 | Terraform | VPC, EKS 1.31, RDS, ECR, ALB IAM, Secrets Manager, GuardDuty, CloudTrail, IRSA roles, GitHub OIDC role |
+| 3 | GuardDuty & CloudTrail | Confirms detectors and trail logging |
+| 4 | Build & push ECR | `docker build` + push auth/ledger/notification; optional Cosign sign |
+| 5 | GitOps manifests | Patches `manifests/kustomization.yaml` with ECR registry + git SHA; patches ESO/CSI region |
+| 6 | kubeconfig | `aws eks update-kubeconfig` |
+| 7 | ArgoCD | Stable manifest install in `argocd` namespace |
+| 8 | Kyverno | Helm install + `infra/policies/` ClusterPolicies |
+| 9 | Falco | Helm + **falco** IRSA role (not ESO role) |
+| 10 | ESO + IRSA SAs | External Secrets Operator + workload ServiceAccounts with IRSA annotations |
+| 11 | **CSI driver** | `install-csi-secrets.sh` — Secrets Store CSI Driver + AWS provider + SecretProviderClasses |
+| 12 | Observability | Stage 7 stack (`install-observability.sh`) |
+| 13 | GitOps deploy | ArgoCD Application `clearledger-aws` → `stages/stage-8-aws-migration/manifests/` |
+| 14 | ALB | Waits for `clearledger-ingress` hostname |
+| 15 | Summary | Prints HTTP URL, tear-down reminder, pointer to §8.3 |
+
+Default deploy uses **ESO** (step 10). Step 11 installs **CSI** so you can run §8.5 without reinstalling anything.
+
+---
+
+### 8.3 — Manual walkthrough
+
+Run these yourself at least once. Paths are from the repo root.
+
+**Before you start**
+
+```bash
+aws sts get-caller-identity
+terraform --version
+# Edit stages/stage-8-aws-migration/terraform/secrets.tf — no CHANGE_ME_BEFORE_APPLY
+```
+
+**Steps 1–2 — Terraform**
+
+```bash
+cd stages/stage-8-aws-migration/terraform
+terraform init -upgrade
+terraform apply
+# Save outputs:
+terraform output -raw ecr_registry_url
+terraform output -raw github_actions_ecr_role_arn
+terraform output -raw eso_role_arn
+terraform output -raw auth_service_irsa_role_arn
+terraform output -raw kubeconfig_command
+cd ../../..
+```
+
+**Steps 3–4 — Security services + ECR images**
+
+```bash
+aws guardduty list-detectors
+aws cloudtrail get-trail-status --name clearledger-trail
+
+ECR_REGISTRY=$(terraform -chdir=stages/stage-8-aws-migration/terraform output -raw ecr_registry_url)
+aws ecr get-login-password --region eu-west-1 | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+TAG=$(git rev-parse --short HEAD)
+docker build -t "${ECR_REGISTRY}/clearledger/auth-service:${TAG}" app/auth-service && docker push ...
+# Repeat for ledger-service, notification-service (or run step 4 block from aws-spinup.sh)
+```
+
+**Step 5 — GitOps source of truth**
+
+```bash
+# aws-spinup.sh sed-patches these — do the same manually or copy kustomization after spinup:
+# stages/stage-8-aws-migration/manifests/kustomization.yaml  → ECR + tag
+# manifests/external-secrets.yaml + manifests/csi/*.yaml       → region
+git add stages/stage-8-aws-migration/manifests/
+git commit -m "stage8: ECR images ${TAG}"
+git push
+```
+
+**Step 6 — Cluster access**
+
+```bash
+eval "$(terraform -chdir=stages/stage-8-aws-migration/terraform output -raw kubeconfig_command)"
+kubectl get nodes
+```
+
+**Steps 7–12 — Platform stack** (same order as spinup)
+
+```bash
+# 7 ArgoCD
+kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
+kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+
+# 8 Kyverno
+helm upgrade --install kyverno kyverno/kyverno -n kyverno --create-namespace --wait
+kubectl apply -f infra/policies/
+
+# 9 Falco (use falco_role_arn from terraform output)
+helm upgrade --install falco falcosecurity/falco -n falco --create-namespace \
+  -f stages/stage-6-runtime-security/infra/falco/helm-values.yaml \
+  --set "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn=FALCO_ROLE_ARN"
+
+# 10 ESO + app ServiceAccounts (eso_role_arn + auth/ledger/notify IRSA from terraform)
+helm upgrade --install external-secrets external-secrets/external-secrets -n external-secrets --create-namespace \
+  --set "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn=ESO_ROLE_ARN" --wait
+export REPLACE_AUTH_IRSA_ROLE_ARN=...  # from terraform output
+envsubst < stages/stage-8-aws-migration/manifests/clearledger-serviceaccounts.yaml | kubectl apply -f -
+
+# 11 CSI driver + SecretProviderClasses
+bash stages/stage-8-aws-migration/scripts/install-csi-secrets.sh
+
+# 12 Observability
+bash stages/stage-7-observability/scripts/install-observability.sh
+```
+
+**Steps 13–14 — Deploy via ArgoCD (not raw kubectl on Deployments)**
+
+```bash
+kubectl apply -f stages/stage-8-aws-migration/argocd/clearledger-aws-app.yaml
+argocd app sync clearledger-aws   # or wait for auto-sync
+kubectl get ingress clearledger-ingress -n clearledger
+```
+
+ArgoCD watches **`stages/stage-8-aws-migration/manifests/` in this repo** (app `clearledger-aws`). Homelab Stages 1–7 still use `clearledger-infra`; AWS Stage 8 uses the in-repo kustomize path so ESO/CSI manifests stay colocated.
+
+---
+
+### 8.4 — Verify ESO (default secret path)
+
+After sync, confirm External Secrets pulled from Secrets Manager:
+
+```bash
+kubectl get externalsecret,secret -n clearledger
+kubectl describe externalsecret auth-service-secrets -n clearledger | grep -A2 Status
+kubectl get pods -n clearledger -l app=auth-service
+kubectl exec -n clearledger deploy/auth-service -c auth-service -- env | grep DATABASE_URL
+# Expect DATABASE_URL set from K8s Secret — not a file path
+```
+
+If `SecretSynced=False`, check ESO logs and IRSA:
+
+```bash
+kubectl logs -n external-secrets deploy/external-secrets -c external-secrets | tail -30
+kubectl get sa auth-service -n clearledger -o yaml | grep role-arn
+```
+
+---
+
+### 8.5 — Hands-on: CSI driver (file mounts)
+
+CSI is **installed** at spinup step 11. Default pods still use ESO. This exercise switches **auth-service** to the same file-mount code path as Vault homelab (`DATABASE_URL_FILE` / `JWT_SECRET_FILE`).
+
+**1. Confirm CSI is running**
+
+```bash
+kubectl get pods -n kube-system -l app=secrets-store-csi-driver
+kubectl get secretproviderclass -n clearledger
+```
+
+**2. Swap deployment in Git (GitOps)**
+
+Edit `stages/stage-8-aws-migration/manifests/kustomization.yaml`:
+
+```yaml
+# Change:
+  - deployments/auth-service.yaml
+# To:
+  - deployments/auth-service-csi.yaml
+```
+
+Commit, push, then:
+
+```bash
+argocd app sync clearledger-aws
+kubectl rollout status deployment/auth-service -n clearledger
+```
+
+**3. Verify files inside the pod**
+
+```bash
+kubectl get pod -n clearledger -l secrets=csi
+kubectl exec -n clearledger deploy/auth-service -c auth-service -- ls -la /mnt/secrets
+kubectl exec -n clearledger deploy/auth-service -c auth-service -- sh -c 'wc -c /mnt/secrets/database_url'
+curl -s "http://$(kubectl get ingress clearledger-ingress -n clearledger -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')/auth/health"
+```
+
+**4. Compare ESO vs CSI**
+
+| | ESO (default) | CSI (this exercise) |
+|---|---|---|
+| Secret in etcd? | Yes — K8s Secret object | No — volume mount only |
+| Pod env | `DATABASE_URL` from `secretKeyRef` | `DATABASE_URL_FILE=/mnt/secrets/database_url` |
+| IAM identity | IRSA on ESO SA (reads SM) | IRSA on **auth-service** SA (mounts SM) |
+| App code | Same — `_read_secret()` in `app/auth-service/main.py` | Same |
+
+Revert by switching kustomization back to `auth-service.yaml` and syncing.
+
+---
 
 Everything you built in Stages 0–7 runs on a VM on your laptop. In production, you would use cloud-managed services: AWS EKS instead of MicroK8s, RDS instead of a Postgres container, ECR instead of Docker Hub, Secrets Manager or Vault on EC2 instead of dev-mode Vault.
 
@@ -4920,46 +5190,25 @@ No AWS_SECRET_ACCESS_KEY in GitHub Secrets
 No AWS keys inside Kubernetes Secrets
 ```
 
-When Terraform runs, it creates a role called `clearledger-github-actions-ecr`. The Stage 8 pipeline in `.github/workflows/ci-aws.yaml` assumes that role using OIDC, logs in to ECR, pushes images, then updates `clearledger-infra` with ECR image URLs.
+When Terraform runs, it creates a role called `clearledger-github-actions-ecr`. The Stage 8 pipeline in `.github/workflows/ci-aws.yaml` assumes that role using OIDC, logs in to ECR, pushes images, then updates `stages/stage-8-aws-migration/manifests/kustomization.yaml` — ArgoCD app `clearledger-aws` syncs the cluster.
 
----
-
-**Prerequisites:** AWS CLI configured (`aws sts get-caller-identity` returns your account), Terraform installed (`terraform --version`).
-
-```bash
-make aws-up   # provisions everything, ends by printing a URL
-```
-
-Terraform creates: VPC, EKS, ECR, RDS, ALB, Secrets Manager, GuardDuty, CloudTrail, VPC Flow Logs, IRSA roles, and the GitHub Actions OIDC role for ECR pushes. ArgoCD, Kyverno, and Falco install identically to the local setup.
-
-After Terraform finishes, add the AWS pipeline values to GitHub:
+**After the stack is up** (§8.3 or `make aws-up`), configure GitHub for ongoing AWS CI:
 
 ```text
 GitHub production environment secrets:
   GITHUB_ACTIONS_ROLE_ARN = terraform output github_actions_ecr_role_arn
-  INFRA_REPO_TOKEN         = fine-grained token or GitHub App token for clearledger-infra
 
 GitHub Variables:
   AWS_ACCOUNT_ID = your 12-digit AWS account ID
   AWS_REGION     = eu-west-1
 ```
 
-Then run the Stage 8 workflow:
+Run **CI — AWS (ECR + OIDC)** from the Actions tab (manual). Same gates as `ci.yaml`; updates `kustomization.yaml` in this repo — not `clearledger-infra`.
 
-```text
-GitHub → clearledger repo → Actions → CI — AWS (ECR + OIDC) → Run workflow
-```
-
-That workflow is the AWS version of the Stage 1 pipeline. It uses the same self-hosted runner, but pushes to ECR instead of Docker Hub.
-
-Important: the two workflows are intentionally different:
-
-| Workflow | When it runs | Registry | Target stage |
+| Workflow | When it runs | Registry | GitOps target |
 |---|---|---|---|
-| `.github/workflows/ci.yaml` | Automatically on push to `main` | Docker Hub | Stages 1–7 local MicroK8s lab |
-| `.github/workflows/ci-aws.yaml` | Manually from the Actions tab | Amazon ECR | Stage 8 AWS migration |
-
-Why manual for AWS? Because AWS actions can create cost and affect a real cloud environment. You should choose when to run the AWS pipeline instead of triggering it during local MicroK8s testing.
+| `ci.yaml` | Push to `main` | Docker Hub | `clearledger-infra` (Stages 1–7) |
+| `ci-aws.yaml` | Manual | ECR | `stages/stage-8-aws-migration/manifests/` |
 
 ### Production Hardening Checklist
 
@@ -5064,8 +5313,10 @@ Important nuance: AWS IAM can reliably check the GitHub OIDC `aud` and `sub` cla
 The simplest lab flow is:
 
 ```text
-main → build → update clearledger-infra → ArgoCD deploys
+main → ci-aws.yaml → update stages/stage-8-aws-migration/manifests/kustomization.yaml → ArgoCD clearledger-aws syncs
 ```
+
+Homelab Stages 1–7 still use `clearledger-infra` + Docker Hub. Stage 8 AWS uses the in-repo kustomize path above.
 
 A production flow should be:
 
@@ -5119,8 +5370,8 @@ CI builds and proves the artifact.
 GitHub Environments approve production.
 OIDC gives short-lived AWS credentials.
 ECR stores immutable images.
-clearledger-infra records desired state.
-ArgoCD deploys from Git.
+kustomization.yaml (Stage 8 path) records desired state.
+ArgoCD clearledger-aws deploys from Git.
 No SSH. No static AWS keys. No direct kubectl from CI.
 ```
 
@@ -5139,6 +5390,7 @@ See `stages/stage-8-aws-migration/README.md` for the full walkthrough and cost r
 - That containerized applications are portable — the same code runs on your laptop and on AWS
 - What Terraform does: declares infrastructure as code so environments are reproducible
 - What changes in a cloud migration (managed services, IAM, networking) and what does not (application code, CI logic, security policies)
+- Three AWS secret delivery paths: ESO (default), CSI file mounts (§8.5), vs Vault on homelab
 - AWS-specific security services: GuardDuty (threat detection), CloudTrail (API audit), GitHub Actions OIDC (pipeline AWS auth without long-lived keys), and IRSA (pod-level IAM without long-lived credentials)
 
 ---

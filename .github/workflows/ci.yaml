@@ -18,6 +18,10 @@ env:
   REGISTRY: docker.io/${{ secrets.DOCKER_USERNAME }}
   # Why IMAGE_TAG: immutable traceability (each image maps to one commit).
   IMAGE_TAG: ${{ github.sha }}
+  # BuildKit pip cache + one DB refresh per workflow (not per service).
+  DOCKER_BUILDKIT: "1"
+  TRIVY_TIMEOUT: 15m
+  GRYPE_DB_MAX_ALLOWED_BUILT_AGE: 336h
 
 jobs:
   # ───────────────────────────────────────────────────────────────────────────
@@ -149,36 +153,22 @@ jobs:
           path: "checkov-*-results.json"
 
   # ───────────────────────────────────────────────────────────────────────────
-  # GATE 4: BUILD + IMAGE SCAN
-  # Build the image, then scan for CVEs before it touches the registry.
-  # Three services run in parallel — all require sast and iac-scan to pass.
+  # GATE 3b: PREPARE SCANNERS (once per workflow)
+  # Single Trivy/Grype DB download — scan jobs reuse cache via --skip-db-update.
+  # Prod pattern: separate infra prep from per-artifact scan gates.
   # ───────────────────────────────────────────────────────────────────────────
-  build-scan-auth:
-    name: "Build + Scan auth-service"
-    # Self-hosted runner — GitHub cloud runners cannot reach
-    # clearledger.local or the local MicroK8s cluster.
+  prepare-scanners:
+    name: "Prepare scanners (Trivy + Grype DB)"
     runs-on: [self-hosted, clearledger]
     needs: [sast, iac-scan]
+    if: github.event_name != 'schedule'
     steps:
-      - name: Checkout code (Docker context)
-        uses: actions/checkout@v4
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-
-      - name: Build auth-service image (local tag)
+      - name: Install scanner CLIs (once per runner)
         run: |
-          docker build \
-            -t clearledger-auth-service:${IMAGE_TAG} \
-            ./app/auth-service
-
-      - name: Install Trivy (image vulnerability scanner)
-        run: |
+          mkdir -p "$HOME/.local/bin"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          if ! command -v trivy &>/dev/null && ! [ -f "$HOME/.local/bin/trivy" ]; then
+          export PATH="$HOME/.local/bin:$PATH"
+          if ! command -v trivy &>/dev/null; then
             sudo apt-get update -qq
             sudo apt-get install -y wget gnupg
             wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key \
@@ -188,165 +178,102 @@ jobs:
               | sudo tee /etc/apt/sources.list.d/trivy.list
             sudo apt-get update -qq && sudo apt-get install -y trivy
           fi
-
-      - name: Scan auth-service image (Trivy blocks HIGH/CRITICAL)
-        run: |
-          trivy image \
-            --exit-code 1 \
-            --severity CRITICAL,HIGH \
-            --ignore-unfixed \
-            --format json \
-            --output trivy-auth-results.json \
-            clearledger-auth-service:${IMAGE_TAG}
-
-      - name: Generate SBOM (Syft = software inventory)
-        run: |
-          mkdir -p "$HOME/.local/bin"
-          export PATH="$HOME/.local/bin:$PATH"
-          if ! command -v syft &>/dev/null && ! [ -f "$HOME/.local/bin/syft" ]; then
+          if ! command -v syft &>/dev/null; then
             curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
               | sh -s -- -b "$HOME/.local/bin"
           fi
-          syft clearledger-auth-service:${IMAGE_TAG} \
-            -o spdx-json=sbom-auth.json
-
-      - name: Scan SBOM for vulnerabilities (Grype blocks fixable HIGH+)
-        run: |
-          mkdir -p "$HOME/.local/bin"
-          export PATH="$HOME/.local/bin:$PATH"
-          if ! command -v grype &>/dev/null && ! [ -f "$HOME/.local/bin/grype" ]; then
+          if ! command -v grype &>/dev/null; then
             curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
               | sh -s -- -b "$HOME/.local/bin"
           fi
-          GRYPE_DB_MAX_ALLOWED_BUILT_AGE=336h grype sbom:sbom-auth.json \
-            --fail-on high \
-            --only-fixed \
-            --output json \
-            --file grype-auth-results.json
-
-      - name: Push auth-service to GHCR (deployed artifact)
-        run: |
-          IMAGE="${REGISTRY}/clearledger-auth-service:${IMAGE_TAG}"
-          docker tag clearledger-auth-service:${IMAGE_TAG} "${IMAGE}"
-          docker push "${IMAGE}"
-
-      - name: Sign image with Cosign (supply chain integrity)
-        continue-on-error: true
-        env:
-          COSIGN_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
-          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
-        run: |
-          mkdir -p "$HOME/.local/bin"
-          if ! command -v cosign &>/dev/null && ! [ -f "$HOME/.local/bin/cosign" ]; then
+          if ! command -v cosign &>/dev/null; then
             curl -sSfL https://github.com/sigstore/cosign/releases/download/v2.2.4/cosign-linux-amd64 \
               -o "$HOME/.local/bin/cosign" && chmod +x "$HOME/.local/bin/cosign"
           fi
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          export PATH="$HOME/.local/bin:$PATH"
-          echo "$COSIGN_KEY" > /tmp/cosign.key
-          cosign sign --key /tmp/cosign.key \
-            --tlog-upload=false \
-            "${REGISTRY}/clearledger-auth-service:${IMAGE_TAG}"
-          rm -f /tmp/cosign.key
+          trivy --version
+          grype version
 
-      # SLSA provenance attestation — SLSA Level 2
-      # This proves this image was built from a specific commit by a specific
-      # pipeline, not just that it was signed. Kyverno verifies this attestation
-      # at admission (Audit mode by default — switch to Enforce when ready).
-      # SLSA Level 3 would require a hermetic build environment — not practical
-      # in GitHub-hosted runners for a homelab. Level 2 is the practical target.
-      - name: Generate SLSA provenance attestation
-        continue-on-error: true
-        env:
-          COSIGN_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
-          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+      - name: Refresh Trivy DB (once per workflow; Grype uses cache age on scan)
         run: |
           export PATH="$HOME/.local/bin:$PATH"
-          echo "$COSIGN_KEY" > /tmp/cosign.key
-          cosign public-key --key /tmp/cosign.key > /tmp/cosign-verify.key 2>/dev/null || true
-          export PROVENANCE_SHA="${{ github.sha }}"
-          export PROVENANCE_REPO="${{ github.repository }}"
-          export PROVENANCE_REF="${{ github.ref }}"
-          python3 << 'PYEOF'
-          import json, os
-          from datetime import datetime, timezone
-          e = os.environ
-          sha_digest = {"sha1": e["PROVENANCE_SHA"]}
-          subject = {"name": e["REGISTRY"] + "/clearledger-auth-service",
-                     "digest": sha_digest}
-          config_source = {
-            "uri": "git+https://github.com/" + e["PROVENANCE_REPO"] + "@" + e["PROVENANCE_REF"],
-            "digest": {"sha1": e["PROVENANCE_SHA"]},
-            "entryPoint": ".github/workflows/ci.yaml"
-          }
-          provenance = {
-            "_type": "https://in-toto.io/Statement/v0.1",
-            "predicateType": "https://slsa.dev/provenance/v0.2",
-            "subject": [subject],
-            "predicate": {
-              "builder": {"id": "https://github.com/" + e["PROVENANCE_REPO"] + "/actions"},
-              "buildType": "https://github.com/actions/runner@v2",
-              "invocation": {"configSource": config_source},
-              "metadata": {
-                "buildStartedOn": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "reproducible": False
-              }
-            }
-          }
-          json.dump(provenance, open("/tmp/provenance.json", "w"), indent=2)
-          print("✓ provenance.json written")
-          PYEOF
-          cosign attest \
-            --key /tmp/cosign.key \
-            --predicate /tmp/provenance.json \
-            --type slsaprovenance \
-            --tlog-upload=false \
-            "${REGISTRY}/clearledger-auth-service:${IMAGE_TAG}"
+          trivy image --download-db-only
+          echo "✓ Trivy DB ready"
 
-      - name: Verify SLSA provenance attestation
-        continue-on-error: true
-        env:
-          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+  # ───────────────────────────────────────────────────────────────────────────
+  # GATE 4a: BUILD — local images only (nothing hits the registry yet)
+  # Prod pattern: build produces artifacts; scan gates before publish.
+  # ───────────────────────────────────────────────────────────────────────────
+  build-images:
+    name: "Build images"
+    runs-on: [self-hosted, clearledger]
+    needs: [prepare-scanners]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build all services (sequential — one runner, shared pip cache)
+        run: |
+          docker build -t clearledger-auth-service:${IMAGE_TAG} ./app/auth-service
+          docker build -t clearledger-ledger-service:${IMAGE_TAG} ./app/ledger-service
+          docker build -t clearledger-notification-service:${IMAGE_TAG} ./app/notification-service
+          docker build -t clearledger-frontend:${IMAGE_TAG} ./app/frontend
+          docker images | grep "${IMAGE_TAG}"
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # GATE 4b: SCAN — block publish if CVEs found (images stay local)
+  # ───────────────────────────────────────────────────────────────────────────
+  scan-images:
+    name: "Scan images"
+    runs-on: [self-hosted, clearledger]
+    needs: [build-images]
+    steps:
+      - name: Checkout code (.grype.yaml ignore rules)
+        uses: actions/checkout@v4
+
+      - name: Trivy scan all images (HIGH/CRITICAL)
         run: |
           export PATH="$HOME/.local/bin:$PATH"
-          cosign verify-attestation \
-            --key /tmp/cosign-verify.key \
-            --type slsaprovenance \
-            --insecure-ignore-tlog \
-            "${REGISTRY}/clearledger-auth-service:${IMAGE_TAG}" \
-            | python3 -c "
-          import sys,json,base64
-          for line in sys.stdin:
-              line=line.strip()
-              if not line: continue
-              try:
-                  obj=json.loads(line)
-                  p=json.loads(base64.b64decode(obj['payload']+'=='))
-                  print(p['predicate']['builder']['id'])
-              except Exception:
-                  pass
-          "
-          echo "✓ SLSA provenance attestation verified"
-          rm -f /tmp/cosign.key /tmp/cosign-verify.key /tmp/provenance.json
+          for img in \
+            clearledger-auth-service:${IMAGE_TAG} \
+            clearledger-ledger-service:${IMAGE_TAG} \
+            clearledger-notification-service:${IMAGE_TAG} \
+            clearledger-frontend:${IMAGE_TAG}; do
+            echo "→ Trivy: ${img}"
+            extra=()
+            if [[ "${img}" == clearledger-auth-service:* ]]; then
+              extra=(--format json --output trivy-auth-results.json)
+            fi
+            trivy image --skip-db-update --exit-code 1 \
+              --severity CRITICAL,HIGH --ignore-unfixed \
+              "${extra[@]}" "${img}"
+          done
 
-      - name: Upload scan artifacts (evidence)
+      - name: Auth SBOM + Grype (fixable HIGH+ only on auth-service)
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          syft clearledger-auth-service:${IMAGE_TAG} -o spdx-json=sbom-auth.json
+          grype sbom:sbom-auth.json --fail-on high --only-fixed \
+            --output json --file grype-auth-results.json
+
+      - name: Upload scan evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: auth-scan-results
+          name: image-scan-results
           path: |
             trivy-auth-results.json
             sbom-auth.json
             grype-auth-results.json
 
-  build-scan-ledger:
-    name: "Build + Scan ledger-service"
-    # Self-hosted runner — GitHub cloud runners cannot reach
-    # clearledger.local or the local MicroK8s cluster.
+  # ───────────────────────────────────────────────────────────────────────────
+  # GATE 4c: PUBLISH — registry push + Cosign (only after scan passes)
+  # ───────────────────────────────────────────────────────────────────────────
+  publish-images:
+    name: "Publish images"
     runs-on: [self-hosted, clearledger]
-    needs: [sast, iac-scan]
+    needs: [scan-images]
     steps:
-      - name: Checkout code (Docker context)
+      - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Log in to Docker Hub
@@ -355,262 +282,28 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - name: Build, scan, push ledger-service
+      - name: Push and sign all images
         env:
           COSIGN_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
         run: |
-          mkdir -p "$HOME/.local/bin"
-          export PATH="$HOME/.local/bin:$PATH"
-          docker build -t clearledger-ledger-service:${IMAGE_TAG} ./app/ledger-service
-
-          if ! command -v trivy &>/dev/null && ! [ -f "$HOME/.local/bin/trivy" ]; then
-            sudo apt-get update -qq && sudo apt-get install -y wget gnupg
-            wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key \
-              | gpg --dearmor \
-              | sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
-            echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main" \
-              | sudo tee /etc/apt/sources.list.d/trivy.list
-            sudo apt-get update -qq && sudo apt-get install -y trivy
-          fi
-
-          trivy image \
-            --exit-code 1 \
-            --severity CRITICAL,HIGH \
-            --ignore-unfixed \
-            clearledger-ledger-service:${IMAGE_TAG}
-
-          IMAGE="${REGISTRY}/clearledger-ledger-service:${IMAGE_TAG}"
-          docker tag clearledger-ledger-service:${IMAGE_TAG} "${IMAGE}"
-          docker push "${IMAGE}"
-
-          if ! command -v cosign &>/dev/null && ! [ -f "$HOME/.local/bin/cosign" ]; then
-            curl -sSfL https://github.com/sigstore/cosign/releases/download/v2.2.4/cosign-linux-amd64 \
-              -o "$HOME/.local/bin/cosign" && chmod +x "$HOME/.local/bin/cosign"
-          fi
-          echo "$COSIGN_KEY" > /tmp/cosign.key
-          cosign sign --key /tmp/cosign.key --tlog-upload=false "${IMAGE}" \
-            || echo "⚠ cosign sign skipped (Stage 1 — enforced in Stage 4)"
-          export PROVENANCE_SHA="${{ github.sha }}"
-          export PROVENANCE_REPO="${{ github.repository }}"
-          export PROVENANCE_REF="${{ github.ref }}"
-          export PROVENANCE_SVC="${REGISTRY}/clearledger-ledger-service"
-          python3 << 'PYEOF'
-          import json, os
-          from datetime import datetime, timezone
-          e = os.environ
-          sha_digest = {"sha1": e["PROVENANCE_SHA"]}
-          subject = {"name": e["PROVENANCE_SVC"], "digest": sha_digest}
-          config_source = {
-            "uri": "git+https://github.com/" + e["PROVENANCE_REPO"] + "@" + e["PROVENANCE_REF"],
-            "digest": {"sha1": e["PROVENANCE_SHA"]},
-            "entryPoint": ".github/workflows/ci.yaml"
-          }
-          provenance = {
-            "_type": "https://in-toto.io/Statement/v0.1",
-            "predicateType": "https://slsa.dev/provenance/v0.2",
-            "subject": [subject],
-            "predicate": {
-              "builder": {"id": "https://github.com/" + e["PROVENANCE_REPO"] + "/actions"},
-              "buildType": "https://github.com/actions/runner@v2",
-              "invocation": {"configSource": config_source},
-              "metadata": {
-                "buildStartedOn": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "reproducible": False
-              }
-            }
-          }
-          json.dump(provenance, open("/tmp/provenance.json", "w"), indent=2)
-          PYEOF
-          cosign attest --key /tmp/cosign.key --predicate /tmp/provenance.json \
-            --type slsaprovenance --tlog-upload=false "${IMAGE}" \
-            || echo "⚠ cosign attest skipped (Stage 1 — enforced in Stage 4)"
-          cosign public-key --key /tmp/cosign.key > /tmp/cosign-verify.key 2>/dev/null || true
-          cosign verify-attestation --key /tmp/cosign-verify.key --type slsaprovenance \
-            --insecure-ignore-tlog "${IMAGE}" 2>/dev/null \
-            | python3 -c "
-          import sys,json,base64
-          for line in sys.stdin:
-              line=line.strip()
-              if not line: continue
-              try:
-                  obj=json.loads(line)
-                  p=json.loads(base64.b64decode(obj['payload']+'=='))
-                  print(p['predicate']['builder']['id'])
-              except Exception:
-                  pass
-          " || true
-          rm -f /tmp/cosign.key /tmp/cosign-verify.key /tmp/provenance.json
-
-  build-scan-notification:
-    name: "Build + Scan notification-service"
-    # Self-hosted runner — GitHub cloud runners cannot reach
-    # clearledger.local or the local MicroK8s cluster.
-    runs-on: [self-hosted, clearledger]
-    needs: [sast, iac-scan]
-    steps:
-      - name: Checkout code (Docker context)
-        uses: actions/checkout@v4
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-
-      - name: Build, scan, push notification-service
-        env:
-          COSIGN_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
-          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
-        run: |
-          mkdir -p "$HOME/.local/bin"
-          export PATH="$HOME/.local/bin:$PATH"
-          docker build -t clearledger-notification-service:${IMAGE_TAG} \
-            ./app/notification-service
-
-          if ! command -v trivy &>/dev/null && ! [ -f "$HOME/.local/bin/trivy" ]; then
-            sudo apt-get update -qq && sudo apt-get install -y wget gnupg
-            wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key \
-              | gpg --dearmor \
-              | sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
-            echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main" \
-              | sudo tee /etc/apt/sources.list.d/trivy.list
-            sudo apt-get update -qq && sudo apt-get install -y trivy
-          fi
-
-          trivy image \
-            --exit-code 1 \
-            --severity CRITICAL,HIGH \
-            --ignore-unfixed \
-            clearledger-notification-service:${IMAGE_TAG}
-
-          IMAGE="${REGISTRY}/clearledger-notification-service:${IMAGE_TAG}"
-          docker tag clearledger-notification-service:${IMAGE_TAG} "${IMAGE}"
-          docker push "${IMAGE}"
-
-          if ! command -v cosign &>/dev/null && ! [ -f "$HOME/.local/bin/cosign" ]; then
-            curl -sSfL https://github.com/sigstore/cosign/releases/download/v2.2.4/cosign-linux-amd64 \
-              -o "$HOME/.local/bin/cosign" && chmod +x "$HOME/.local/bin/cosign"
-          fi
-          echo "$COSIGN_KEY" > /tmp/cosign.key
-          cosign sign --key /tmp/cosign.key --tlog-upload=false "${IMAGE}" \
-            || echo "⚠ cosign sign skipped (Stage 1 — enforced in Stage 4)"
-          export PROVENANCE_SHA="${{ github.sha }}"
-          export PROVENANCE_REPO="${{ github.repository }}"
-          export PROVENANCE_REF="${{ github.ref }}"
-          export PROVENANCE_SVC="${REGISTRY}/clearledger-notification-service"
-          python3 << 'PYEOF'
-          import json, os
-          from datetime import datetime, timezone
-          e = os.environ
-          sha_digest = {"sha1": e["PROVENANCE_SHA"]}
-          subject = {"name": e["PROVENANCE_SVC"], "digest": sha_digest}
-          config_source = {
-            "uri": "git+https://github.com/" + e["PROVENANCE_REPO"] + "@" + e["PROVENANCE_REF"],
-            "digest": {"sha1": e["PROVENANCE_SHA"]},
-            "entryPoint": ".github/workflows/ci.yaml"
-          }
-          provenance = {
-            "_type": "https://in-toto.io/Statement/v0.1",
-            "predicateType": "https://slsa.dev/provenance/v0.2",
-            "subject": [subject],
-            "predicate": {
-              "builder": {"id": "https://github.com/" + e["PROVENANCE_REPO"] + "/actions"},
-              "buildType": "https://github.com/actions/runner@v2",
-              "invocation": {"configSource": config_source},
-              "metadata": {
-                "buildStartedOn": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "reproducible": False
-              }
-            }
-          }
-          json.dump(provenance, open("/tmp/provenance.json", "w"), indent=2)
-          PYEOF
-          cosign attest --key /tmp/cosign.key --predicate /tmp/provenance.json \
-            --type slsaprovenance --tlog-upload=false "${IMAGE}" \
-            || echo "⚠ cosign attest skipped (Stage 1 — enforced in Stage 4)"
-          cosign public-key --key /tmp/cosign.key > /tmp/cosign-verify.key 2>/dev/null || true
-          cosign verify-attestation --key /tmp/cosign-verify.key --type slsaprovenance \
-            --insecure-ignore-tlog "${IMAGE}" 2>/dev/null \
-            | python3 -c "
-          import sys,json,base64
-          for line in sys.stdin:
-              line=line.strip()
-              if not line: continue
-              try:
-                  obj=json.loads(line)
-                  p=json.loads(base64.b64decode(obj['payload']+'=='))
-                  print(p['predicate']['builder']['id'])
-              except Exception:
-                  pass
-          " || true
-          rm -f /tmp/cosign.key /tmp/cosign-verify.key /tmp/provenance.json
-
-  build-frontend:
-    name: "Build + Scan frontend"
-    # Self-hosted runner — GitHub cloud runners cannot reach
-    # clearledger.local or the local MicroK8s cluster.
-    runs-on: [self-hosted, clearledger]
-    needs: [sast, iac-scan]
-    steps:
-      - name: Checkout code (Docker context)
-        uses: actions/checkout@v4
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-
-      - name: Build frontend image
-        run: |
-          docker build \
-            -t clearledger-frontend:${IMAGE_TAG} \
-            ./app/frontend
-
-      - name: Scan frontend image
-        run: |
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          export PATH="$HOME/.local/bin:$PATH"
-          if ! command -v trivy &>/dev/null && ! [ -f "$HOME/.local/bin/trivy" ]; then
-            sudo apt-get update -qq && sudo apt-get install -y wget gnupg
-            wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key \
-              | gpg --dearmor \
-              | sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
-            echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main" \
-              | sudo tee /etc/apt/sources.list.d/trivy.list
-            sudo apt-get update -qq && sudo apt-get install -y trivy
-          fi
-          trivy image \
-            --exit-code 1 \
-            --severity CRITICAL,HIGH \
-            --ignore-unfixed \
-            clearledger-frontend:${IMAGE_TAG}
-
-      - name: Push frontend image
-        run: |
-          IMAGE="${REGISTRY}/clearledger-frontend:${IMAGE_TAG}"
-          docker tag clearledger-frontend:${IMAGE_TAG} "${IMAGE}"
-          docker push "${IMAGE}"
-
-      - name: Sign frontend image
-        continue-on-error: true
-        env:
-          COSIGN_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
-          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
-        run: |
-          mkdir -p "$HOME/.local/bin"
-          if ! command -v cosign &>/dev/null && ! [ -f "$HOME/.local/bin/cosign" ]; then
-            curl -sSfL https://github.com/sigstore/cosign/releases/download/v2.2.4/cosign-linux-amd64 \
-              -o "$HOME/.local/bin/cosign" && chmod +x "$HOME/.local/bin/cosign"
-          fi
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          export PATH="$HOME/.local/bin:$PATH"
-          echo "$COSIGN_KEY" > /tmp/cosign.key
-          cosign sign --key /tmp/cosign.key \
-            --tlog-upload=false \
-            "${REGISTRY}/clearledger-frontend:${IMAGE_TAG}"
-          rm -f /tmp/cosign.key
+          chmod +x scripts/ci-publish-image.sh
+          bash scripts/ci-publish-image.sh \
+            "clearledger-auth-service:${IMAGE_TAG}" \
+            "${REGISTRY}/clearledger-auth-service:${IMAGE_TAG}" \
+            "${REGISTRY}/clearledger-auth-service"
+          bash scripts/ci-publish-image.sh \
+            "clearledger-ledger-service:${IMAGE_TAG}" \
+            "${REGISTRY}/clearledger-ledger-service:${IMAGE_TAG}" \
+            "${REGISTRY}/clearledger-ledger-service"
+          bash scripts/ci-publish-image.sh \
+            "clearledger-notification-service:${IMAGE_TAG}" \
+            "${REGISTRY}/clearledger-notification-service:${IMAGE_TAG}" \
+            "${REGISTRY}/clearledger-notification-service"
+          bash scripts/ci-publish-image.sh \
+            "clearledger-frontend:${IMAGE_TAG}" \
+            "${REGISTRY}/clearledger-frontend:${IMAGE_TAG}" \
+            ""
 
   # ───────────────────────────────────────────────────────────────────────────
   # GATE 5: UPDATE MANIFESTS
@@ -622,7 +315,7 @@ jobs:
     # Self-hosted runner — GitHub cloud runners cannot reach
     # clearledger.local or the local MicroK8s cluster.
     runs-on: [self-hosted, clearledger]
-    needs: [build-scan-auth, build-scan-ledger, build-scan-notification, build-frontend]
+    needs: [publish-images]
     if: github.ref == 'refs/heads/main'
     steps:
       - name: Checkout infra repo
