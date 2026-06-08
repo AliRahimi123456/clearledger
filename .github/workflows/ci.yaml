@@ -216,7 +216,8 @@ jobs:
           docker build -t clearledger-auth-service:${IMAGE_TAG} ./app/auth-service
           docker build -t clearledger-ledger-service:${IMAGE_TAG} ./app/ledger-service
           docker build -t clearledger-notification-service:${IMAGE_TAG} ./app/notification-service
-          docker build -t clearledger-frontend:${IMAGE_TAG} ./app/frontend
+          # Frontend: no pip layer — force fresh apk upgrade for OS security patches
+          docker build --no-cache -t clearledger-frontend:${IMAGE_TAG} ./app/frontend
           docker images | grep "${IMAGE_TAG}"
 
   # ───────────────────────────────────────────────────────────────────────────
