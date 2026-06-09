@@ -1,0 +1,36 @@
+# GitOps source for ArgoCD (clearledger-infra). CI updates image tags here only.
+# Deployments use placeholders (clearledger/*:gitops); Kustomize maps to registry + SHA.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: clearledger
+
+resources:
+  - namespace.yaml
+  - ingress.yaml
+  - auth-service/deployment.yaml
+  - auth-service/service.yaml
+  - ledger-service/deployment.yaml
+  - ledger-service/service.yaml
+  - notification-service/deployment.yaml
+  - notification-service/service.yaml
+  - frontend/deployment.yaml
+  - postgres/postgres.yaml
+  - postgres/postgres-secret.yaml
+  - redis/redis.yaml
+  - rbac/rbac.yaml
+  - vault/rotation-cronjob.yaml
+
+images:
+  - name: clearledger/auth-service
+    newName: docker.io/veeno/clearledger-auth-service
+    newTag: gitops
+  - name: clearledger/ledger-service
+    newName: docker.io/veeno/clearledger-ledger-service
+    newTag: gitops
+  - name: clearledger/notification-service
+    newName: docker.io/veeno/clearledger-notification-service
+    newTag: gitops
+  - name: clearledger/frontend
+    newName: docker.io/veeno/clearledger-frontend
+    newTag: gitops

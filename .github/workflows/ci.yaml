@@ -319,28 +319,40 @@ jobs:
     needs: [publish-images]
     if: github.ref == 'refs/heads/main'
     steps:
-      - name: Checkout infra repo
+      - name: Checkout app repo (canonical manifests)
+        uses: actions/checkout@v4
+        with:
+          path: app
+
+      - name: Checkout infra repo (GitOps target)
         uses: actions/checkout@v4
         with:
           # clearledger-infra is a separate GitHub repo — the GitOps source of truth.
           # INFRA_REPO_TOKEN: a GitHub PAT with repo scope.
-          # Create at: github.com/settings/tokens
-          # Add as a repository secret at: github.com/YOUR_USERNAME/clearledger/settings/secrets
           repository: ${{ github.repository_owner }}/clearledger-infra
           token: ${{ secrets.INFRA_REPO_TOKEN }}
           path: infra
 
-      - name: Update image tags
+      - name: Sync manifests + set image tags (Kustomize)
         run: |
-          cd infra
-          sed -i "s|image: .*clearledger-auth-service:.*|image: ${REGISTRY}/clearledger-auth-service:${{ github.sha }}|g" \
-            manifests/auth-service/deployment.yaml
-          sed -i "s|image: .*clearledger-ledger-service:.*|image: ${REGISTRY}/clearledger-ledger-service:${{ github.sha }}|g" \
-            manifests/ledger-service/deployment.yaml
-          sed -i "s|image: .*clearledger-notification-service:.*|image: ${REGISTRY}/clearledger-notification-service:${{ github.sha }}|g" \
-            manifests/notification-service/deployment.yaml
-          sed -i "s|image: .*clearledger-frontend:.*|image: ${REGISTRY}/clearledger-frontend:${{ github.sha }}|g" \
-            manifests/frontend/deployment.yaml
+          set -euo pipefail
+          if ! command -v kustomize &>/dev/null; then
+            curl -sL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.4.3/kustomize_v5.4.3_linux_amd64.tar.gz" \
+              | tar xz && sudo mv kustomize /usr/local/bin/
+          fi
+          # Copy full canonical tree — prevents probe/limit drift (prod: single source)
+          rsync -a --delete \
+            --exclude='auth-service/secret.yaml' \
+            --exclude='ledger-service/secret.yaml' \
+            app/infra/manifests/ infra/manifests/
+          cd infra/manifests
+          kustomize edit set image \
+            clearledger/auth-service=${REGISTRY}/clearledger-auth-service:${{ github.sha }} \
+            clearledger/ledger-service=${REGISTRY}/clearledger-ledger-service:${{ github.sha }} \
+            clearledger/notification-service=${REGISTRY}/clearledger-notification-service:${{ github.sha }} \
+            clearledger/frontend=${REGISTRY}/clearledger-frontend:${{ github.sha }}
+          kustomize build . >/dev/null
+          echo "✓ kustomize build OK"
 
       - name: Commit and push
         run: |
@@ -354,6 +366,13 @@ jobs:
             git commit -m "ci: deploy ${{ github.sha }} — all gates passed [skip ci]"
             git push
           fi
+
+      - name: Trigger ArgoCD refresh (self-hosted runner reaches cluster)
+        run: |
+          kubectl apply -f app/infra/argocd/clearledger-app.yaml
+          kubectl annotate application clearledger -n argocd \
+            argocd.argoproj.io/refresh=hard --overwrite
+          echo "✓ ArgoCD will auto-sync clearledger-infra"
 
   # ───────────────────────────────────────────────────────────────────────────
   # GATE 6: DAST (post-deploy)

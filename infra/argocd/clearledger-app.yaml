@@ -17,24 +17,10 @@ spec:
     repoURL: https://github.com/Osomudeya/clearledger-infra.git
     targetRevision: main
     path: manifests
-    directory:
-      recurse: true   # required — deployments live in manifests/*/
+    # ArgoCD renders kustomization.yaml (image tags live there, not in deployment sed)
   destination:
     server: https://kubernetes.default.svc
     namespace: clearledger
-  # Homelab: until clearledger-infra.git has startupProbe + 384Mi on auth-service,
-  # kubectl apply from this repo is not reverted every sync (remove after infra git is updated).
-  ignoreDifferences:
-    - group: apps
-      kind: Deployment
-      name: auth-service
-      namespace: clearledger
-      jsonPointers:
-        - /spec/template/spec/containers/0/resources
-        - /spec/template/spec/containers/0/startupProbe
-        - /spec/template/spec/containers/0/livenessProbe
-        - /spec/template/spec/containers/0/readinessProbe
-        - /spec/revisionHistoryLimit
   syncPolicy:
     automated:
       prune: true      # remove resources deleted from Git

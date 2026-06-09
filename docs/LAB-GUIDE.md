@@ -1162,7 +1162,66 @@ Stage 1 ends here
 
 Important: the image tag is based on the commit SHA. That means you can answer "which code produced this image?" just by looking at the tag.
 
-The pipeline does **not** deploy to Kubernetes directly. It only updates `clearledger-infra`. Stage 2 installs ArgoCD, and ArgoCD watches `clearledger-infra` to deploy the change.
+#### GitOps manifest flow — three layers (read this once)
+
+Do not confuse **app code**, **manifest templates**, and **what ArgoCD deploys**:
+
+| Layer | Where | Who changes it |
+|---|---|---|
+| 1. Application code | `app/` in **clearledger** | You (developer) |
+| 2. Canonical manifests | `infra/manifests/` in **clearledger** | You (Kubernetes YAML, probes, Vault, limits) |
+| 3. GitOps desired state | **clearledger-infra** on GitHub | **CI** (after every successful build) |
+
+```text
+You edit infra/manifests/  +  push app code
+        ↓
+CI builds images → scans → publishes
+        ↓
+CI copies infra/manifests/ → clearledger-infra  (full tree, every deploy)
+        ↓
+CI updates image SHAs in kustomization.yaml only  (Kustomize — not sed)
+        ↓
+ArgoCD auto-syncs cluster to match Git
+```
+
+**Deployments never store the real registry tag.** They use a placeholder:
+
+```yaml
+# auth-service/deployment.yaml (canonical — same in both repos)
+image: clearledger/auth-service:gitops
+```
+
+**Kustomize** maps that to the real image in `kustomization.yaml`:
+
+```yaml
+images:
+  - name: clearledger/auth-service
+    newName: docker.io/YOUR_USER/clearledger-auth-service
+    newTag: d7bccf485dd06c319cabfebb310f52d872788a2f   # CI writes this SHA
+```
+
+ArgoCD renders `kustomize build` and applies the result. **Same pattern as Stage 8 AWS** — you learn it twice, not two different systems.
+
+#### Lab vs larger prod — accurate comparison
+
+| Piece | This lab (Stages 1–7) | Larger prod often adds |
+|---|---|---|
+| **Image tag updates** | Kustomize `images:` + `kustomize edit set image` in CI | Same — or Argo CD Image Updater / Flux Image Automation |
+| **Manifest structure** | CI copies full `infra/manifests/` each deploy | Monorepo or infra repo with PR review on every change |
+| **ArgoCD refresh** | `kubectl annotate` hard refresh (self-hosted runner) | Argo CD webhook, ApplicationSet, or Notifications |
+| **Drift recovery** | `make fix-argocd` (break-glass; should be rare now) | Policy bots; drift should not happen with single source |
+
+**Does Kustomize make learning harder?** No — you touch **one file** (`kustomization.yaml`) and **one CI step**. Deployments stay readable placeholders. Stage 8 reuses the same idea for ECR. Without Kustomize, the old `sed`-only approach caused **9-hour OutOfSync** bugs because CI updated image lines but not probes/limits.
+
+#### Image tags — SHA now, digest later
+
+| Approach | This lab | Prod teams often add later |
+|---|---|---|
+| **Git SHA tag** (`:abc123…`) | **Yes — primary tag** | Same — traceability anchor |
+| **`:latest` or semver** (`:v1.2.3`) | No | Human-friendly pointer; CI moves `:latest` after scan passes |
+| **Digest pinning** (`image@sha256:…`) | No | Strongest immutability — tag can be retagged, digest cannot |
+
+The pipeline does **not** deploy to Kubernetes directly. It updates `clearledger-infra`. Stage 2 installs ArgoCD, and ArgoCD watches `clearledger-infra` to deploy the change.
 
 | Section | What it does | Why |
 |---|---|---|
@@ -1172,7 +1231,7 @@ The pipeline does **not** deploy to Kubernetes directly. It only updates `clearl
 | `build-images` | Builds all service images locally | Produces artifacts before any registry write |
 | `scan-images` | Trivy + SBOM gates | Blocks publish if CVEs are found |
 | `publish-images` | Docker Hub login + `ci-publish-image.sh` | Push and sign only after scan passes |
-| `update-manifests` | Updates image tags in clearledger-infra on GitHub | Records the desired new version in Git |
+| `update-manifests` | Copies `infra/manifests/` + Kustomize image SHAs → clearledger-infra | Single source of truth; no manifest drift |
 
 The Kubernetes Checkov scan in Stage 1 is evidence-only. It uploads findings so you can see the hardening work ahead, but it does not block the first CI pipeline run. That is intentional: Stage 1 proves the build-push-update flow. Later stages tighten Kubernetes policy with security gates, admission control, and secrets management.
 
@@ -1387,7 +1446,7 @@ Confirm ArgoCD is watching **all** manifest folders (not only ingress):
 argocd app resources clearledger --grpc-web | grep Deployment
 ```
 
-You should see `auth-service`, `ledger-service`, `frontend`, and the other app Deployments. The Application manifest sets `directory.recurse: true` so ArgoCD reads `manifests/auth-service/`, `manifests/ledger-service/`, and so on — not just `ingress.yaml` at the top level.
+You should see `auth-service`, `ledger-service`, `frontend`, and the other app Deployments. ArgoCD renders `manifests/kustomization.yaml`, which lists every resource under `manifests/` — not just `ingress.yaml` at the top level.
 
 ### If the UI shows red pods or "Progressing" (read this before the screenshot)
 
@@ -1435,6 +1494,24 @@ When that looks good, continue below.
 When sync finishes and health is **Healthy**, you should see the **clearledger** app in the UI with green **Healthy** and **Synced** badges — repo pointing at your `clearledger-infra` repo on `main`, path `manifests`, namespace `clearledger`. Open the app tile and the resource tree should show deployments, services, and ingresses reconciled with no red pods.
 
 From the CLI, `argocd app get clearledger` should echo the same story: `Sync Status: Synced`, `Health Status: Healthy`, and each resource listed as synced.
+
+### ArgoCD stuck OutOfSync (break-glass fix)
+
+**Normal path:** CI copies full manifests + updates Kustomize tags → ArgoCD auto-syncs within ~3 minutes.
+
+**If still OutOfSync after 10+ minutes:**
+
+```bash
+make fix-argocd
+```
+
+This re-syncs canonical manifests to `clearledger-infra` (Kustomize SHAs preserved), re-applies the Application, and triggers a hard refresh. **Do not** `kubectl apply` deployments — fix Git, let ArgoCD sync.
+
+```bash
+kubectl annotate application clearledger -n argocd argocd.argoproj.io/refresh=hard --overwrite
+argocd app sync clearledger --grpc-web --prune
+kubectl get application clearledger -n argocd -o jsonpath='sync={.status.sync.status} health={.status.health.status}{"\n"}'
+```
 
 **Take a screenshot of that view** — the app tile or the resource tree is fine. That’s your portfolio proof that GitOps is actually running.
 

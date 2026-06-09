@@ -13,15 +13,14 @@ spec:
     repoURL: https://github.com/Osomudeya/clearledger-infra.git
     targetRevision: main
     path: manifests
-    directory:
-      recurse: true   # required — deployments live in manifests/*/
+    # ArgoCD renders kustomization.yaml (image tags live there, not in deployment sed)
   destination:
     server: https://kubernetes.default.svc
     namespace: clearledger
   syncPolicy:
     automated:
-      prune: true
-      selfHeal: true
+      prune: true      # remove resources deleted from Git
+      selfHeal: true   # revert any manual kubectl changes — the GitOps contract
     syncOptions:
       - CreateNamespace=true
       - PrunePropagationPolicy=foreground

@@ -648,6 +648,7 @@ kubectl describe policyreport -n clearledger
 | No alerts after `kubectl exec` | Rules not loaded or wrong namespace | Confirm `clearledger_rules.yaml \| schema validation: ok` in Falco logs |
 | Auth/notification health fails after netpol | Ingress namespace label or missing allow rule | Confirm `ingress` namespace has `kubernetes.io/metadata.name=ingress` |
 | Falco UI unreachable | Ingress not applied | `kubectl apply -f stages/stage-6-runtime-security/infra/falco-ingress.yaml` |
+| **`http://falco.local` → 503** | Ingress points at `falco-falcosidekick-ui` but `falcosidekick.enabled: false` | Set `falcosidekick.enabled: true` and `falcosidekick.webui.enabled: true` in `stages/stage-6-runtime-security/infra/falco/helm-values.yaml`, then `bash stages/stage-6-runtime-security/scripts/install-falco.sh`; confirm `kubectl get endpoints falco-falcosidekick-ui -n falco` is not `<none>` |
 | Falco UI shows login form / "can't be empty" | UI has basic auth enabled (default) | Login **admin**, password **admin** — or `kubectl get secret falco-falcosidekick-ui -n falco -o jsonpath='{.data.FALCOSIDEKICK_UI_USER}' \| base64 -d` |
 
 ## Stage 6.5 — Chaos Engineering (LitmusChaos)
@@ -672,6 +673,53 @@ kubectl describe policyreport -n clearledger
 | Litmus UI loads but API errors | Ingress missing `/backend/` route | Re-apply `litmus-ingress.yaml`; `kubectl set env deployment/chaos-litmus-server -n litmus --containers=graphql-server INGRESS=true INGRESS_NAME=litmus-ingress` |
 | Litmus UI login fails | Wrong credentials | Default **admin** / **litmus** (see `litmus-values.yaml`) |
 | ArgoCD **Progressing**, many `auth-service` ReplicaSets | Auth pods 1/2 or OOM; repeated failed rollouts | `make fix-argocd` — applies startupProbe + 384Mi + postgres netpol; prunes old ReplicaSets |
+
+## Stage 7 — Observability (Grafana + Prometheus + Loki)
+
+> Full walkthrough: [LAB-GUIDE.md § Stage 7](../docs/LAB-GUIDE.md#stage-7--security-observability)
+
+### Common issues
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `http://grafana.local` doesn’t load | Hostname not in `/etc/hosts` or ingress not ready | Re-run `bash scripts/setup-hosts.sh`; check `kubectl get ingress -n monitoring` |
+| Health check: “Grafana not reachable” | NGINX ingress controller down | `kubectl get pods -n ingress`; re-run cluster setup if needed |
+| Grafana sidecar CrashLoopBackOff | MicroK8s API CA fails SSL verify in k8s-sidecar | Re-run installer — it sets `grafana.sidecar.skipTlsVerify=true` |
+| Grafana pod not 3/3 Ready | Sidecar TLS or datasource conflict | Confirm Loki helm uses `loki.isDefault=false`; check `kubectl logs -n monitoring POD -c grafana-sc-dashboard` |
+| Browser console: `not correct url` / `skipping rendering` | Old dashboard slug cached in Grafana | Re-run installer (purges stale UIDs + restarts Grafana); open **UID-only** links from LAB-GUIDE §7.3 |
+| Browser console: `404 userstorage.grafana.app` | Harmless Grafana UI feature | Ignore — does not affect dashboards |
+| WebSocket `api/live/ws` failed | Grafana Live disabled intentionally | Ignore after re-install — `[live] enabled = false` |
+| Loki `connection refused` / all log panels empty | Loki restarting under load or still starting | `kubectl get pods -n monitoring loki-0`; test `http://loki:3100/ready` from Grafana pod (LAB-GUIDE §7.1); `FORCE=1 bash stages/stage-7-observability/scripts/install-observability.sh` |
+| Panels empty but Loki/Prometheus healthy | No events in time range yet | Run hands-on lab LAB-GUIDE §7.4 or `generate-dashboard-data.sh` |
+| Falco dashboard empty, Kyverno/Auth partial | Wrong LogQL labels, stat `$__range`, missing Falco metrics | Re-apply dashboards: `bash stages/stage-7-observability/scripts/install-observability.sh`; set **Last 15 minutes** |
+| Failed Login stat empty, log stream works | Wrong Loki label (`app`) or stale logs | Use `container="auth-service"` + `Failed login attempt` + `[1h]` instant; re-run `make demo-7`; hard-refresh Grafana |
+| Pod Status / Request Rate empty | PromQL used labels metrics do not have | Pod: `sum(kube_pod_status_ready{namespace="clearledger"} == 1)`; HTTP: `rate(http_requests_total[5m])` (no `namespace` on app counter) |
+| Runtime Threat Trend empty (Compliance) | LogQL on Prometheus datasource | Panel must use **Loki** — re-run `install-observability.sh` after pulling dashboard JSON |
+| Falco sidekick pods Error | WebUI enabled on small clusters | `falcosidekick.enabled: false` in stage-6 falco helm-values; `helm upgrade falco …` |
+| Argo CD `503` / `ERR_TOO_MANY_REDIRECTS` on `/api/v1/stream` | Incomplete server params | `kubectl apply -f stages/stage-2-gitops/infra/argocd-cmd-params.yaml` + restart `argocd-server` (LAB-GUIDE §2) |
+| Loki **RESTARTS** keeps climbing | Too many heavy log queries at once | Open one dashboard; use **Last 15 minutes**; wait for Loki stable, then reload |
+| Loki `too many outstanding requests` | Loki busy or recovering | Wait 1–2 min; shorten time range; re-run installer if it persists |
+| Helm `stream error` / `INTERNAL_ERROR` | Transient API server disconnect | Wait 30s; `FORCE=1 bash stages/stage-7-observability/scripts/install-observability.sh` (retries 3×) |
+| Installer skips Helm | Already healthy — by design | Use `FORCE=1` only when you need to change Helm values |
+| Request Rate panel empty | Stock images lack `/metrics` | **Rebuild required:** `bash stages/stage-7-observability/scripts/build-metrics-images.sh` |
+| Loki pods Pending | No default StorageClass (common on MicroK8s) | Re-run installer (auto-disables persistence): `bash stages/stage-7-observability/scripts/install-observability.sh` |
+| No dashboards in Grafana | Sidecar not loaded ConfigMaps yet | Wait 30–60s; `kubectl get cm -n monitoring \| grep grafana-dashboard` (expect 6) |
+| Only one ClearLedger dashboard appears | All ConfigMaps used key `dashboard.json` | Re-run installer — each dashboard now has a unique file key |
+| Falco panels empty | No runtime event yet, or Falco logs not in Loki | Run `bash stages/stage-7-observability/scripts/generate-dashboard-data.sh` (Step 2) |
+| Kyverno panels empty | No blocked admission yet, or wrong PromQL metric name | Run demo script Step 1; dashboards use `kyverno_admission_requests_total{request_allowed="false"}` (Kyverno 1.12+) |
+| Request Rate panel empty | App images lack `/metrics` exporter | Run `bash stages/stage-7-observability/scripts/build-metrics-images.sh` |
+| Failed Login panel empty | No login attempts in logs | Demo script Step 3; confirm auth-service logs contain `Failed login attempt` |
+| Audit Log dashboard empty | Kubernetes audit logs not shipped to Loki yet | Expected on MicroK8s until audit logging is configured — see [kubernetes-audit-logging.md](kubernetes-audit-logging.md) |
+| Alerting rules missing | PrometheusRule not applied | `kubectl apply -f stages/stage-7-observability/infra/monitoring/alerting-rules.yaml` |
+
+### Quick recovery (re-provision everything)
+
+```bash
+bash stages/stage-7-observability/scripts/install-observability.sh
+bash stages/stage-7-observability/scripts/build-metrics-images.sh   # optional — HTTP metrics
+bash stages/stage-7-observability/scripts/generate-dashboard-data.sh
+make check-7
+```
 
 ## Vault Issues
 
@@ -814,16 +862,30 @@ see a warning.
 argocd login argocd.local --username admin --password YOUR_PASSWORD --insecure --grpc-web
 ```
 
-### Application stuck in OutOfSync
+### Application stuck in OutOfSync (CI updated infra hours ago)
+
+**Symptom:** `clearledger-infra` has new `image: docker.io/.../clearledger-auth-service:<sha>` from CI, but ArgoCD shows **OutOfSync** for hours.
+
+**Common causes:**
+
+1. **Pre-Kustomize drift** — old CI used `sed` on `image:` only; probes/limits in `clearledger-infra` fell behind `infra/manifests/`. Current CI copies the full tree + Kustomize tags — drift should not recur.
+2. **Rollout never became Healthy** — sync ran but pods crash (probes, OOM, ImagePullBackOff, Vault init).
+3. **ArgoCD poll delay** — default ~3 min; CI annotates `refresh=hard` and re-applies the Application after manifest push.
+
+**Prod fix (GitOps-native):**
 
 ```bash
-argocd app sync clearledger --force
-argocd app get clearledger
+make fix-argocd
+```
 
-# Check for resource conflicts
+Syncs canonical `infra/manifests/` (Kustomize SHAs preserved) to `clearledger-infra`, re-applies the Application, triggers sync — **without** `kubectl apply` on deployments.
+
+**Manual fallback:**
+
+```bash
+argocd app sync clearledger --force --grpc-web
+argocd app get clearledger --grpc-web
 kubectl get events -n clearledger --sort-by='.lastTimestamp'
-
-# Check if the infra repo is reachable
 argocd repo list
 ```
 
@@ -831,7 +893,7 @@ argocd repo list
 
 **Symptom:** You change a deployment image with `kubectl set image`, but ArgoCD UI stays **Synced** and the image is not reverted after a few minutes.
 
-**Cause:** ArgoCD is only watching top-level manifests (`namespace.yaml`, `ingress.yaml`), not files under `manifests/auth-service/`, etc. Without `directory.recurse: true`, deployments you applied in Stage 0 are invisible to ArgoCD.
+**Cause:** ArgoCD is only watching top-level manifests (`namespace.yaml`, `ingress.yaml`), not files under `manifests/auth-service/`, etc. Without `manifests/kustomization.yaml` listing all resources, deployments you applied in Stage 0 are invisible to ArgoCD.
 
 **Fix:**
 

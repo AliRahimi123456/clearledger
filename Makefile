@@ -5,7 +5,7 @@
 	integration-up integration-down integration-test open-local-ui \
 	open-ui open-argocd open-grafana open-vault open-falco open-litmus \
 	check-0 check-1 check-2 check-3 check-4 check-5 check-6 check-7 check-65 check-75 check-all \
-	demo-6 demo-65 fix-65-prereqs connect-litmus \
+	demo-6 demo-7 demo-65 fix-65-prereqs fix-argocd push-infra-manifests connect-litmus \
 	runner-status runner-logs
 
 .DEFAULT_GOAL := help
@@ -42,6 +42,7 @@ help:
 	@echo "  make check        Check the current stage (prompts for stage number)"
 	@echo "  make check-0      Check Stage 0 specifically"
 	@echo "  make check-65     Check Stage 6.5 (chaos engineering)"
+	@echo "  make demo-7       Run Stage 7 hands-on lab (terminal → Grafana)"
 	@echo "  make check-75     Check Stage 7.5 (OpenTelemetry)"
 	@echo "  make check-all    Run all health checks"
 	@echo "  make runner-status  Check GitHub Actions runner is running"
@@ -143,9 +144,12 @@ stage-7:
 	@echo "$(CYAN)Stage 7 — Observability$(NC)"
 	@echo "Goal: Security you can see, measure, and prove."
 	@echo ""
-	@cat stages/stage-7-observability/README.md | head -20
+	@echo "  1. bash stages/stage-7-observability/scripts/install-observability.sh"
+	@echo "  2. Follow docs/LAB-GUIDE.md — Stage 7 (§7.2 verify, §7.4 hands-on lab)"
+	@echo "  3. make demo-7   # guided Kyverno → Falco → logins → compliance"
+	@echo "  4. make check-7"
 	@echo ""
-	@echo "Full guide: stages/stage-7-observability/README.md"
+	@echo "Full guide: docs/LAB-GUIDE.md#stage-7--security-observability"
 
 stage-8:
 	@echo "$(CYAN)Stage 8 — AWS Migration$(NC)"
@@ -183,24 +187,73 @@ check-6:
 demo-6:
 	@bash stages/stage-6-runtime-security/scripts/demo-falco-alerts.sh
 
+demo-7:
+	@bash stages/stage-7-observability/scripts/generate-dashboard-data.sh
+
 connect-litmus:
 	@bash stages/stage-6.5-chaos-engineering/scripts/connect-litmus-infra.sh
 
 fix-65-prereqs: fix-argocd
 
-fix-argocd:
-	@echo "$(GREEN)Stabilizing auth-service (fixes ArgoCD Progressing + restarts)...$(NC)"
-	@kubectl apply -f infra/argocd/clearledger-app.yaml 2>/dev/null || true
-	@kubectl apply -f infra/manifests/auth-service/deployment.yaml
-	@kubectl apply -f infra/deferred-by-stage/stage-6-runtime-security/netpol/network-policies.yaml
-	@kubectl rollout restart deployment/auth-service -n clearledger
-	@kubectl rollout status deployment/auth-service -n clearledger --timeout=300s || true
-	@echo "$(CYAN)Pruning old auth-service ReplicaSets (cleans ArgoCD tree view)...$(NC)"
-	@kubectl get rs -n clearledger -l app=auth-service -o json 2>/dev/null | \
-		python3 -c "import json,sys; [print(i['metadata']['name']) for i in json.load(sys.stdin).get('items',[]) if i.get('status',{}).get('replicas',1)==0]" | \
-		xargs -r kubectl delete rs -n clearledger 2>/dev/null || true
-	@echo ""
-	@kubectl get pods -n clearledger -l app=auth-service
+GITHUB_OWNER ?= Osomudeya
+INFRA_REPO   ?= https://github.com/$(GITHUB_OWNER)/clearledger-infra.git
+
+# Push canonical manifests to clearledger-infra (Kustomize image tags preserved from Git).
+push-infra-manifests:
+	@set -euo pipefail; \
+	tmp=$$(mktemp -d); trap 'rm -rf $$tmp' EXIT; \
+	if [ -n "$${INFRA_REPO_TOKEN:-}" ]; then \
+	  git clone "https://$${INFRA_REPO_TOKEN}@github.com/$(GITHUB_OWNER)/clearledger-infra.git" "$$tmp/infra"; \
+	else \
+	  git clone "https://github.com/$(GITHUB_OWNER)/clearledger-infra.git" "$$tmp/infra"; \
+	fi; \
+	command -v kustomize >/dev/null || { echo "Install kustomize: brew install kustomize"; exit 1; }; \
+	if [ -f "$$tmp/infra/manifests/kustomization.yaml" ]; then \
+	  cp "$$tmp/infra/manifests/kustomization.yaml" "$$tmp/saved-kustomization.yaml"; \
+	else \
+	  mkdir -p "$$tmp/saved-images"; \
+	  for svc in auth-service ledger-service notification-service frontend; do \
+	    grep -m1 'image:' "$$tmp/infra/manifests/$$svc/deployment.yaml" \
+	      | awk '{print $$2}' > "$$tmp/saved-images/$$svc" 2>/dev/null || true; \
+	  done; \
+	fi; \
+	rsync -a --delete \
+	  --exclude='auth-service/secret.yaml' \
+	  --exclude='ledger-service/secret.yaml' \
+	  infra/manifests/ "$$tmp/infra/manifests/"; \
+	if [ -f "$$tmp/saved-kustomization.yaml" ]; then \
+	  cp "$$tmp/saved-kustomization.yaml" "$$tmp/infra/manifests/kustomization.yaml"; \
+	else \
+	  cd "$$tmp/infra/manifests"; \
+	  kustomize edit set image \
+	    clearledger/auth-service=$$(cat "$$tmp/saved-images/auth-service") \
+	    clearledger/ledger-service=$$(cat "$$tmp/saved-images/ledger-service") \
+	    clearledger/notification-service=$$(cat "$$tmp/saved-images/notification-service") \
+	    clearledger/frontend=$$(cat "$$tmp/saved-images/frontend"); \
+	fi; \
+	cd "$$tmp/infra/manifests" && kustomize build . >/dev/null; \
+	cd "$$tmp/infra"; \
+	git config user.email "github-ci@clearledger.local"; \
+	git config user.name "GitHub Actions Bot"; \
+	git add manifests/; \
+	if git diff --staged --quiet; then echo "No manifest changes in clearledger-infra"; exit 0; fi; \
+	git commit -m "fix(gitops): sync canonical manifests (Kustomize tags preserved)"; \
+	git push; \
+	echo "✓ clearledger-infra updated"
+
+# Prod GitOps fix: align infra Git, re-apply Application (no kubectl apply to deployments).
+fix-argocd: push-infra-manifests
+	@echo "$(GREEN)Re-applying ArgoCD Application + triggering sync...$(NC)"
+	@kubectl apply -f infra/argocd/clearledger-app.yaml
+	@kubectl annotate application clearledger -n argocd \
+		argocd.argoproj.io/refresh=hard --overwrite
+	@argocd app sync clearledger --grpc-web --prune 2>/dev/null || \
+		echo "$(YELLOW)argocd CLI not logged in — auto-sync will apply within ~3min$(NC)"
+	@kubectl rollout status deployment/auth-service -n clearledger --timeout=300s 2>/dev/null || true
+	@kubectl rollout status deployment/ledger-service -n clearledger --timeout=300s 2>/dev/null || true
+	@kubectl get application clearledger -n argocd \
+		-o jsonpath='ArgoCD: sync={.status.sync.status} health={.status.health.status}{"\n"}' 2>/dev/null || true
+	@kubectl get pods -n clearledger
 
 demo-65:
 	@bash stages/stage-6.5-chaos-engineering/scripts/run-chaos.sh
