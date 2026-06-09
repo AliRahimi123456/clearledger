@@ -82,7 +82,7 @@ spec:
         runAsUser: 1000
       containers:
         - name: otel-collector
-          image: otel/opentelemetry-collector-contrib:0.104.0
+          image: otel/opentelemetry-collector-contrib:0.127.0
           args: ["--config=/etc/otel/collector.yaml"]
           ports:
             - name: otlp-grpc

@@ -1,0 +1,47 @@
+# Stage 7 — kube-prometheus-stack overrides (MicroK8s lab)
+# Fewer dashboards + disabled Live = faster, fewer console errors.
+# enableRemoteWriteReceiver: lets the OTel Collector push metrics to Prometheus (Stage 7.5).
+prometheus:
+  prometheusSpec:
+    enableRemoteWriteReceiver: true
+
+grafana:
+  defaultDashboardsEnabled: false
+  adminPassword: admin123
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    hosts:
+      - grafana.local
+    annotations:
+      nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+      nginx.ingress.kubernetes.io/proxy-connect-timeout: "300"
+      nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+      nginx.ingress.kubernetes.io/configuration-snippet: |
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+  grafana.ini:
+    analytics:
+      reporting_enabled: false
+      check_for_updates: false
+    live:
+      enabled: false
+    dataproxy:
+      timeout: 120
+      keep_alive_seconds: 30
+    log:
+      level: warn
+    users:
+      default_theme: dark
+  sidecar:
+    skipTlsVerify: true
+    dashboards:
+      enabled: true
+      label: clearledger_dashboard
+      labelValue: "1"
+      searchNamespace: monitoring
+      folder: /tmp/dashboards/clearledger
+    datasources:
+      enabled: true
+      label: grafana_datasource
+      searchNamespace: monitoring

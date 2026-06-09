@@ -4991,48 +4991,235 @@ Once all three are in place, `http_requests_total` appears in Prometheus and the
 
 ## Stage 7.5 — OpenTelemetry (Optional)
 
-> Metrics show what happened. Traces show where time was spent and how services connected.
+> Metrics and logs tell you what happened. Traces tell you **where time was spent and which service caused the delay.**
 
-**Goal:** one transaction in Grafana Tempo shows spans across ledger-service → auth-service → postgres.
+**Goal:** send a real transaction and open Grafana Tempo to see its full journey: `POST /transactions` (ledger-service) → `GET /verify` (auth-service) → SQL INSERT (postgres) as a single waterfall with exact timings on each hop.
 
 ### What you need to know first
 
-Metrics tell you "ledger-service had 50 requests in the last minute, 2 were errors." Logs tell you "request X failed with a 500 error." But neither tells you the full story of a single request: which services did it pass through, how long each step took, and where the bottleneck was.
+You have already seen what metrics and logs give you in Stage 7. Here is the gap they leave:
 
-**Distributed tracing** follows a single request across every service it touches. When a user creates a transaction, the request hits the frontend, goes to ledger-service, which calls auth-service to verify the JWT, then writes to Postgres. A **trace** captures that entire journey. Each step is a **span** — a named, timed operation. Spans nest inside each other, showing the call tree.
+- **Prometheus** tells you `ledger-service had 50 requests in the last minute, 2 were errors`
+- **Loki** tells you `request X logged a 500 error at 14:23:07`
+- Neither tells you: which call inside ledger-service failed? Was it the auth-service JWT check, the Postgres write, or the Redis publish? And how long did each step take?
 
-**OpenTelemetry (OTel)** is the standard for collecting traces. Your application code sends trace data to an **OTel Collector**, which forwards it to **Tempo** (a trace storage backend). Grafana queries Tempo and shows you the trace waterfall diagram.
+**Distributed tracing** answers this. Every request gets a **Trace ID** at the entry point. As it crosses service boundaries, each service adds a **Span** — a named, timed operation. The result is a waterfall diagram showing the complete call tree with exact durations.
+
+**OpenTelemetry (OTel)** is the vendor-neutral standard for this. The ClearLedger services already have OTel instrumentation in the code (`opentelemetry-instrumentation-fastapi`, `opentelemetry-instrumentation-sqlalchemy`). They send spans via gRPC to an **OTel Collector**, which forwards them to **Grafana Tempo** for storage. Grafana then queries Tempo and renders the trace.
+
+**Why your pods have been logging warnings since Stage 7:**
+
+```
+WARNING: Transient error StatusCode.UNAVAILABLE encountered while exporting traces
+```
+
+This is the OTel exporter in each app trying to reach `otel-collector.monitoring.svc.cluster.local:4317` — which doesn't exist yet. The app degrades gracefully (traces are dropped, everything else works). Stage 7.5 installs the collector and stops these warnings permanently.
 
 ---
 
+### How the pipeline works
+
+```
+app pod (ledger-service)
+  │  OTel SDK auto-instruments FastAPI + SQLAlchemy
+  │  sends spans via gRPC to port 4317
+  ▼
+OTel Collector (monitoring namespace, port 4317)
+  │  batches and forwards
+  ▼
+Grafana Tempo (monitoring namespace, port 4317 for OTLP, 3100 for query)
+  │  stores traces
+  ▼
+Grafana → Explore → Tempo datasource → trace waterfall
+```
+
+---
+
+### 7.5.1 — Check memory before starting
+
+Tempo adds ~300MB. Confirm you have headroom:
+
 ```bash
-kubectl apply -f stages/stage-7.5-opentelemetry/infra/otel/otel-collector.yaml
+multipass exec clearledger -- free -h
+# You need at least 1.5Gi available
+```
+
+If low, Litmus is already scaled down (you did this in Stage 7). Good to go.
+
+---
+
+### 7.5.2 — Install Grafana Tempo
+
+Tempo is the trace storage backend. Install it into the `monitoring` namespace next to Prometheus and Loki:
+
+```bash
+helm repo add grafana https://grafana.github.io/helm-charts
+helm repo update
 
 helm install tempo grafana/tempo \
   --namespace monitoring \
   --set tempo.storage.trace.backend=local \
+  --set tempo.storage.trace.local.path=/var/tempo \
   --set persistence.enabled=true \
-  --set persistence.size=5Gi
+  --set persistence.size=5Gi \
+  --wait
+```
 
+**Verify Tempo is running:**
+
+```bash
+kubectl get pods -n monitoring -l app.kubernetes.io/name=tempo
+# Expected: tempo-0   1/1   Running
+```
+
+```bash
+kubectl exec -n monitoring tempo-0 -- wget -qO- http://localhost:3100/ready
+# Expected: ready
+```
+
+---
+
+### 7.5.3 — Deploy OTel Collector and wire Grafana
+
+This applies the OTel Collector (receives spans from app pods) and registers Tempo as a Grafana datasource automatically via the sidecar:
+
+```bash
+kubectl apply -f stages/stage-7.5-opentelemetry/infra/otel/otel-collector.yaml
 kubectl apply -f stages/stage-7.5-opentelemetry/infra/otel/grafana-datasource-tempo.yaml
 ```
 
-Update deployments with OTel environment variables (push through Git → ArgoCD syncs).
+**Verify the collector is running:**
 
-Then create a transaction and open Grafana → Explore → Tempo → search `service.name = "ledger-service"`. Expand the trace — you see the auth-service call and the Postgres INSERT as child spans with exact timing. That is a distributed trace.
+```bash
+kubectl get pods -n monitoring -l app=otel-collector
+# Expected: otel-collector-xxxxx   1/1   Running
+```
 
-**Take a screenshot of a trace showing spans across multiple services.** This demonstrates you understand microservice observability.
+**Verify it can receive traces (check the collector logs):**
+
+```bash
+kubectl logs -n monitoring deploy/otel-collector --tail=10
+# Expected: service started, no errors
+```
+
+---
+
+### 7.5.4 — Enable Prometheus remote write receiver
+
+The OTel Collector also forwards OTel metrics to Prometheus via remote write. Prometheus needs to accept them:
+
+```bash
+helm upgrade kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+  --namespace monitoring \
+  -f stages/stage-7-observability/infra/helm/kube-prometheus-stack-values.yaml \
+  --wait
+```
+
+This applies the `enableRemoteWriteReceiver: true` setting added to the Helm values in Stage 7.5. Wait for Prometheus to restart (about 60 seconds).
+
+---
+
+### 7.5.5 — Verify app pods connect to the collector
+
+The deployments in `clearledger-infra` already have `OTEL_EXPORTER_OTLP_ENDPOINT` set. Once the collector is running, the pods auto-connect. Confirm the OTEL warnings are gone:
+
+```bash
+kubectl logs -n clearledger deploy/ledger-service -c ledger-service --tail=20 2>/dev/null \
+  | grep -v "opentelemetry\|otlp\|Transient" | tail -10
+# Expected: only INFO request logs, no WARNING: Transient error
+```
+
+If warnings persist, the network policy may not have port 4317 egress. Apply the latest policies:
+
+```bash
+kubectl apply -f infra/deferred-by-stage/stage-6-runtime-security/netpol/network-policies.yaml
+```
+
+---
+
+### 7.5.6 — Generate a trace
+
+Now create a transaction and watch it flow through the system:
+
+```bash
+# Step 1: register (skip if already registered)
+curl -s -X POST http://clearledger.local/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"email":"trace-demo@clearledger.io","password":"TracePass123"}' | python3 -m json.tool
+
+# Step 2: login and grab the token
+TOKEN=$(curl -s -X POST http://clearledger.local/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"trace-demo@clearledger.io","password":"TracePass123"}' \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+echo "Token acquired: ${TOKEN:0:20}..."
+
+# Step 3: create a transaction (this is the request you will trace)
+curl -s -X POST http://clearledger.local/ledger/transactions \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": 5000, "direction": "credit"}' | python3 -m json.tool
+```
+
+---
+
+### 7.5.7 — View the trace in Grafana
+
+1. Open **http://grafana.local**
+2. Left sidebar → **Explore** (compass icon)
+3. Top datasource dropdown → select **Tempo**
+4. Search type: **Search** tab
+5. Service name: `ledger-service`
+6. Click **Run query**
+7. Click on the most recent trace
+
+**What you should see:**
+
+```
+POST /transactions   (ledger-service)   ~50ms total
+  ├── GET /verify    (auth-service)     ~12ms  ← JWT verification call
+  ├── INSERT         (postgres)         ~8ms   ← database write
+  └── PUBLISH        (redis)            ~2ms   ← notification trigger (if amount ≥ 10000)
+```
+
+Each bar is a span. The width is proportional to time spent. Clicking a span shows its attributes — the SQL query text, HTTP status code, service name.
+
+**Connecting traces to logs:** Click any span → **Logs** tab → Grafana jumps to the matching Loki log entries for that pod at that exact timestamp.
+
+**Take a screenshot of the trace waterfall.** This is your portfolio proof for Stage 7.5.
+
+---
+
+### 7.5.8 — Verify
 
 ```bash
 make check-75
 ```
 
+Expected output:
+
+```text
+▶ Stage 7.5 — OpenTelemetry (Distributed Tracing)
+  ✓ OTel Collector is running (1 replica(s))
+  ✓ Grafana Tempo datasource ConfigMap exists
+  ✓ Tempo is running
+  ✓ auth-service has OTEL_EXPORTER_OTLP_ENDPOINT set
+```
+
+---
+
 ### What you learned in Stage 7.5
 
-- The difference between metrics (aggregates), logs (text), and traces (request journeys)
-- What a span and a trace are: named, timed operations that show the path of a single request
-- What OpenTelemetry does: a standard way to collect and forward traces
-- How to find performance bottlenecks by looking at span durations in a trace waterfall
+- The three observability signals and when each one is the right tool: metrics for aggregates, logs for forensics, traces for request journeys
+- What a span is (a named, timed operation) and how spans nest to form a trace
+- How W3C TraceContext headers propagate a Trace ID across service boundaries automatically — without changing business logic
+- How to find performance bottlenecks: look at span durations to see which service or database call is the slowest
+- Why OTel is vendor-neutral: the same instrumentation works with Tempo today and Datadog or Jaeger tomorrow with only a collector config change
+- The collector pattern: apps never talk directly to storage — they talk to a collector, which routes to whatever backend you configure
+
+### DevSecOps lesson — Stage 7.5 in one paragraph
+
+**Observability is not one tool, it is three signals working together.** Prometheus told you ledger-service had an error spike. Loki told you which log line fired. Tempo told you the auth-service JWT check was taking 200ms because it was hitting a cold Postgres connection — that is the root cause, and neither metrics nor logs could show it alone. OpenTelemetry is the 2026 standard because it is vendor-neutral and already built into modern frameworks — you instrument once and route to whatever backend you choose. The collector in the middle is the routing layer: change the exporter config, not the application.
 
 ---
 

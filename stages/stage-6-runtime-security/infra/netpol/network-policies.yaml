@@ -15,7 +15,8 @@ spec:
     - Ingress
     - Egress
 ---
-# auth-service: accepts traffic from ledger-service, ingress controller, and Prometheus scraper
+# auth-service: accepts traffic from ledger-service, ingress controller, and Prometheus scraper;
+# egresses to postgres, Vault, OTel collector (Stage 7.5), and DNS
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -55,6 +56,12 @@ spec:
               kubernetes.io/metadata.name: vault
       ports:
         - port: 8200
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - port: 4317
     - to:
         - namespaceSelector: {}
       ports:
@@ -109,7 +116,7 @@ spec:
       ports:
         - port: 6379
 ---
-# ledger-service: accepts from ingress and Prometheus scraper; talks to auth-service, postgres, redis, Vault
+# ledger-service: accepts from ingress and Prometheus scraper; egresses to auth-service, postgres, redis, Vault, OTel collector
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -158,6 +165,12 @@ spec:
       ports:
         - port: 8200
     - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - port: 4317
+    - to:
         - namespaceSelector: {}
       ports:
         - protocol: UDP
@@ -183,7 +196,7 @@ spec:
             matchLabels:
               kubernetes.io/metadata.name: ingress
 ---
-# notification-service: subscribes to redis; accepts from ingress and Prometheus scraper
+# notification-service: subscribes to redis; accepts from ingress and Prometheus scraper; egresses to redis, OTel collector, DNS
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -213,6 +226,12 @@ spec:
               app: redis
       ports:
         - port: 6379
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - port: 4317
     - to:
         - namespaceSelector: {}
       ports:
