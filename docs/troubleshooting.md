@@ -465,6 +465,7 @@ Stage 4 installs Kyverno, applies five ClusterPolicies, and runs break-it scenar
 | Scenario 3 false negative | Pod created, then `ImagePullBackOff` | Tag never pushed to Docker Hub | Push `unsigned-test` tag; verify with `cosign verify` |
 | `make check-4` kube-bench fail | Script exits immediately on macOS | Empty baseline; `grep` + `pipefail` | Run baseline scan; script compares regressions only |
 | Health check false negative | “Kyverno not running” | Wrong pod label selector | Use `app.kubernetes.io/component=admission-controller` |
+| Kyverno RESTARTS climbing (50+) | `kubectl` TLS timeouts; API sluggish | Default liveness probe (`timeoutSeconds: 5`) on loaded single-node VM → restart storm hammers MicroK8s dqlite | Reinstall with `stages/stage-4-admission-control/infra/kyverno/values.yaml`; run `bash scripts/health-check.sh 4`; scale down Litmus (LAB-GUIDE §7.0); teardown only if cluster was patched off-guide |
 
 ---
 

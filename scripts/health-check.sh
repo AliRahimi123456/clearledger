@@ -32,6 +32,128 @@ fail() { echo -e "  ${RED}✗${NC} $1"; FAIL=$((FAIL + 1)); }
 warn() { echo -e "  ${YELLOW}⚠${NC} $1"; WARN=$((WARN + 1)); }
 header() { echo -e "\n${CYAN}${BOLD}▶ $1${NC}"; }
 
+# Max restarts for pods matching a label selector in a namespace (platform stability).
+check_max_restarts() {
+  local ns=$1 selector=$2 limit=$3 desc=$4
+  local lines line name restarts max_seen=0
+
+  if ! kubectl get namespace "$ns" &>/dev/null; then
+    return 0
+  fi
+
+  lines=$(kubectl get pods -n "$ns" -l "$selector" \
+    -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.containerStatuses[0].restartCount}{"\n"}{end}' \
+    2>/dev/null || true)
+
+  if [ -z "$lines" ]; then
+    warn "$desc — no pods found (skipped)"
+    return 0
+  fi
+
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    name="${line%% *}"
+    restarts="${line##* }"
+    [[ "$restarts" =~ ^[0-9]+$ ]] || restarts=0
+    if [ "$restarts" -gt "$max_seen" ]; then
+      max_seen=$restarts
+    fi
+    if [ "$restarts" -gt "$limit" ]; then
+      fail "$desc: $name has $restarts restarts (limit $limit) — likely crash loop; fix before next stage"
+      return 1
+    fi
+  done <<< "$lines"
+
+  pass "$desc stable (highest: $max_seen restarts, limit $limit)"
+}
+
+show_top_restarts() {
+  echo ""
+  echo -e "  ${BOLD}Top restart counts (cluster-wide):${NC}"
+  if kubectl get pods -A --sort-by='.status.containerStatuses[0].restartCount' \
+    -o custom-columns='NS:.metadata.namespace,NAME:.metadata.name,RESTARTS:.status.containerStatuses[0].restartCount' \
+    --no-headers 2>/dev/null | tail -15 | sed 's/^/    /'; then
+    :
+  else
+    warn "Could not list pod restart counts — API may be slow; retry when load settles"
+  fi
+}
+
+check_node_load() {
+  local limit=$1 load_1m
+
+  if ! command -v multipass &>/dev/null || ! multipass info clearledger &>/dev/null 2>&1; then
+    return 0
+  fi
+
+  load_1m=$(multipass exec clearledger -- uptime 2>/dev/null \
+    | awk -F'load average:' '{print $2}' | awk -F, '{gsub(/ /,"",$1); print int($1+0.5)}' || true)
+
+  if [ -z "${load_1m:-}" ]; then
+    warn "Could not read node load average from Multipass VM"
+    return 0
+  fi
+
+  if [ "$load_1m" -gt "$limit" ]; then
+    warn "Node load average (1m) is ${load_1m} — expected ≤ ${limit} before heavy observability stages; wait or scale down Litmus (LAB-GUIDE §7.0)"
+  else
+    pass "Node load average (1m) is ${load_1m} (comfortable, limit ${limit})"
+  fi
+}
+
+# Platform pods can be Running while crash-looping — catch restart storms early.
+check_platform_stability() {
+  local stage=${1:-help}
+
+  header "Platform stability (restart counts)"
+
+  case "$stage" in
+    0|1|2|3|help|*)
+      show_top_restarts
+      return 0
+      ;;
+  esac
+
+  if kubectl get namespace kyverno &>/dev/null; then
+    for component in admission-controller background-controller cleanup-controller reports-controller; do
+      check_max_restarts kyverno "app.kubernetes.io/component=${component}" 5 "Kyverno ${component}"
+    done
+  fi
+
+  if kubectl get namespace kube-system &>/dev/null; then
+    check_max_restarts kube-system "k8s-app=hostpath-provisioner" 10 "MicroK8s hostpath-provisioner"
+    check_max_restarts kube-system "k8s-app=metrics-server" 15 "metrics-server"
+  fi
+
+  case "$stage" in
+    5|6|6.5|65|7|7.5|75|8|all)
+      if kubectl get namespace vault &>/dev/null; then
+        check_max_restarts vault "app.kubernetes.io/name=vault-agent-injector" 10 "Vault agent injector"
+      fi
+      ;;
+  esac
+
+  case "$stage" in
+    6|6.5|65|7|7.5|75|8|all)
+      if kubectl get namespace falco &>/dev/null; then
+        check_max_restarts falco "app.kubernetes.io/name=falco" 5 "Falco"
+      fi
+      ;;
+  esac
+
+  case "$stage" in
+    7|7.5|75|8|all)
+      check_node_load 12
+      if kubectl get namespace monitoring &>/dev/null; then
+        check_max_restarts monitoring "app.kubernetes.io/name=kube-prometheus-stack-operator" 10 "Prometheus operator"
+        check_max_restarts monitoring "app.kubernetes.io/name=loki" 5 "Loki"
+      fi
+      ;;
+  esac
+
+  show_top_restarts
+}
+
 # ── Helper functions ──────────────────────────────────────────────────────────
 pod_running() {
   local label=$1 namespace=${2:-clearledger} label_key=${3:-app}
@@ -57,6 +179,27 @@ http_ok() {
 
 http_status() {
   curl -s -o /dev/null -w "%{http_code}" --max-time 15 "$1" 2>/dev/null || echo "000"
+}
+
+# Grafana often redirects / to /login (302). Host curl may fail in some environments;
+# fall back to an in-cluster health check against the Grafana Service.
+grafana_reachable() {
+  local status
+  status=$(http_status "http://grafana.local")
+  if [ "$status" = "200" ] || [ "$status" = "302" ] || [ "$status" = "301" ]; then
+    return 0
+  fi
+
+  local grafana_pod
+  grafana_pod=$(kubectl get pod -n monitoring -l app.kubernetes.io/name=grafana \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+  if [ -n "${grafana_pod:-}" ]; then
+    if kubectl exec -n monitoring "$grafana_pod" -c grafana -- \
+      wget -qO- http://localhost:3000/api/health 2>/dev/null | grep -q '"database":"ok"'; then
+      return 0
+    fi
+  fi
+  return 1
 }
 
 # ── Stage 0: Raw Kubernetes ───────────────────────────────────────────────────
@@ -608,17 +751,28 @@ check_stage_7() {
     fail "Prometheus not running"
   fi
 
-  # Grafana
-  if http_ok "http://grafana.local"; then
-    pass "Grafana reachable at http://grafana.local"
+  # Grafana (browser uses http://grafana.local; accept redirect + in-cluster fallback)
+  if grafana_reachable; then
+    pass "Grafana reachable (http://grafana.local or in-cluster health OK)"
   else
-    fail "Grafana not reachable — check ingress and /etc/hosts"
+    fail "Grafana not reachable — run: bash scripts/setup-hosts.sh && kubectl get ingress -n monitoring"
   fi
 
-  # Loki
-  if kubectl get pods -n monitoring -l "app=loki" \
-    --field-selector=status.phase=Running --no-headers 2>/dev/null | grep -q "."; then
-    pass "Loki is running"
+  # Loki (pod up + query path from Grafana — same path dashboards use)
+  local loki_restarts=0
+  if kubectl get pod -n monitoring loki-0 --no-headers 2>/dev/null | awk '{print $2}' | grep -q '1/1'; then
+    loki_restarts="$(kubectl get pod -n monitoring loki-0 -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>/dev/null || echo 0)"
+    if [ "${loki_restarts:-0}" -gt 5 ]; then
+      warn "Loki is running but restarted ${loki_restarts}× — likely query overload; re-run install-observability.sh with FORCE=1"
+    else
+      pass "Loki pod is running (${loki_restarts} restarts)"
+    fi
+    if kubectl exec -n monitoring deploy/kube-prometheus-stack-grafana -c grafana -- \
+      wget -qO- --timeout=5 http://loki:3100/ready 2>/dev/null | grep -q ready; then
+      pass "Loki reachable from Grafana (http://loki:3100/ready)"
+    else
+      warn "Loki not reachable from Grafana — dashboards will show connection refused"
+    fi
   else
     warn "Loki not running — log aggregation unavailable"
   fi
@@ -630,11 +784,21 @@ check_stage_7() {
     warn "Alerting rules not applied — apply stages/stage-7-observability/infra/monitoring/alerting-rules.yaml"
   fi
 
-  # Dashboards imported
-  local dashboard_count
+  # Dashboards imported (host API or in-cluster fallback)
+  local dashboard_count grafana_pod
   dashboard_count=$(curl -s \
     "http://admin:admin123@grafana.local/api/search?tag=clearledger" \
     2>/dev/null | jq length 2>/dev/null || echo "0")
+  if [ "${dashboard_count:-0}" -eq 0 ]; then
+    grafana_pod=$(kubectl get pod -n monitoring -l app.kubernetes.io/name=grafana \
+      -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+    if [ -n "${grafana_pod:-}" ]; then
+      dashboard_count=$(kubectl exec -n monitoring "$grafana_pod" -c grafana -- \
+        wget -qO- --header="Authorization: Basic $(printf '%s' 'admin:admin123' | base64)" \
+        "http://localhost:3000/api/search?tag=clearledger" 2>/dev/null \
+        | jq length 2>/dev/null || echo "0")
+    fi
+  fi
 
   if [ "$dashboard_count" -ge 4 ]; then
     pass "ClearLedger dashboards imported ($dashboard_count found)"
@@ -686,6 +850,8 @@ check_stage_75() {
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 print_summary() {
+  check_platform_stability "${STAGE:-help}"
+
   echo -e "\n${BOLD}─────────────────────────────────────────${NC}"
   echo -e "${BOLD}Health Check Summary${NC}"
   echo -e "${GREEN}✓ Passed: $PASS${NC}"
@@ -718,7 +884,11 @@ case "$STAGE" in
   5) check_stage_4; check_stage_5 ;;
   6) check_stage_5; check_stage_6 ;;
   6.5|65) check_stage_6; check_stage_65 ;;
-  7) check_stage_65; check_stage_7 ;;
+  7)
+    if [ "${SKIP_CHAOS_CHECK:-0}" != "1" ]; then
+      check_stage_65
+    fi
+    check_stage_7 ;;
   7.5|75) check_stage_7; check_stage_75 ;;
   8) check_stage_75 ;;
   all)

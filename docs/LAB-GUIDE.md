@@ -46,6 +46,22 @@ The app is the vehicle. DevSecOps is the destination.
 
 **Estimated time:** Stages 0–2 take a full day each. Stages 3–7 take half a day each. Stage 8 takes a few hours. That is normal. Do not rush.
 
+**After every stage (authors and learners):** run the health check, then scan restart counts. A pod can be `Running` while crash-looping — high `RESTARTS` on platform pods (Kyverno, `hostpath-provisioner`, Prometheus operator) means the node is heading into a failure cascade. **Do not start the next stage until both checks look healthy.**
+
+```bash
+bash scripts/health-check.sh <stage>    # e.g. 4, 7, 7.5
+```
+
+The script ends with a **Platform stability** section. Also inspect the highest restart counts yourself:
+
+```bash
+kubectl get pods -A --sort-by='.status.containerStatuses[0].restartCount' \
+  -o custom-columns='NS:.metadata.namespace,NAME:.metadata.name,RESTARTS:.status.containerStatuses[0].restartCount' \
+  | tail -15
+```
+
+**Gate before the next stage:** platform pods (especially Kyverno controllers) should show **RESTARTS under 5** after the stage settles (~10 minutes). If any platform pod is climbing past 10, stop — fix it with the documented Helm values or troubleshooting steps. Do not `kubectl patch` around it.
+
 ---
 
 ## Who This Is For
@@ -2257,6 +2273,14 @@ kyverno-reports-controller-5cdd6f4c48-qf5wc      1/1     Running   0          2m
 
 If pods stay in `ContainerCreating` for a long time, the node is still pulling images from `ghcr.io/kyverno`. Wait — do not start a second Helm install on top of a partial one.
 
+**Stability gate — run before §4.2:**
+
+```bash
+bash scripts/health-check.sh 4
+```
+
+All four Kyverno controllers should be `1/1 Running` with **RESTARTS 0–2** (not climbing). If restarts keep increasing, the node is likely under CPU pressure and Kyverno’s health probes are killing pods — confirm you installed with `stages/stage-4-admission-control/infra/kyverno/values.yaml` (extended probe timeouts). See `docs/troubleshooting.md` §Stage 4.
+
 ---
 
 ### 4.2 — Confirm your Cosign public key is in the policy
@@ -4397,6 +4421,22 @@ You run a command (terminal)
 
 ---
 
+### 7.0 — Free node resources (scale down Litmus)
+
+Stage 6.5 is complete — you do not need the Litmus UI, MongoDB, or chaos operator running while Prometheus, Loki, and Grafana start. They compete for the same 4 CPUs on a single-node lab VM. Scaling Litmus to zero frees ~500–800MB RAM and reduces CPU churn before the observability install.
+
+```bash
+kubectl scale deployment,statefulset -n litmus --replicas=0 --all
+kubectl get pods -n litmus
+# Expected: no Running pods (Succeeded job pods from chaos experiments are OK)
+multipass exec clearledger -- uptime
+# Expected: load average (1m) ideally below ~8 before continuing
+```
+
+You can scale Litmus back up later if you want to re-run chaos experiments (`bash stages/stage-6.5-chaos-engineering/scripts/install-litmus.sh`). For Stages 7–7.5, keep it scaled down.
+
+---
+
 ### 7.1 — Install the observability stack
 
 ```bash
@@ -5036,16 +5076,28 @@ Grafana → Explore → Tempo datasource → trace waterfall
 
 ---
 
-### 7.5.1 — Check memory before starting
+### 7.5.1 — Check memory and load before starting
 
-Tempo adds ~300MB. Confirm you have headroom:
+Tempo adds ~300MB. Confirm you have headroom and the node is not already saturated:
 
 ```bash
 multipass exec clearledger -- free -h
 # You need at least 1.5Gi available
+
+multipass exec clearledger -- uptime
+# load average (1m) should be below ~10 on a 4-CPU VM
+
+bash scripts/health-check.sh 7
 ```
 
-If low, Litmus is already scaled down (you did this in Stage 7). Good to go.
+If memory is low or load is high, confirm Litmus is still scaled down (§7.0):
+
+```bash
+kubectl get pods -n litmus --field-selector=status.phase=Running
+# Expected: no resources found
+```
+
+If Litmus pods are still Running, scale them down again before installing Tempo.
 
 ---
 
