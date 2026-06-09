@@ -6,6 +6,27 @@
 
 replicaCount: 1
 
+# Probe timeouts for single-node lab VMs.
+# The default (timeoutSeconds: 5, failureThreshold: 2) is too tight for a
+# loaded MicroK8s VM — the health endpoint can take >5s under CPU pressure,
+# triggering a restart cascade that hammers dqlite and saturates the node.
+# 30s timeout + 5 failures = 150s grace before Kubernetes kills the pod.
+admissionController:
+  livenessProbe:
+    timeoutSeconds: 30
+    failureThreshold: 5
+  readinessProbe:
+    timeoutSeconds: 30
+    failureThreshold: 5
+
+cleanupController:
+  livenessProbe:
+    timeoutSeconds: 30
+    failureThreshold: 5
+  readinessProbe:
+    timeoutSeconds: 30
+    failureThreshold: 5
+
 webhooksCleanup:
   image:
     repository: bitnamilegacy/kubectl

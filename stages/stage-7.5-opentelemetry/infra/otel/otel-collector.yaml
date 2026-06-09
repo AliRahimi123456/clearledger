@@ -44,8 +44,7 @@ data:
         # Export OTel metrics to existing Prometheus
         endpoint: http://kube-prometheus-stack-prometheus.monitoring.svc:9090/api/v1/write
 
-      logging:
-        # Debug: print spans to collector logs
+      debug:
         verbosity: normal
 
     service:
@@ -53,7 +52,7 @@ data:
         traces:
           receivers: [otlp]
           processors: [memory_limiter, resource, batch]
-          exporters: [otlp/tempo, logging]
+          exporters: [otlp/tempo, debug]
 
         metrics:
           receivers: [otlp]

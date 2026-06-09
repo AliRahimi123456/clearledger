@@ -2224,10 +2224,11 @@ helm upgrade --install kyverno kyverno/kyverno \
   --wait --timeout=600s
 ```
 
-The values file does two important things for the lab:
+The values file does three important things for the lab:
 
 1. **Disables cleanup CronJobs** — older Kyverno charts pull `bitnami/kubectl`, which was removed from Docker Hub and causes `ImagePullBackOff` on cleanup pods.
 2. **Points Helm hooks at `bitnamilegacy/kubectl`** — so future `helm uninstall` does not hang on a missing image.
+3. **Extends liveness probe timeouts** — the default `timeoutSeconds: 5, failureThreshold: 2` is too tight for a loaded single-node VM. Under CPU pressure the health endpoint can take >5s to respond, which triggers a restart cascade that saturates the node and makes the API server intermittently unreachable. The values file sets `timeoutSeconds: 30, failureThreshold: 5` so Kyverno survives load spikes without crash-looping.
 
 **What you should see:**
 
