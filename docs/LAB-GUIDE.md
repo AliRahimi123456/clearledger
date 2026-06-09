@@ -4943,13 +4943,25 @@ This is screenshot **#3** — three defenses in one frame.
 
 #### 5 — Audit Log Analysis
 
-Often **empty on MicroK8s** — no API audit stream in Loki yet. Do not use this alone to judge Stage 7.
+**Empty on MicroK8s — by design, not a bug.** The dashboard queries `{job="kubernetes-audit"}` which requires the Kubernetes API server to write audit logs and Promtail to ship them to Loki. MicroK8s does not enable audit logging by default. This is documented as Phase 2 work. Do not use this dashboard alone to judge Stage 7 completion — the other five dashboards carry the proof.
 
 ---
 
 #### 6 — DORA Metrics
 
-Needs **ArgoCD deploy activity** over days. May show low/zero on a fresh lab. Optional for Stage 7 completion.
+Needs ArgoCD deploy activity to accumulate. Shows real data after multiple CI runs. After the pipeline fixes in Stage 7 (serialized builds, Trivy DB prep, Python 3.13 upgrade), you should see at least one successful deploy in the Deployment Frequency panel.
+
+---
+
+#### 7 — Request Rate (Service Health dashboard)
+
+**Was empty until Stage 7 completes the full delivery chain.** Requires:
+
+- App images built with `prom_metrics.py` middleware (`/metrics` endpoint) — added in this stage via CI
+- PodMonitor `clearledger-apps` scraping the pods — installed by `install-observability.sh`
+- Network policy allowing `monitoring` namespace ingress on port 8000 — fixed in this stage
+
+Once all three are in place, `http_requests_total` appears in Prometheus and the Request Rate panel shows live traffic (confirmed at ~0.83 req/s after Stage 7 fixes).
 
 ---
 
@@ -4962,6 +4974,18 @@ Needs **ArgoCD deploy activity** over days. May show low/zero on a fresh lab. Op
 - ServiceMonitors / PodMonitors are what connect Stages 4–6 to charts
 - Empty dashboards mean “no events yet” or “wrong time range” — not “broken security”
 - Compliance posture is how you answer an auditor in **one screen**
+- Network policies must explicitly allow the `monitoring` namespace to reach app pods on port 8000, otherwise PodMonitor scrapes silently fail with `context deadline exceeded`
+- Kubernetes Audit Log dashboard is empty on MicroK8s by design — the API server audit pipeline (audit-policy → file → Promtail → Loki) is not enabled by default
+- Request Rate requires the full chain: app image with `/metrics`, PodMonitor, and network policy — any one missing means the panel stays empty
+
+#### Stage 7 done checklist
+
+- `make check-7` → 6/6 ✓ (Stage 6.5 Litmus failure is expected — scaled down for memory)
+- `http://grafana.local/d/clearledger-kyverno-violations` — Violations stat > 0
+- `http://grafana.local/d/clearledger-security-events` — CRITICAL Falco alert visible
+- `http://grafana.local/d/clearledger-compliance` — Policy Violations + Runtime Threats + Failed Auth Attempts all > 0
+- `http://grafana.local/d/clearledger-service-health` — Failed Login Attempts > 0, Request Rate > 0
+- Portfolio screenshots 1–3 saved
 
 ---
 
