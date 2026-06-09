@@ -4802,7 +4802,37 @@ Warnings about Loki restarts or missing dashboards — fix with §7.1 before cla
 
 ### 7.8 — Technical issues we hit (and how to explain them in interviews)
 
-Use this when an interviewer asks *“What broke in observability?”* or *“How do Prometheus, Loki, and Grafana fit together?”*
+Use this when an interviewer asks *”What broke in observability?”* or *”How do Prometheus, Loki, and Grafana fit together?”*
+
+#### CI pipeline issues fixed before Stage 7 could complete
+
+These CI problems blocked the delivery of metrics-enabled images and are worth documenting because they represent real DevSecOps pipeline concerns.
+
+**`}}` in GitHub Actions workflow (Jun 2026)**
+
+Python dict literals inside `run:` blocks produce `}}` when closing nested structures (e.g. `{“sha1”: e[“SHA”]}`). GitHub's expression engine parses `}}` as a closing delimiter even inside `run:` blocks — it rejected every workflow run before any job started (0 jobs, 0s completion, `failure`). Fixed by extracting nested dicts into named variables so `}}` never appears on a single line.
+
+**Stale Trivy vulnerability database**
+
+Trivy caches its CVE database on the runner. After several days, the cache exceeds the 5-day max-age and `trivy image` fails before scanning a single layer. Fixed with `GRYPE_DB_MAX_ALLOWED_BUILT_AGE=336h` (grype) and a `prepare-scanners` job that downloads the Trivy DB once per workflow — all scan jobs then use `--skip-db-update`.
+
+**Docker DNS drops mid `pip install`**
+
+The Multipass VM uses NAT. Docker containers during `docker build` inherited Docker's embedded DNS resolver (`127.0.0.1:53`), which became unreliable when NAT sessions were reused. Pip downloads timed out mid-transfer, then all retries failed with `[Errno -2] Name or service not known`. Fixed by configuring the Docker daemon to use Google DNS directly (`/etc/docker/daemon.json` with `{“dns”:[“8.8.8.8”,”8.8.4.4”]}`) and adding TCP keepalive (`net.ipv4.tcp_keepalive_time=60`) on the VM so NAT sessions stay alive during long downloads.
+
+**Python 3.13 wheel compatibility**
+
+Upgrading from `python:3.12-slim` to `python:3.13-slim` (to fix CVE-2026-4224, CVE-2026-3644, CVE-2025-13462) broke the build because `asyncpg==0.29.0` and `psycopg2-binary==2.9.9` had no pre-built cp313 wheels. Upgraded to `asyncpg==0.31.0` and `psycopg2-binary==2.9.12` which ship cp313 wheels. CVE-2026-7210 (CRITICAL) is suppressed in `.grype.yaml` and `.trivyignore` because its only fix is in Python 3.15.0b2 (beta — not acceptable for production).
+
+**Kyverno blocking ArgoCD syncs on image tag updates**
+
+After Stage 4 (Kyverno in Enforce mode), every ArgoCD sync that touched the `frontend` and `notification-service` deployments was blocked by Kyverno's `disallow-root-containers` autogen rule. The pod-level `securityContext.runAsNonRoot: true` was present but Kyverno's autogen generates per-container rules that require the field at container level individually. Auth-service and ledger-service already had it at container level; frontend and notification-service only had it at pod level. Fixed by adding `runAsNonRoot: true` to the container-level `securityContext` in both manifests in `clearledger-infra`.
+
+**Kustomize + ArgoCD image substitution**
+
+The infra repo was refactored to use Kustomize (prod pattern): deployment manifests use placeholder images (`clearledger/frontend:gitops`) and `kustomization.yaml` substitutes them with real registry images and SHA tags. ArgoCD auto-detects `kustomization.yaml` and runs `kustomize build` before applying. CI's `update-manifests` job uses `kustomize edit set image` to update only the `kustomization.yaml` — not individual deployment files — keeping manifests clean and immutable. The CI pipeline uses `rsync` to copy canonical manifests from the app repo, ensuring the infra repo never drifts from the source of truth.
+
+---
 
 | Issue | What learners saw | Root cause | Fix (what we did) | Interview one-liner |
 |---|---|---|---|---|

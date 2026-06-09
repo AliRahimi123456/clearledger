@@ -15,8 +15,7 @@ spec:
     - Ingress
     - Egress
 ---
-# auth-service: accepts traffic from ledger-service and the ingress controller;
-# egresses to postgres, Vault (secrets init), and DNS
+# auth-service: accepts traffic from ledger-service, ingress controller, and Prometheus scraper
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -38,6 +37,11 @@ spec:
             matchLabels:
               # MicroK8s lab uses namespace "ingress". Standard nginx installs use "ingress-nginx".
               kubernetes.io/metadata.name: ingress
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - port: 8000
   egress:
     - to:
         - podSelector:
@@ -105,7 +109,7 @@ spec:
       ports:
         - port: 6379
 ---
-# ledger-service: accepts from ingress; talks to auth-service, postgres, redis, Vault
+# ledger-service: accepts from ingress and Prometheus scraper; talks to auth-service, postgres, redis, Vault
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -123,6 +127,11 @@ spec:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: ingress
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - port: 8000
   egress:
     - to:
         - podSelector:
@@ -174,7 +183,7 @@ spec:
             matchLabels:
               kubernetes.io/metadata.name: ingress
 ---
-# notification-service: subscribes to redis; accepts from ingress
+# notification-service: subscribes to redis; accepts from ingress and Prometheus scraper
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -192,6 +201,11 @@ spec:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: ingress
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - port: 8000
   egress:
     - to:
         - podSelector:
