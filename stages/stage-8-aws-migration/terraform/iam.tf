@@ -387,12 +387,12 @@ data "aws_iam_policy_document" "github_actions_ecr_assume" {
     }
     # Why StringEquals on the GitHub Environment subject:
     # The AWS role can only be assumed by jobs running in the protected
-    # `production` environment of Osomudeya/clearledger. In GitHub, protect
+    # `production` environment of YOUR_GITHUB_USERNAME/clearledger. In GitHub, protect
     # that environment with required reviewers and branch restrictions.
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:Osomudeya/clearledger:environment:production"]
+      values   = ["repo:YOUR_GITHUB_USERNAME/clearledger:environment:production"]
     }
   }
 }

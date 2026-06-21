@@ -36,8 +36,7 @@ metadata:
     # All three ClearLedger services expose GET /health.
     alb.ingress.kubernetes.io/healthcheck-path: /health
 
-    # HTTP only — no TLS in this lab.
-    # To add HTTPS: set alb.ingress.kubernetes.io/certificate-arn and change to 443.
+    # Demo stack: HTTP only. Production adds ACM + HTTPS (see ingress-aws-https.example.yaml).
     alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
 
     # Give the ALB a predictable name for easy identification in the AWS console.

@@ -71,7 +71,7 @@ Use this table to explain your security posture to auditors, customers, and inte
 | Dynamic application security testing | OWASP ZAP | OWASP ASVS V4.0 |
 | BOLA / IDOR testing | `stages/stage-3-security-gates/dast/fintech-test-payloads.py` | OWASP API Security Top 10 |
 
-**Evidence, not claims:** run kube-bench ([infra/manifests/compliance/README.md](../infra/manifests/compliance/README.md)), DAST smoke ([scripts/dast/README.md](../scripts/dast/README.md)), ZAP + fintech DAST ([stages/stage-3-security-gates/README.md](../stages/stage-3-security-gates/README.md) §3.5), and configure API audit shipping as described in [kubernetes-audit-logging.md](kubernetes-audit-logging.md).
+**Evidence, not claims:** run kube-bench ([LAB-GUIDE §4.7](LAB-GUIDE.md#47--cis-benchmark-evidence-kube-bench)), DAST smoke ([scripts/dast/README.md](../scripts/dast/README.md)), ZAP + fintech DAST ([stages/stage-3-security-gates/README.md](../stages/stage-3-security-gates/README.md) §3.5), and configure API audit shipping as described in [kubernetes-audit-logging.md](kubernetes-audit-logging.md).
 
 ---
 

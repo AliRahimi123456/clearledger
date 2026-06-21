@@ -1,116 +1,425 @@
 {
   "__inputs": [],
   "__requires": [
-    { "type": "grafana", "id": "grafana", "name": "Grafana", "version": "10.0.0" },
-    { "type": "datasource", "id": "prometheus", "name": "Prometheus", "version": "1.0.0" },
-    { "type": "datasource", "id": "loki", "name": "Loki", "version": "1.0.0" }
+    {
+      "type": "grafana",
+      "id": "grafana",
+      "name": "Grafana",
+      "version": "10.0.0"
+    },
+    {
+      "type": "datasource",
+      "id": "prometheus",
+      "name": "Prometheus",
+      "version": "1.0.0"
+    },
+    {
+      "type": "datasource",
+      "id": "loki",
+      "name": "Loki",
+      "version": "1.0.0"
+    }
   ],
-  "description": "ClearLedger — Service health, error rates, and auth security metrics. Import at http://grafana.local/dashboard/import",
+  "description": "ClearLedger - Service health, error rates, and auth security metrics. Import at http://grafana.local/dashboard/import",
   "editable": true,
   "graphTooltip": 1,
   "id": null,
   "panels": [
-    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }, "id": 10, "title": "Service Health", "type": "row" },
     {
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 10,
+      "title": "Service Health",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
-          "thresholds": { "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] },
-          "mappings": [{ "type": "value", "options": { "0": { "text": "DOWN" }, "1": { "text": "UP" } } }]
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "DOWN"
+                },
+                "1": {
+                  "text": "UP"
+                }
+              }
+            }
+          ]
         }
       },
-      "gridPos": { "h": 4, "w": 8, "x": 0, "y": 1 },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 0,
+        "y": 1
+      },
       "id": 1,
-      "options": { "colorMode": "background", "textMode": "value_and_name" },
-      "targets": [{ "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "up{namespace=\"clearledger\"}", "legendFormat": "{{pod}}", "refId": "A" }],
+      "options": {
+        "colorMode": "background",
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(kube_pod_status_ready{namespace=\"clearledger\"} == 1)",
+          "legendFormat": "{{pod}}",
+          "refId": "A"
+        }
+      ],
       "title": "Pod Status",
       "type": "stat"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": { "defaults": { "unit": "reqps", "color": { "mode": "palette-classic" }, "custom": { "lineWidth": 2 } } },
-      "gridPos": { "h": 8, "w": 16, "x": 8, "y": 1 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2
+          }
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 16,
+        "x": 8,
+        "y": 1
+      },
       "id": 2,
-      "targets": [{ "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum by (app) (rate(http_requests_total{namespace=\"clearledger\"}[$__rate_interval]))", "legendFormat": "{{app}}", "refId": "A" }],
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (app) (rate(http_requests_total[$__rate_interval]))",
+          "legendFormat": "{{app}}",
+          "refId": "A"
+        }
+      ],
       "title": "Request Rate by Service",
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "fieldConfig": {
         "defaults": {
           "unit": "percentunit",
-          "color": { "mode": "thresholds" },
-          "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 0.01 }, { "color": "red", "value": 0.05 }] }
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.01
+              },
+              {
+                "color": "red",
+                "value": 0.05
+              }
+            ]
+          }
         }
       },
-      "gridPos": { "h": 4, "w": 8, "x": 0, "y": 5 },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 0,
+        "y": 5
+      },
       "id": 3,
-      "options": { "colorMode": "background" },
-      "targets": [{ "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum(rate(http_requests_total{namespace=\"clearledger\",status=~\"5..\"}[$__rate_interval])) / sum(rate(http_requests_total{namespace=\"clearledger\"}[$__rate_interval]))", "refId": "A" }],
+      "options": {
+        "colorMode": "background"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(http_requests_total{status=~\"5..\"}[$__rate_interval])) / sum(rate(http_requests_total[$__rate_interval]))",
+          "refId": "A"
+        }
+      ],
       "title": "Error Rate (5xx)",
       "type": "stat"
     },
-    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 }, "id": 11, "title": "Auth Security", "type": "row" },
     {
-      "datasource": { "type": "loki", "uid": "loki" },
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 5 }, { "color": "red", "value": 20 }] }, "unit": "short" } },
-      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 10 },
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 9
+      },
+      "id": 11,
+      "title": "Auth Security",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 5
+              },
+              {
+                "color": "red",
+                "value": 20
+              }
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 10
+      },
       "id": 4,
-      "options": { "colorMode": "background", "graphMode": "area" },
-      "targets": [{ "datasource": { "type": "loki", "uid": "loki" }, "expr": "sum(count_over_time({namespace=\"clearledger\", app=\"auth-service\"} |= \"Failed login attempt\" [$__range]))", "refId": "A" }],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum(count_over_time({namespace=\"clearledger\", container=\"auth-service\"} |= \"Failed login attempt\" [1h]))",
+          "queryType": "instant",
+          "refId": "A"
+        }
+      ],
       "title": "Failed Login Attempts",
       "type": "stat"
     },
     {
-      "datasource": { "type": "loki", "uid": "loki" },
-      "fieldConfig": { "defaults": { "unit": "short", "color": { "fixedColor": "green", "mode": "fixed" } } },
-      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 10 },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "fixedColor": "green",
+            "mode": "fixed"
+          }
+        }
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 10
+      },
       "id": 5,
-      "options": { "colorMode": "background", "graphMode": "area" },
-      "targets": [{ "datasource": { "type": "loki", "uid": "loki" }, "expr": "sum(count_over_time({namespace=\"clearledger\", app=\"auth-service\"} |= \"User logged in\" [$__range]))", "refId": "A" }],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum(count_over_time({namespace=\"clearledger\", container=\"auth-service\"} |= \"User logged in\" [1h]))",
+          "queryType": "instant",
+          "refId": "A"
+        }
+      ],
       "title": "Successful Logins",
       "type": "stat"
     },
     {
-      "datasource": { "type": "loki", "uid": "loki" },
-      "fieldConfig": { "defaults": { "unit": "short", "color": { "fixedColor": "blue", "mode": "fixed" } } },
-      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 10 },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "fixedColor": "blue",
+            "mode": "fixed"
+          }
+        }
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 10
+      },
       "id": 6,
-      "options": { "colorMode": "background", "graphMode": "area" },
-      "targets": [{ "datasource": { "type": "loki", "uid": "loki" }, "expr": "sum(count_over_time({namespace=\"clearledger\", app=\"ledger-service\"} |= \"Transaction created\" [$__range]))", "refId": "A" }],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum(count_over_time({namespace=\"clearledger\", container=\"ledger-service\"} |= \"Transaction created\" [1h]))",
+          "queryType": "instant",
+          "refId": "A"
+        }
+      ],
       "title": "Transactions Created",
       "type": "stat"
     },
     {
-      "datasource": { "type": "loki", "uid": "loki" },
-      "fieldConfig": { "defaults": { "unit": "short", "color": { "fixedColor": "orange", "mode": "fixed" } } },
-      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 10 },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "fixedColor": "orange",
+            "mode": "fixed"
+          }
+        }
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 10
+      },
       "id": 7,
-      "options": { "colorMode": "background", "graphMode": "area" },
-      "targets": [{ "datasource": { "type": "loki", "uid": "loki" }, "expr": "sum(count_over_time({namespace=\"clearledger\", app=\"ledger-service\"} |= \"large_transaction\" [$__range]))", "refId": "A" }],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum(count_over_time({namespace=\"clearledger\", container=\"ledger-service\"} |= \"large_transaction\" [1h]))",
+          "queryType": "instant",
+          "refId": "A"
+        }
+      ],
       "title": "Large Transaction Alerts Fired",
       "type": "stat"
     },
     {
-      "datasource": { "type": "loki", "uid": "loki" },
-      "fieldConfig": { "defaults": {} },
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 14 },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "fieldConfig": {
+        "defaults": {}
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 14
+      },
       "id": 8,
-      "options": { "dedupStrategy": "none", "showTime": true, "sortOrder": "Descending" },
-      "targets": [{ "datasource": { "type": "loki", "uid": "loki" }, "expr": "{namespace=\"clearledger\", app=\"auth-service\"} |= \"Failed login\"", "refId": "A" }],
+      "options": {
+        "dedupStrategy": "none",
+        "showTime": true,
+        "sortOrder": "Descending"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "{namespace=\"clearledger\", container=\"auth-service\"} |= \"Failed login attempt\"",
+          "refId": "A"
+        }
+      ],
       "title": "Failed Login Log Stream",
       "type": "logs"
     }
   ],
-  "refresh": "30s",
+  "refresh": "5m",
   "schemaVersion": 38,
-  "tags": ["clearledger", "security", "service-health"],
-  "time": { "from": "now-3h", "to": "now" },
+  "tags": [
+    "clearledger",
+    "security",
+    "service-health"
+  ],
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
   "timepicker": {},
   "timezone": "browser",
-  "title": "ClearLedger — Service Health + Auth Security",
+  "title": "ClearLedger - Service Health + Auth Security",
   "uid": "clearledger-service-health",
-  "version": 1
+  "version": 1,
+  "slug": "clearledger-service-health"
 }

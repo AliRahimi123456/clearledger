@@ -1,0 +1,18 @@
+# Stage 8 — CSI: mount clearledger/auth-service from AWS Secrets Manager as files
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: clearledger-auth-service-spc
+  namespace: clearledger
+spec:
+  provider: aws
+  parameters:
+    region: eu-west-1
+    objects: |
+      - objectName: "clearledger/auth-service"
+        objectType: "secretsmanager"
+        jmesPath:
+          - path: database_url
+            objectAlias: database_url
+          - path: jwt_secret
+            objectAlias: jwt_secret

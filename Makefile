@@ -6,7 +6,7 @@
 	open-ui open-argocd open-grafana open-vault open-falco open-litmus \
 	check-0 check-1 check-2 check-3 check-4 check-5 check-6 check-7 check-65 check-75 check-all \
 	demo-6 demo-7 demo-65 fix-65-prereqs fix-argocd push-infra-manifests connect-litmus \
-	runner-status runner-logs
+	runner-status runner-logs doctor reclaim snapshot restore snapshots
 
 .DEFAULT_GOAL := help
 
@@ -25,7 +25,7 @@ help:
 	@echo ""
 	@echo "$(CYAN)Getting started:$(NC)"
 	@echo "  make setup        Provision the Multipass VM and install MicroK8s"
-	@echo "  make stage-0      Open Stage 0 README (start here)"
+	@echo "  make stage-0      Stage 0 README + deploy steps in LAB-GUIDE §0.5"
 	@echo ""
 	@echo "$(CYAN)Stage navigation:$(NC)"
 	@echo "  make stage-0      Raw Kubernetes — the running system"
@@ -37,6 +37,15 @@ help:
 	@echo "  make stage-6      Runtime Security — Falco watches live pods"
 	@echo "  make stage-7      Observability — Grafana security dashboards"
 	@echo "  make stage-8      AWS Migration — same architecture, cloud infra"
+	@echo ""
+	@echo "$(CYAN)Disk health:$(NC)"
+	@echo "  make doctor       VM disk %, PVC usage, Prometheus TSDB — PASS/WARN/FAIL"
+	@echo "  make reclaim      Prune unused images + vacuum journald inside the VM"
+	@echo ""
+	@echo "$(CYAN)Saving progress (Multipass snapshots — requires 1.13+):$(NC)"
+	@echo "  make snapshot STAGE=7   Save VM state after completing a stage"
+	@echo "  make restore STAGE=7    Restore VM to a saved snapshot"
+	@echo "  make snapshots          List saved snapshots"
 	@echo ""
 	@echo "$(CYAN)Health checks:$(NC)"
 	@echo "  make check        Check the current stage (prompts for stage number)"
@@ -81,16 +90,27 @@ setup:
 	@bash scripts/setup-hosts.sh
 	@echo ""
 	@echo "$(GREEN)Setup complete.$(NC)"
-	@echo "Next: make stage-0"
+	@echo ""
+	@echo "You have an empty Kubernetes cluster — the app is NOT deployed yet."
+	@echo "Do NOT run make check-0 until Stage 0 deploy is done."
+	@echo ""
+	@echo "Next:"
+	@echo "  1. docs/LAB-GUIDE.md — Stage 0 (§0.3 build/push, §0.5 deploy)"
+	@echo "  2. export DOCKER_USERNAME=your-dockerhub-username"
+	@echo "  3. LAB-GUIDE §0.5 — six deploy layers (use stage-0 deployments)"
+	@echo "  4. make check-0"
 
 stage-0:
 	@echo "$(CYAN)Stage 0 — Raw Kubernetes$(NC)"
 	@echo "Goal: ClearLedger is running. You deployed it manually."
 	@echo ""
-	@cat stages/stage-0-raw-kubernetes/README.md | head -30
+	@echo "Order:"
+	@echo "  1. Build + push images (LAB-GUIDE §0.3) — Docker Hub repos required"
+	@echo "  2. export DOCKER_USERNAME=your-username"
+	@echo "  3. LAB-GUIDE §0.5 — six deploy layers (stage-0 deployments)"
+	@echo "  4. make check-0  &&  open http://clearledger.local"
 	@echo ""
-	@echo "Full guide: stages/stage-0-raw-kubernetes/README.md"
-	@echo "Lab guide:  docs/LAB-GUIDE.md#stage-0"
+	@echo "Full guide: docs/LAB-GUIDE.md#stage-0--the-running-system"
 
 stage-1:
 	@echo "$(CYAN)Stage 1 — CI Pipeline$(NC)"
@@ -194,8 +214,12 @@ connect-litmus:
 	@bash stages/stage-6.5-chaos-engineering/scripts/connect-litmus-infra.sh
 
 fix-65-prereqs: fix-argocd
+	@echo "$(GREEN)Applying Stage 6 network policies (allow-postgres + app egress)...$(NC)"
+	@kubectl apply -f infra/deferred-by-stage/stage-6-runtime-security/netpol/network-policies.yaml
+	@kubectl rollout status deployment/auth-service -n clearledger --timeout=300s 2>/dev/null || true
+	@kubectl rollout status deployment/ledger-service -n clearledger --timeout=300s 2>/dev/null || true
 
-GITHUB_OWNER ?= Osomudeya
+GITHUB_OWNER ?= YOUR_GITHUB_USERNAME
 INFRA_REPO   ?= https://github.com/$(GITHUB_OWNER)/clearledger-infra.git
 
 # Push canonical manifests to clearledger-infra (Kustomize image tags preserved from Git).
@@ -218,8 +242,6 @@ push-infra-manifests:
 	  done; \
 	fi; \
 	rsync -a --delete \
-	  --exclude='auth-service/secret.yaml' \
-	  --exclude='ledger-service/secret.yaml' \
 	  infra/manifests/ "$$tmp/infra/manifests/"; \
 	if [ -f "$$tmp/saved-kustomization.yaml" ]; then \
 	  cp "$$tmp/saved-kustomization.yaml" "$$tmp/infra/manifests/kustomization.yaml"; \
@@ -319,6 +341,29 @@ runner-status:
 
 runner-logs:
 	@bash scripts/runner-vm-state.sh logs
+
+doctor:
+	@bash scripts/doctor.sh
+
+reclaim:
+	@bash scripts/reclaim-disk.sh
+
+snapshot:
+	@if [ -z "$(STAGE)" ]; then \
+		echo "Usage: make snapshot STAGE=7"; \
+		exit 1; \
+	fi
+	@bash scripts/vm-snapshot.sh snapshot "$(STAGE)"
+
+restore:
+	@if [ -z "$(STAGE)" ]; then \
+		echo "Usage: make restore STAGE=7"; \
+		exit 1; \
+	fi
+	@bash scripts/vm-snapshot.sh restore "$(STAGE)"
+
+snapshots:
+	@bash scripts/vm-snapshot.sh list
 
 aws-up:
 	@echo "$(YELLOW)Provisioning AWS infrastructure...$(NC)"

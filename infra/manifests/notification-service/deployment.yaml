@@ -27,11 +27,12 @@ spec:
         runAsGroup: 1000
       containers:
         - name: notification-service
-          # Replace veeno with your Docker Hub username.
+          # Replace DOCKER_USERNAME with your Docker Hub username.
           # This is updated automatically by the CI pipeline after Stage 1.
-          image: veeno/clearledger-notification-service:v0.1.0
+          image: clearledger/notification-service:gitops
           ports:
-            - containerPort: 8000
+            - name: http
+              containerPort: 8000
           env:
             - name: REDIS_URL
               value: "redis://redis.clearledger.svc.cluster.local:6379"
@@ -55,14 +56,19 @@ spec:
               path: /health
               port: 8000
             initialDelaySeconds: 15
-            periodSeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 5
           readinessProbe:
             httpGet:
               path: /health
               port: 8000
-            initialDelaySeconds: 5
-            periodSeconds: 5
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
           securityContext:
+            runAsNonRoot: true
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities:

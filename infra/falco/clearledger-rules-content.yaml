@@ -7,7 +7,7 @@
     compromised dependency executing arbitrary code.
   condition: >
     spawned_process and container
-    and k8smeta.ns.name = clearledger
+    and (k8smeta.ns.name = clearledger or k8s.ns.name = clearledger)
     and proc.name in (bash, sh, zsh, ash, dash)
   output: >
     CRITICAL: Shell spawned in ClearLedger container
@@ -20,7 +20,7 @@
   desc: A ClearLedger container attempted to read a sensitive system file.
   condition: >
     open_read and container
-    and k8smeta.ns.name = clearledger
+    and (k8smeta.ns.name = clearledger or k8s.ns.name = clearledger)
     and fd.name in (/etc/shadow, /etc/passwd, /etc/sudoers, /root/.ssh/id_rsa)
   output: >
     CRITICAL: Sensitive file read in ClearLedger
@@ -34,7 +34,7 @@
     destination. Could indicate data exfiltration or C2 communication.
   condition: >
     outbound and container
-    and k8smeta.ns.name = clearledger
+    and (k8smeta.ns.name = clearledger or k8s.ns.name = clearledger)
     and not fd.sip.name in (postgres, redis, auth-service, ledger-service)
     and not fd.rip in ("127.0.0.1")
   output: >
@@ -48,7 +48,7 @@
     A process other than vault-agent attempted to write to /vault/secrets.
   condition: >
     open_write and container
-    and k8smeta.ns.name = clearledger
+    and (k8smeta.ns.name = clearledger or k8s.ns.name = clearledger)
     and fd.name startswith "/vault/secrets"
     and not proc.name = "vault"
   output: >
@@ -62,7 +62,7 @@
     A package manager or download tool was run inside a running container.
   condition: >
     spawned_process and container
-    and k8smeta.ns.name = clearledger
+    and (k8smeta.ns.name = clearledger or k8s.ns.name = clearledger)
     and proc.name in (apt, apt-get, pip, pip3, curl, wget, yum, dnf)
   output: >
     WARNING: Package manager executed in running container

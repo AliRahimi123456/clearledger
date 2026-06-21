@@ -10,7 +10,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://github.com/Osomudeya/clearledger-infra.git
+    repoURL: https://github.com/YOUR_GITHUB_USERNAME/clearledger-infra.git
     targetRevision: main
     path: manifests
     # ArgoCD renders kustomization.yaml (image tags live there, not in deployment sed)

@@ -30,7 +30,8 @@ spec:
 
         - alert: FalcoCriticalAlert
           expr: |
-            increase(falco_events_total{priority="CRITICAL"}[5m]) > 0
+            (sum(increase(falcosecurity_falco_rules_matches_total{priority="2"}[5m])) > 0)
+            or (sum(increase(falco_events_total{priority=~"Critical|CRITICAL"}[5m])) > 0)
           for: 0m
           labels:
             severity: critical
@@ -46,7 +47,7 @@ spec:
 
         - alert: FalcoHighAlertSpike
           expr: |
-            increase(falco_events_total{priority="WARNING"}[10m]) > 10
+            sum(increase(falcosecurity_falco_rules_matches_total{priority="4"}[10m])) > 10
           for: 2m
           labels:
             severity: warning
@@ -79,7 +80,7 @@ spec:
 
         - alert: KyvernoHighViolationRate
           expr: |
-            sum(rate(kyverno_policy_results_total{result="fail"}[10m])) > 0.5
+            sum(rate(kyverno_admission_requests_total{request_allowed="false"}[10m])) > 0.5
           for: 5m
           labels:
             severity: warning
@@ -92,11 +93,10 @@ spec:
               Check: kubectl get policyreport -A
 
         - alert: KyvernoCriticalPolicyViolation
-          # Fires if the require-signed-images or disallow-root policies are violated
           expr: |
-            increase(kyverno_policy_results_total{
-              result="fail",
-              policy_name=~"require-signed-images|disallow-root-containers"
+            increase(kyverno_admission_requests_total{
+              request_allowed="false",
+              resource_namespace="clearledger"
             }[5m]) > 0
           for: 0m
           labels:
@@ -111,27 +111,9 @@ spec:
               kubectl get events -n clearledger --sort-by='.lastTimestamp' | tail -20
 
     # ── Auth Service Security ─────────────────────────────────────────────────
-    - name: clearledger.auth.security
-      interval: 60s
-      rules:
-
-        - alert: BruteForceLoginAttempt
-          # Uses Loki recording rule — requires Loki ruler to be enabled
-          # Alternative: use the Grafana alert on the Failed Login panel
-          expr: |
-            sum(count_over_time(
-              {namespace="clearledger", app="auth-service"} |= "Failed login attempt" [5m]
-            )) > 10
-          for: 0m
-          labels:
-            severity: critical
-            team: security
-          annotations:
-            summary: "Possible brute force attack on ClearLedger auth"
-            description: >
-              More than 10 failed login attempts in 5 minutes.
-              Check which IP is originating the requests:
-              kubectl logs -n clearledger -l app=auth-service | grep "Failed login"
+    # NOTE:
+    # Log-based alerts (e.g., "Failed login attempt" from Loki) are configured in Grafana
+    # unified alerting, not as PrometheusRule. PrometheusRule expressions must be PromQL.
 
     # ── Service Health ────────────────────────────────────────────────────────
     - name: clearledger.service.health
@@ -154,11 +136,8 @@ spec:
 
         - alert: ClearLedgerHighErrorRate
           expr: |
-            sum(rate(http_requests_total{
-              namespace="clearledger",
-              status=~"5.."
-            }[5m])) /
-            sum(rate(http_requests_total{namespace="clearledger"}[5m])) > 0.05
+            sum(rate(http_requests_total{status=~"5.."}[5m])) /
+            sum(rate(http_requests_total[5m])) > 0.05
           for: 3m
           labels:
             severity: warning
@@ -166,8 +145,7 @@ spec:
           annotations:
             summary: "ClearLedger error rate above 5%"
             description: >
-              HTTP 5xx error rate is {{ printf "%.1f" (mul $value 100) }}%.
-              Threshold: 5%. Check service logs for root cause.
+              HTTP 5xx error rate exceeded 5% for 3 minutes. Check service logs for root cause.
 
         - alert: ClearLedgerPodRestarting
           expr: |
@@ -241,61 +219,7 @@ spec:
             summary: "Secret rotation overdue (PCI violation)"
             description: "Vault rotation CronJob last run is older than 90 days"
 
-    # ── Kubernetes API Audit Security ─────────────────────────────────────────
-    - name: clearledger.audit.security
-      interval: 60s
-      rules:
-        - alert: UnauthorizedAPIAccess
-          # Loki-derived metric (requires Loki ruler/recording rules in production).
-          # Query intent: response_code 401/403 spikes (>10 in 5 minutes).
-          expr: |
-            sum(count_over_time({job="kubernetes-audit"} | json | response_code=~"401|403" [5m])) > 10
-          for: 0m
-          labels:
-            severity: critical
-            team: security
-          annotations:
-            summary: "Unauthorized API access spike"
-            description: "Someone or something is getting access denied on the API server"
-
-        - alert: SecretAccessedByUnexpectedUser
-          # Fires when a Secret in clearledger namespace is accessed by an unexpected principal.
-          expr: |
-            sum(count_over_time(
-              {job="kubernetes-audit"} | json | namespace="clearledger" | resource="secrets"
-              | user!~"system:serviceaccount:clearledger:.*|system:admin"
-              [5m]
-            )) > 0
-          for: 0m
-          labels:
-            severity: critical
-            team: security
-          annotations:
-            summary: "Secret accessed by unexpected principal"
-            description: "Secret access by unexpected principal — possible credential theft"
-
-        - alert: KubectlExecInProduction
-          # Immediate: exec into a production pod requires incident review.
-          expr: |
-            sum(count_over_time(
-              {job="kubernetes-audit"} | json | namespace="clearledger" | verb="create" | resource="pods" | subresource="exec"
-              [1m]
-            )) > 0
-          for: 0m
-          labels:
-            severity: critical
-            team: security
-          annotations:
-            summary: "kubectl exec used on a clearledger pod"
-            description: "kubectl exec used on a clearledger pod — requires incident review"
-
-        - alert: ResourceDeleted
-          expr: |
-            sum(count_over_time({job="kubernetes-audit"} | json | namespace="clearledger" | verb="delete" [1m])) > 0
-          for: 0m
-          labels:
-            severity: critical
-            team: security
-          annotations:
-            summary: "Resource deleted in clearledger namespace"
-            description: "Resource deleted in production namespace: {{$labels.name}}"
+    # NOTE:
+    # Kubernetes audit log alerting requires a log-to-metric pipeline (e.g., Loki ruler,
+    # Promtail metrics stage, or dedicated audit metrics exporter). Keep these as Grafana
+    # log alerts (or recording rules) instead of PrometheusRule PromQL.

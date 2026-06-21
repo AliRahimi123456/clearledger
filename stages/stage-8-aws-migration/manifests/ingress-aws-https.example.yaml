@@ -1,0 +1,46 @@
+# Stage 8 — optional HTTPS ingress (production add-on; not applied by default)
+# Replace ACM_CERT_ARN with your ACM certificate ARN, then:
+#   kubectl apply -f stages/stage-8-aws-migration/manifests/ingress-aws-https.example.yaml
+#
+# Requires Route53 (or DNS) pointing your domain at the ALB hostname.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: clearledger-ingress
+  namespace: clearledger
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/healthcheck-path: /health
+    alb.ingress.kubernetes.io/certificate-arn: ACM_CERT_ARN
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443},{"HTTP":80}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/load-balancer-name: clearledger
+spec:
+  ingressClassName: alb
+  rules:
+    - host: api.clearledger.example
+      http:
+        paths:
+          - path: /auth
+            pathType: Prefix
+            backend:
+              service:
+                name: auth-service
+                port:
+                  number: 80
+          - path: /ledger
+            pathType: Prefix
+            backend:
+              service:
+                name: ledger-service
+                port:
+                  number: 80
+          - path: /notifications
+            pathType: Prefix
+            backend:
+              service:
+                name: notification-service
+                port:
+                  number: 80

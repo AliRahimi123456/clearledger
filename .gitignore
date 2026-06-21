@@ -8,6 +8,7 @@ infra/cosign.pub
 # Environment files with local credentials
 .env
 *.env.local
+scripts/setup-cluster.local.env
 
 # Python
 __pycache__/

@@ -143,7 +143,7 @@ check_platform_stability() {
 
   case "$stage" in
     7|7.5|75|8|all)
-      check_node_load 12
+      check_node_load 18
       if kubectl get namespace monitoring &>/dev/null; then
         check_max_restarts monitoring "app.kubernetes.io/name=kube-prometheus-stack-operator" 10 "Prometheus operator"
         check_max_restarts monitoring "app.kubernetes.io/name=loki" 5 "Loki"
@@ -432,11 +432,25 @@ check_stage_2() {
     if [ "$health_status" = "Healthy" ]; then
       pass "ArgoCD health status: Healthy"
     else
-      warn "ArgoCD health status: $health_status (expected: Healthy)"
+      fail "ArgoCD health status: $health_status (expected: Healthy) — fix red pods before Stage 3"
     fi
   else
     fail "ArgoCD Application 'clearledger' not found — apply infra/argocd/clearledger-app.yaml"
   fi
+
+  # Auth/ledger must be running (secretKeyRef until Stage 5)
+  for deploy in auth-service ledger-service; do
+    local ready desired
+    ready=$(kubectl get deployment "$deploy" -n clearledger \
+      -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+    desired=$(kubectl get deployment "$deploy" -n clearledger \
+      -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "2")
+    if [ "${ready:-0}" -ge "${desired:-2}" ] && [ "${ready:-0}" -gt 0 ]; then
+      pass "$deploy ready ($ready/$desired)"
+    else
+      fail "$deploy not ready ($ready/$desired) — check secrets in clearledger-infra and ArgoCD sync"
+    fi
+  done
 
   # Prove selfHeal is enabled
   local self_heal

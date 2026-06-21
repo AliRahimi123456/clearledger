@@ -42,25 +42,107 @@ The app is the vehicle. DevSecOps is the destination.
 
 **When something breaks, read the error.** The troubleshooting section at the end covers every common failure. Getting stuck and debugging is part of the learning — employers want to hear "I hit X error and fixed it by doing Y."
 
-**Take screenshots.** Every aha-moment section tells you to. These become your portfolio evidence. A screenshot of Kyverno blocking a root container or Falco catching a shell exec is worth more than a paragraph on your CV.
+**Take screenshots.** Every crazy moment section tells you to. These become your portfolio evidence. A screenshot of Kyverno blocking a root container or Falco catching a shell exec is worth more than a paragraph on your CV.
 
 **Estimated time:** Stages 0–2 take a full day each. Stages 3–7 take half a day each. Stage 8 takes a few hours. That is normal. Do not rush.
 
-**After every stage (authors and learners):** run the health check, then scan restart counts. A pod can be `Running` while crash-looping — high `RESTARTS` on platform pods (Kyverno, `hostpath-provisioner`, Prometheus operator) means the node is heading into a failure cascade. **Do not start the next stage until both checks look healthy.**
+**Do not read this whole file upfront.** Open one stage at a time. Start with [QUICKSTART.md](../QUICKSTART.md) if you want the shortest path to a running cluster.
+
+**After every stage:** run `make check-N`, then `make snapshot STAGE=N` and `make snapshots` to confirm the checkpoint exists — see [Saving your progress](#saving-your-progress). From Stage 4 onward, also check platform pod restart counts — see the **Am I ready?** box at the start of each stage.
+
+### The checkpoint rule (read this once)
+
+Every major section ends with a **✋ Hands-on checkpoint**. That is not optional, its how you avoid the silent failures that make learners quit.
+
+**You do this yourself:**
+
+1. Run the command in your terminal (copy-paste is fine).
+2. Compare your output to **Expected** — character for character where it matters.
+3. If it does not match, fix it **in this stage** before continuing. Do not “hope Stage 2 fixes it.”
+4. When `make check-N` passes: `make snapshot STAGE=N`, then `make snapshots` — advance only after you see `clearledger.stageN` in the list.
+
+**You never:**
+
+- Skip a checkpoint because `make check-N` passed last time
+- Advance without confirming your snapshot landed (`make snapshots` must show `clearledger.stageN`)
+- Run `make restore` without `make snapshots` first — list what you can roll back to, then pick the stage
+- Type `your-username` or `YOUR_USERNAME` literally — replace with your real Docker Hub / GitHub username
+- Run runner commands on your Mac host (prompt must show `ubuntu@clearledger`)
+
+If you are stuck for more than 15 minutes on one checkpoint, open [troubleshooting.md](troubleshooting.md) for that stage — the fix is manual, not a hidden script.
+
+### Saving your progress
+
+**Snapshots need Multipass.** `make snapshot` and `make restore` only work when your cluster runs inside a Multipass VM (the default macOS path). If you run MicroK8s directly on Linux without Multipass, there is no `make snapshot` — use Path B below (`make teardown && make setup` and re-walk stages) or your own VM/LVM snapshots.
+
+This lab takes days. Your **source code lives on your host** in the Git repo — a broken or deleted VM never loses your commits, manifests, or local config. What you can lose is **cluster state** inside the VM (deployed pods, Vault secrets, in-cluster Grafana work).
+
+**Three commands, two moments.** Snapshots bracket the risky parts of a multi-day run: confirm right after you create one, list again before you restore.
+
+| Moment | When | What to run |
+|---|---|---|
+| **Save** | `make check-N` passes | `make snapshot STAGE=N` → `make snapshots` |
+| **Recover** | VM sick; you need to roll back | `make snapshots` → `make restore STAGE=N` |
+
+**After each stage** — save and confirm before you advance:
 
 ```bash
-bash scripts/health-check.sh <stage>    # e.g. 4, 7, 7.5
+make snapshot STAGE=7
+make snapshots    # must show clearledger.stage7 — do not skip
 ```
 
-The script ends with a **Platform stability** section. Also inspect the highest restart counts yourself:
+**Why confirm?** On Multipass older than 1.13, `make snapshot` prints a warning and exits without error. Listing is the only proof the checkpoint exists. Requires Multipass 1.13+ — check with `multipass version` (`brew upgrade --cask multipass` on macOS).
+
+**If the VM goes bad at any stage** (disk full, Loki crash-loop, API timeouts, corrupt cluster — common around Stage 7):
+
+| What survives | What you lose inside the VM |
+|---|---|
+| This Git repo, your commits, `.env`, `setup-cluster.local.env` | Running pods, Vault KV, Postgres data, Grafana/Loki state |
+| **`clearledger-infra` on GitHub** — do not delete it; ArgoCD will sync again after recovery | Anything not snapshotted since your last `make check-N` |
+
+**Path A — you saved a snapshot** (recommended):
 
 ```bash
-kubectl get pods -A --sort-by='.status.containerStatuses[0].restartCount' \
-  -o custom-columns='NS:.metadata.namespace,NAME:.metadata.name,RESTARTS:.status.containerStatuses[0].restartCount' \
-  | tail -15
+make snapshots                              # list first — which clearledger.stageN exist?
+make restore STAGE=6                        # pick the newest good stage before the blow-up
+export KUBECONFIG=~/.kube/clearledger-config
+bash scripts/ensure-kubeconfig.sh           # if kubectl cannot reach the cluster
+make check-6                                # confirm before continuing
 ```
 
-**Gate before the next stage:** platform pods (especially Kyverno controllers) should show **RESTARTS under 5** after the stage settles (~10 minutes). If any platform pod is climbing past 10, stop — fix it with the documented Helm values or troubleshooting steps. Do not `kubectl patch` around it.
+`make restore` is **destructive** — it discards the broken VM state and replaces it with the snapshot. You do **not** need `make teardown` first. Use `STAGE=65` or `STAGE=75` if you snapshot optional stages.
+
+**Path B — no snapshot** (slower, still fine):
+
+```bash
+make teardown && make setup
+export KUBECONFIG=~/.kube/clearledger-config
+```
+
+Then **re-walk stages on the VM** from where you need to be (empty cluster after `make setup` — not “Stage 7 only”). Your **`clearledger-infra` repo stays**; re-install platform pieces (ArgoCD, Kyverno, Vault, Falco, observability) per the LAB-GUIDE for each stage. Re-seed Vault in Stage 5 if you had passed it.
+
+**Path C — disk pressure but cluster still responds:**
+
+```bash
+make doctor
+make reclaim          # if WARN/FAIL — see [Disk health](#disk-health-long-running-lab-vm)
+```
+
+If reclaim does not help → Path A or Path B.
+
+---
+
+## Choose your path
+
+Pick **one** path from your **host RAM** before you provision a cluster. Switching mid-lab after OOM kills or disk pressure wastes a day — choose upfront.
+
+| Your situation | Path | What you get |
+|---|---|---|
+| **8 GB RAM**, or unsure this laptop can carry the lab | **Docker Compose first** (no Kubernetes) | The real app: register, post a transaction, see the compliance alert fire. Then decide on a cluster. → `make integration-up` · [Local integration stack](#local-integration-stack--app-first-on-ramp) |
+| **16 GB RAM** on the host | **Lite local cluster** (Stages **0–5**) | CV core on one VM: Kubernetes, CI/CD, GitOps, security gates, admission control, Vault. Use `scripts/setup-cluster.lite.env` with `make setup` (file added separately — smaller VM footprint). |
+| **Under 16 GB** host RAM **and** you need Kubernetes, **or** you want **all 8 stages** | **Cloud VM** | Provision a remote machine (4–8 vCPU, 16–32 GB RAM), clone the repo, run the lab there, `make teardown` when done. Stages **6.5 / 7 / 7.5** (chaos + full observability) need **24 GB** on the host — use this path if your laptop cannot spare that. |
+
+The default path in this guide assumes **24 GB+ RAM** and the full local VM ([Before You Start](#before-you-start)). If that is not you, start from the row that matches your machine — not from `make setup` by reflex.
 
 ---
 
@@ -82,16 +164,27 @@ By Stage 7, add:
 
 > Implemented runtime threat detection (Falco), secrets management (HashiCorp Vault), network segmentation, chaos engineering (LitmusChaos), and security observability dashboards (Prometheus, Grafana, Loki) with DORA metrics tracking.
 
-These are not buzzwords. You built every one of them. The screenshots prove it.
+These are not buzzwords anymore because you built every one of them. The screenshots prove it.
 
 ---
 
 ## Before You Start
 
+> **Tested path:** This lab is built and checked on **macOS with Multipass**. You can finish it on Linux or Windows too — see the box below — but the supported, step-by-step path is Mac + Multipass.
+
+> **Linux and Windows — read this first**
+>
+> - **Linux (MicroK8s on the host, no Multipass):** Commands like `make setup`, `multipass exec`, and `multipass info` do not apply. Run `*-inside-vm` scripts on the host instead (for example `bash scripts/configure-vm-network.sh --inside-vm`). **`make snapshot` / `make restore` do not exist** on bare-metal MicroK8s — your recovery is `make teardown && make setup` plus re-walking stages (Path B in [Saving your progress](#saving-your-progress)), or a snapshot you take yourself at the VM/hypervisor level.
+> - **Windows:** Run the **whole lab inside WSL2 Ubuntu**. The `make` targets and `scripts/*.sh` files need bash — PowerShell cannot run them. Multipass on Windows (Hyper-V) is **not tested**; use WSL2.
+> - **DNS fix for CI builds:** `scripts/configure-vm-network.sh` runs on whatever host has MicroK8s and Docker. On Mac it goes through Multipass automatically; on Linux/WSL2 run `bash scripts/configure-vm-network.sh --inside-vm` on that host. See [troubleshooting.md — CI DNS](troubleshooting.md#ci-build-fails-dns-server-misbehaving-or-could-not-resolve-host).
+
+**Opening URLs in your browser:** macOS → `open http://grafana.local` · Linux/WSL2 → `xdg-open http://grafana.local`
+
 ### System requirements
 
-- 16 GB RAM minimum (the VM needs 8 GB reserved)
-- 60 GB free disk space
+- **24 GB RAM minimum** (the VM needs 12 GB reserved; 32 GB+ recommended for Stages 7–7.5)
+- **6 CPU cores minimum** on the host (the VM uses 6 by default; 8 if you use `setup-cluster.local.env`)
+- **80 GB free disk space** on your host for the full lab through Stages 7–7.5 (`make setup` provisions an 80 GB VM disk by default). **60 GB is enough** if you plan to stop after Stage 4 — you will not need the extra room until the observability and tracing stacks in Stages 7–7.5. Those stages pull several large container images and retain metrics/logs on disk; the default VM size accounts for that so you are not resizing mid-lab. If you keep the VM running for days between sessions, run **`make doctor`** weekly — see [Disk health (long-running lab VM)](#disk-health-long-running-lab-vm).
 - macOS, Linux (Ubuntu 20.04+), or Windows 10/11
 
 ### Install on your host machine
@@ -104,7 +197,7 @@ These are not buzzwords. You built every one of them. The screenshots prove it.
 | Docker Desktop | Builds container images on your machine | [docker.com](https://docs.docker.com/desktop/) | [docker.com](https://docs.docker.com/engine/install/) | [docker.com](https://docs.docker.com/desktop/) |
 | jq | Formats JSON output so you can read it | `brew install jq` | `sudo apt install jq` | `winget install jqlang.jq` |
 
-> **Windows:** use Git Bash or WSL2 for bash commands. Multipass and kubectl work in PowerShell natively.
+> **Windows:** Run everything inside **WSL2 Ubuntu**. PowerShell cannot run `make` or the bash scripts under `scripts/`. Do not use PowerShell for lab commands.
 
 Verify everything before continuing:
 
@@ -142,9 +235,78 @@ make stage-0  # opens Stage 0 and shows what you're building
 
 ---
 
-## Optional — Local integration stack (no Kubernetes)
+## Disk health (long-running lab VM)
 
-This is **not a numbered stage**. It is a shortcut to run the same three APIs plus the web UI on your laptop with Docker only — useful before the VM is ready, for frontend checks, or to reproduce UI bugs without `kubectl`.
+The lab runs on a **single-node MicroK8s VM** with a fixed disk (80 GB by default). Over days or weeks — especially after CI builds, Helm upgrades, and Stage 7 observability — container images, logs, and journald can fill the root filesystem. Pods then fail with `Evicted`, `ImagePullBackOff`, or mysterious `Pending` states that look like app bugs.
+
+`make setup` applies **preventive caps** automatically (idempotent — safe to re-run on a fresh VM):
+
+| Layer | Setting | Effect |
+|---|---|---|
+| Kubelet | `--container-log-max-size=10Mi`, `--container-log-max-files=3` | Rotates container logs instead of growing without bound |
+| Kubelet | `--image-gc-high-threshold=80`, `--image-gc-low-threshold=60` | Garbage-collects unused images when disk use crosses 80% |
+| journald | `SystemMaxUse=300M` in `/etc/systemd/journald.conf` | Caps systemd logs inside the VM |
+
+Configured in [`scripts/setup-cluster.sh`](../scripts/setup-cluster.sh) immediately after MicroK8s is enabled.
+
+### Commands
+
+```bash
+make doctor    # report only — VM disk %, top PVC namespaces, Prometheus TSDB size
+make reclaim   # reclaim safe cruft inside the VM (see below)
+```
+
+**`make doctor`** prints a **PASS / WARN / FAIL** verdict:
+
+| Verdict | Root disk used | Action |
+|---|---|---|
+| **PASS** | under 75% | No action needed |
+| **WARN** | 75–89% | Run `make reclaim`; plan to finish heavy stages or tear down soon |
+| **FAIL** | 90%+ | Run `make reclaim` immediately; if still FAIL, tear down and `make setup` |
+
+On WARN or FAIL, doctor prints: `Hint: run make reclaim`.
+
+**`make reclaim`** runs **inside the VM** and only touches safe targets:
+
+- Prunes **unused** container images (`microk8s ctr` — images still referenced by running pods are kept)
+- Vacuums journald down to **200M**
+- Prints **before/after** `df` for `/`
+
+It does **not** delete PVCs, Prometheus TSDB blocks, or any workload data.
+
+### When to use
+
+| Situation | Command |
+|---|---|
+| VM left running for several days between lab sessions | `make doctor` |
+| Before Stage 7 (Prometheus + Loki are disk-heavy) | `make doctor` — reclaim if WARN/FAIL |
+| After many Stage 1 CI runs (new images accumulate on the runner) | `make doctor` then `make reclaim` if needed |
+| Pods `Evicted` or node reports disk pressure | `make doctor` then `make reclaim` |
+| Doctor shows **WARN** or **FAIL** | `make reclaim` |
+
+### When **not** to use
+
+| Situation | Why |
+|---|---|
+| Doctor shows **PASS** | Reclaim frees little; unnecessary churn |
+| You expect reclaim to shrink **PVC / Postgres / Prometheus metrics** | Reclaim never touches PVCs or TSDB — only images and journald |
+| You are mid-checkpoint and have not read the error yet | Evicted pods may be a **disk** problem, but confirm with `make doctor` before assuming |
+| You need a **clean slate** | `make teardown` then `make setup` — reclaim is for keeping a long-running VM alive, not resetting the lab |
+| VM broken but you have a snapshot | `make snapshots` then `make restore STAGE=N` — see [Saving your progress](#saving-your-progress) |
+
+### VM created before disk-safety was added
+
+If your VM predates this feature, `make doctor` and `make reclaim` still work. Kubelet and journald caps are applied only on **`make setup`** (new VM). To add caps to an **existing** VM without rebuilding, re-run the disk-safety block from [`scripts/setup-cluster.sh`](../scripts/setup-cluster.sh) (the `DISKSAFETY` heredoc after MicroK8s enable) — it is idempotent. Alternatively: `make teardown` and `make setup` for a fresh 80 GB VM.
+
+More detail: [troubleshooting.md — VM disk full](troubleshooting.md#vm-disk-full-or-nearly-full).
+
+---
+
+## Local integration stack — app-first on-ramp
+
+**Start here if you chose the 8 GB path** in [Choose your path](#choose-your-path) — or anytime you want to learn the app before Multipass and MicroK8s. Same three APIs plus the web UI on your laptop with Docker only; no `kubectl`, no VM, no ingress setup. This is the official low-resource entry to ClearLedger, not a side quest.
+
+This is **not a numbered stage**. When you are ready for Kubernetes, continue at [Stage 0](#stage-0--the-running-system) or return here between cluster sessions to sanity-check the UI.
 
 | | Local stack | Main lab (Stage 0+) |
 |---|---|---|
@@ -159,8 +321,8 @@ This is **not a numbered stage**. It is a shortcut to run the same three APIs pl
 docker compose -f docker-compose.integration.yml up --build -d
 
 # Open the UI
-open http://localhost:3000    # macOS
-# Linux: xdg-open http://localhost:3000
+# macOS:        open http://localhost:3000
+# Linux/WSL2:   xdg-open http://localhost:3000
 
 # Automated API + UI checks (12 assertions)
 bash scripts/test-frontend-integration.sh
@@ -201,6 +363,8 @@ When you continue the main lab, deploy to Kubernetes as in Stage 0 and use **cle
 `make setup` handles this automatically — it runs `scripts/setup-hosts.sh` which adds all six domain entries to `/etc/hosts` for you. You only need this section if you skipped `make setup` and provisioned the VM manually (Step 0.1).
 
 **Why these entries exist:** Kubernetes routes traffic based on the hostname in the URL. When your browser requests `clearledger.local`, it reaches the VM, and the Ingress controller inside the cluster decides which service to forward the request to. Without the `/etc/hosts` entry, your machine does not know that `clearledger.local` means "the VM's IP address."
+
+**Six names in `/etc/hosts`, but you won't see all six in `ingress.yaml`.** That confuses almost everyone the first time they open the file. `make setup` adds six hostnames, yet Stage 0's Ingress only mentions `clearledger.local` — and that's correct. The ClearLedger app does not get a separate hostname per service. There is no `auth.local` or `ledger.local`. All four app services share one address; the bit after the hostname (`/auth`, `/ledger`, `/notifications`, or `/` for the UI) tells Ingress which backend to use. The other names — `argocd.local`, `grafana.local`, `vault.local`, `falco.local`, `litmus.local` — are for platform tools you'll install in later stages. Each of those gets its own Ingress when you get there. They don't belong in this file.
 
 <details>
 <summary>Manual setup (only if you did not run <code>make setup</code>)</summary>
@@ -243,6 +407,15 @@ $ip = "PASTE_VM_IP_HERE"
 
 **Goal:** ClearLedger is running on Kubernetes. You deployed everything by hand. You can register a user, create a transaction, and see a compliance alert fire. No automation exists yet. That is intentional — you need to feel what manual operations actually cost before you understand why every subsequent stage exists.
 
+> **Am I ready for Stage 0?**
+>
+> - [ ] Host meets [system requirements](#before-you-start) (24 GB+ RAM recommended)
+> - [ ] `multipass`, `kubectl`, `helm`, `docker`, and `jq` installed and verified
+> - [ ] Docker Desktop running (needed later for image builds)
+>
+> **Done when:** `make check-0` passes and `http://clearledger.local` shows the login screen.
+> **Then save:** `make snapshot STAGE=0` → `make snapshots` (confirm `clearledger.stage0`).
+
 ---
 
 ### 0.1 — Provision the cluster
@@ -251,20 +424,44 @@ $ip = "PASTE_VM_IP_HERE"
 
 **Multipass** creates lightweight Ubuntu VMs. **MicroK8s** is a minimal Kubernetes distribution that runs inside that VM. Together they give you a real cluster without needing cloud resources.
 
+**Recommended — one command (do this):**
+
+```bash
+make setup
+export KUBECONFIG=~/.kube/clearledger-config
+kubectl get nodes
+```
+
+Expected:
+
+```
+NAME          STATUS   ROLES    AGE   VERSION
+clearledger   Ready    <none>   2m    v1.29.x
+```
+
+`make setup` runs `scripts/setup-cluster.sh` (VM + MicroK8s + disk-safety caps) and `scripts/setup-hosts.sh` (`/etc/hosts` entries). Takes 3–5 minutes.
+
+Disk-safety (log rotation, image GC thresholds, journald cap) is configured automatically — see [Disk health](#disk-health-long-running-lab-vm). After the cluster has been up for a while, run `make doctor` before Stage 7.
+
+If STATUS is `NotReady`, wait 60 seconds and try again.
+
+<details>
+<summary>Manual setup (only if <code>make setup</code> failed and you need to debug step by step)</summary>
+
 ```bash
 multipass launch \
   --name clearledger \
-  --cpus 4 --memory 8G --disk 50G \
+  --cpus 6 --memory 12G --disk 80G \
   22.04
 ```
 
-Get the VM IP (you will need it if you are setting up `/etc/hosts` manually):
+Get the VM IP (needed for `/etc/hosts`):
 
 ```bash
 multipass info clearledger | grep IPv4
 ```
 
-> If you used `make setup`, the hosts file is already configured. If you are provisioning manually, add the `/etc/hosts` entries now — see the "Domain Names" section above.
+Add hosts entries — see the [Domain Names](#domain-names) section above, or run `sudo bash scripts/setup-hosts.sh`.
 
 ```bash
 multipass shell clearledger
@@ -280,30 +477,18 @@ echo "alias kubectl='microk8s kubectl'" >> ~/.bashrc
 echo "alias helm='microk8s helm3'" >> ~/.bashrc
 source ~/.bashrc
 kubectl get nodes
-```
-
-Expected:
-
-```
-NAME          STATUS   ROLES    AGE   VERSION
-clearledger   Ready    <none>   2m    v1.29.x
-```
-
-If STATUS is `NotReady`, wait 60 seconds and try again. MicroK8s takes a moment to finish starting its internal services.
-
-```bash
 exit   # back to your host machine
 ```
 
-Connect kubectl from your host so you can manage the cluster without SSH-ing into the VM every time:
+Connect kubectl from your host:
 
 ```bash
 multipass exec clearledger -- microk8s config > ~/.kube/clearledger-config
 export KUBECONFIG=~/.kube/clearledger-config
-kubectl get nodes   # should show Ready
+kubectl get nodes
 ```
 
-Or run `make setup` to automate 0.1 and `/etc/hosts` in one step.
+</details>
 
 ---
 
@@ -356,8 +541,23 @@ docker login
 Build and push all four services:
 
 ```bash
-DOCKER_USERNAME=your-username   # replace with your actual username
+# Replace your-username with your Docker Hub username — the same string everywhere in this lab
+export DOCKER_USERNAME=your-username
+echo "Using DOCKER_USERNAME=$DOCKER_USERNAME"
+```
 
+**✋ Hands-on checkpoint — Docker Hub username**
+
+```bash
+# Must print your real username, not the literal text "your-username"
+echo "$DOCKER_USERNAME"
+```
+
+Expected: one line with your Docker Hub name (e.g. `$DOCKER_USERNAME`). If you see `your-username`, stop and fix `export` before building.
+
+Build and push all four services:
+
+```bash
 docker build -t $DOCKER_USERNAME/clearledger-auth-service:v0.1.0 ./app/auth-service
 docker build -t $DOCKER_USERNAME/clearledger-ledger-service:v0.1.0 ./app/ledger-service
 docker build -t $DOCKER_USERNAME/clearledger-notification-service:v0.1.0 ./app/notification-service
@@ -369,7 +569,17 @@ docker push $DOCKER_USERNAME/clearledger-notification-service:v0.1.0
 docker push $DOCKER_USERNAME/clearledger-frontend:v0.1.0
 ```
 
-Verify on hub.docker.com — four repos, each showing `v0.1.0`. If a push failed, re-run that specific push.
+**✋ Hands-on checkpoint — images on Docker Hub**
+
+1. Open hub.docker.com → your profile → **Repositories**.
+2. Confirm all four `clearledger-*` repos exist and each shows tag **`v0.1.0`**.
+3. On your laptop, run:
+
+```bash
+docker pull $DOCKER_USERNAME/clearledger-auth-service:v0.1.0
+```
+
+Expected: `Status: Downloaded newer image` or `Image is up to date` — not `repository does not exist` or `denied`.
 
 ---
 
@@ -383,8 +593,9 @@ Verify on hub.docker.com — four repos, each showing `v0.1.0`. If a push failed
 | [`infra/manifests/rbac/rbac.yaml`](../infra/manifests/rbac/rbac.yaml) | Security permissions — who is allowed to do what inside the cluster (explained below) |
 | [`infra/manifests/postgres/`](../infra/manifests/postgres/) | Postgres StatefulSet — note `runAsUser: 70` (the postgres user in Alpine, not root) |
 | [`infra/manifests/redis/redis.yaml`](../infra/manifests/redis/redis.yaml) | Redis Deployment — used as a message bus for notifications |
-| [`infra/manifests/auth-service/`](../infra/manifests/auth-service/) | Deployment, Service, Secret |
-| [`infra/manifests/frontend/deployment.yaml`](../infra/manifests/frontend/deployment.yaml) | nginx serving the SPA |
+| [`infra/manifests/auth-service/`](../infra/manifests/auth-service/) | Service + Secret (Stage 0). **Deployment for Stage 0** is under [`stages/stage-0-raw-kubernetes/infra/manifests/`](../stages/stage-0-raw-kubernetes/infra/manifests/) — see §0.5 |
+| [`infra/manifests/ledger-service/`](../infra/manifests/ledger-service/) | Same pattern as auth-service |
+| [`infra/manifests/frontend/deployment.yaml`](../infra/manifests/frontend/deployment.yaml) | Stage 0: use [`stages/stage-0-raw-kubernetes/infra/manifests/frontend/`](../stages/stage-0-raw-kubernetes/infra/manifests/frontend/deployment.yaml) |
 | [`infra/manifests/ingress.yaml`](../infra/manifests/ingress.yaml) | Routes external traffic to the correct service based on the URL path |
 
 **About the Ingress file:** this is where most beginners get confused, so read this carefully.
@@ -404,6 +615,8 @@ clearledger.local/ledger/balance → path starts with /ledger  →  ledger-servi
 clearledger.local/notifications/alerts → path starts with /notifications → notification-service
 ```
 
+Notice every row uses the same hostname. When you open [`infra/manifests/ingress.yaml`](../infra/manifests/ingress.yaml), you'll only see `clearledger.local` listed twice — not four different hosts. That's intentional: one front door, and the path decides where the request goes. If you're looking for `auth.local` or wondering where `grafana.local` went, you're in the right place to be confused — those other `/etc/hosts` names are for tools you'll set up in later stages, each with its own Ingress manifest. This file is just the ClearLedger app.
+
 The Ingress also **strips the prefix** before forwarding. So when your browser requests `/auth/login`, the Ingress removes `/auth` and sends just `/login` to auth-service. This is called a **rewrite**. The backend services do not know about the prefix — they only see their own routes (`/login`, `/register`, `/health`, etc.).
 
 Open [`infra/manifests/ingress.yaml`](../infra/manifests/ingress.yaml) and read the comments. The file creates two Ingress resources:
@@ -415,59 +628,296 @@ Why two instead of one? The API services need the prefix stripped (rewrite). The
 
 The nginx Ingress controller (which MicroK8s provides via `microk8s enable ingress`) merges both resources internally. It serves them from a single entry point but applies the correct rules to each path.
 
-**About the RBAC file:** RBAC stands for Role-Based Access Control. It answers the question "who is allowed to do what inside the cluster?" Open `infra/manifests/rbac/rbac.yaml` — the comments at the top walk through every section. The short version:
+**About the RBAC file — the next layer after Ingress.** Ingress answered a question about *outside* traffic: when someone hits `clearledger.local`, which service gets the request? RBAC answers a different question about *inside* the cluster: when a pod (or a person with `kubectl`) talks to the Kubernetes API, what is it allowed to do?
 
-- Each service gets its own **ServiceAccount** (an identity card — Kubernetes knows which app is making a request)
-- Each ServiceAccount gets a **Role** with minimal permissions (auth-service can look up service addresses, but cannot read secrets or delete anything)
-- A **RoleBinding** connects the identity to the permissions (without it, the role exists but nobody uses it)
-- A **viewer** account can see pods and services but never secrets — useful for monitoring and debugging
-- The `default` ServiceAccount gets a role with **zero permissions** — so if someone forgets to assign a ServiceAccount to a pod, it cannot do anything
+You don't need RBAC to get the app running in §0.5 — but you do need to understand it before you apply manifests blindly. Open [`infra/manifests/rbac/rbac.yaml`](../infra/manifests/rbac/rbac.yaml); the comments at the top mirror the walkthrough below.
 
-This is called **least privilege**: every app gets the minimum access it needs to function, nothing more. If auth-service is compromised, the attacker cannot read secrets or access other services through the Kubernetes API.
+**Step 1 — Give each app an identity.** Every pod runs as a **ServiceAccount**. Think of it as an ID badge: when auth-service calls the Kubernetes API, the cluster knows *which* app is asking, not just "some pod in clearledger."
+
+**Step 2 — Define what that identity may do.** A **Role** is a short list of allowed actions — for example, auth-service may `get` and `list` **Endpoints** (internal service addresses) so it can discover where Postgres lives. It may *not* read Secrets, delete pods, or touch other namespaces. That's **least privilege**: only the permissions the app actually needs.
+
+**Step 3 — Attach the permissions to the identity.** A **RoleBinding** connects a ServiceAccount to a Role. Without the binding, the Role exists but nobody wears it — the app would still run on the default account with whatever that account allows.
+
+**Step 4 — Separate humans from apps.** The file also defines a **viewer** ServiceAccount: enough access to inspect pods and services for debugging, but no Secret access. Useful when you want someone (or a monitoring tool) to look around without handing them the keys.
+
+**Step 5 — Lock down the default.** If a Deployment forgets to set `serviceAccountName`, the pod falls back to the namespace's **default** ServiceAccount. Here, that account is deliberately given **zero** permissions — so a misconfigured pod can't accidentally inherit broad cluster access.
+
+Why bother? If auth-service were compromised, an attacker with a over-privileged ServiceAccount could read Secrets or poke at other workloads through the API. Tight RBAC limits the blast radius to what that one app was ever allowed to do.
+
+**Two manifest trees — read this before §0.5:**
+
+| Path | When you use it | Secret pattern |
+|---|---|---|
+| [`stages/stage-0-raw-kubernetes/infra/manifests/`](../stages/stage-0-raw-kubernetes/infra/manifests/) | **Stage 0 manual deploy** (now) | `secretKeyRef` → Kubernetes Secrets |
+| [`infra/manifests/`](../infra/manifests/) | **Stage 2–4 GitOps** (ArgoCD / CI) | `secretKeyRef` → Kubernetes Secrets (same as Stage 0) |
+| [`stages/stage-5-secrets-management/infra/manifests/`](../stages/stage-5-secrets-management/infra/manifests/) | **Stage 5 GitOps upgrade** | Vault agent injection — copy into `infra/manifests/` at Stage 5 only |
+
+Stage 0 always uses the **stage-0** deployment files. `infra/manifests/*/deployment.yaml` uses `secretKeyRef` until Stage 5 — safe for ArgoCD from Stage 2 onward. Do **not** sync Vault deployments before Vault is installed (Stage 5 §5.4).
 
 ---
 
-### 0.5 — Deploy everything
+### 0.5 — Deploy ClearLedger (layer by layer)
 
-First, update the image references with your Docker Hub username:
+Deploy in **six layers**. Finish each layer before starting the next. Run `kubectl get pods -n clearledger` after layers 2, 3, and 6 to confirm progress.
+
+**Prerequisite:** `export DOCKER_USERNAME=your-username` from §0.3 (must match the images you pushed).
+
+Set a short path variable for the Stage 0 deployment files:
 
 ```bash
-# macOS
-sed -i '' "s|DOCKER_USERNAME|$DOCKER_USERNAME|g" \
-  infra/manifests/auth-service/deployment.yaml \
-  infra/manifests/ledger-service/deployment.yaml \
-  infra/manifests/notification-service/deployment.yaml \
-  infra/manifests/frontend/deployment.yaml
-
-# Linux: use sed -i without the empty string after -i
+export DOCKER_USERNAME=your-username   # skip if already set in §0.3
+STAGE0=stages/stage-0-raw-kubernetes/infra/manifests
 ```
 
-> Do not commit this change. From Stage 1 onwards CI manages image tags automatically.
+---
 
-Deploy in dependency order. Postgres must be running before the app services start, because they need the database connection:
+#### 0.5.1 — Layer 1: Namespace and RBAC
+
+Nothing else can be created until the namespace exists. RBAC must exist before workloads reference ServiceAccounts.
 
 ```bash
 kubectl apply -f infra/manifests/namespace.yaml
 kubectl apply -f infra/manifests/rbac/rbac.yaml
+```
+
+**Verify:**
+
+```bash
+kubectl get namespace clearledger
+kubectl get serviceaccount -n clearledger
+# Expected: auth-service, ledger-service, notification-service, clearledger-viewer
+```
+
+---
+
+#### 0.5.2 — Layer 2: PostgreSQL
+
+The database must be running before auth-service or ledger-service start — both services connect to Postgres on startup to run migrations and serve requests, and they will crash-loop if the database is not there yet.
+
+```bash
 kubectl apply -f infra/manifests/postgres/postgres-secret.yaml
 kubectl apply -f infra/manifests/postgres/postgres.yaml
 
-# Wait for Postgres before starting the application services
 kubectl wait --for=condition=ready pod -l app=postgres \
   -n clearledger --timeout=120s
+```
 
+Expected after `kubectl apply`:
+
+```
+secret/postgres-secret created
+persistentvolumeclaim/postgres-pvc created
+statefulset.apps/postgres created
+service/postgres created
+```
+
+Expected when `kubectl wait` succeeds: the command exits with no output (exit code 0). If it times out, see **If postgres stays Pending** below before continuing.
+
+**Verify:**
+
+```bash
+kubectl get pods -n clearledger -l app=postgres
+kubectl get pvc -n clearledger
+```
+
+Expected:
+
+```
+NAME         READY   STATUS    RESTARTS   AGE
+postgres-0   1/1     Running   0          45s
+
+NAME           STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS        AGE
+postgres-pvc   Bound    pvc-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx   5Gi        RWO            microk8s-hostpath    45s
+```
+
+**If postgres stays Pending** (`kubectl wait` times out, pod shows `0/1 Pending`, PVC shows `Pending`):
+
+Postgres needs a **PersistentVolumeClaim** — disk space on the cluster. MicroK8s provides that through the **`hostpath-storage`** addon. If `make setup` was interrupted or you used manual setup without `microk8s enable storage`, the PVC has nothing to bind to and the pod never schedules.
+
+Check the events — you'll usually see something like:
+
+```
+Warning  FailedScheduling  ...  pod has unbound immediate PersistentVolumeClaims
+Normal   FailedBinding     ...  no persistent volumes available for this claim and no storage class is set
+```
+
+Fix it on the VM, then restart the postgres pod. Run this **from your host** — the same command on macOS, Linux, or Windows PowerShell (Multipass is installed on the host; it executes inside the VM for you):
+
+```bash
+# Enable storage (and ingress/rbac if make setup skipped them)
+multipass exec clearledger -- microk8s enable storage ingress rbac
+
+# Confirm a default StorageClass exists
+kubectl get storageclass
+# Expected: microk8s-hostpath (default)
+
+# Kick the pod so it reschedules against the new storage class
+kubectl delete pod postgres-0 -n clearledger
+
+kubectl wait --for=condition=ready pod -l app=postgres \
+  -n clearledger --timeout=120s
+kubectl get pods -n clearledger -l app=postgres
+# Expected: postgres-0   1/1   Running
+```
+
+Do not continue to auth-service or ledger-service until postgres is `Running` — they will crash-loop without a database.
+
+---
+
+#### 0.5.3 — Layer 3: Redis
+
+**Why Redis is here — a quick scenario.** Imagine a customer posts a $15,000 debit. Ledger-service saves it to Postgres, then publishes a message to Redis: *"large transaction, user X, amount 15000."* Notification-service is listening on that channel. It picks up the message and records a compliance alert — the one you'll see in the UI later when you curl `/notifications/alerts`.
+
+Ledger-service and notification-service don't call each other directly. Redis sits in the middle as a **message bus**: ledger publishes, notification subscribes. That's why Redis must be running before you deploy notification-service (and why you deploy it now, alongside Postgres, before the app layer).
+
+```bash
 kubectl apply -f infra/manifests/redis/redis.yaml
-kubectl apply -f infra/manifests/auth-service/secret.yaml
-kubectl apply -f infra/manifests/auth-service/deployment.yaml
-kubectl apply -f infra/manifests/auth-service/service.yaml
-kubectl apply -f infra/manifests/ledger-service/secret.yaml
-kubectl apply -f infra/manifests/ledger-service/deployment.yaml
-kubectl apply -f infra/manifests/ledger-service/service.yaml
-kubectl apply -f infra/manifests/notification-service/deployment.yaml
-kubectl apply -f infra/manifests/notification-service/service.yaml
-kubectl apply -f infra/manifests/frontend/deployment.yaml
-kubectl apply -f infra/manifests/ingress.yaml
+```
 
+**Verify:**
+
+```bash
+kubectl get pods -n clearledger -l app=redis
+```
+
+Expected:
+
+```
+NAME                     READY   STATUS    RESTARTS   AGE
+redis-xxxxxxxxxx-xxxxx   1/1     Running   0          30s
+```
+
+---
+
+#### 0.5.4 — Layer 4: Application secrets
+
+Credentials live in Kubernetes Secrets for Stage 0 (Stage 5 moves them to Vault).
+
+```bash
+kubectl apply -f infra/manifests/auth-service/secret.yaml
+kubectl apply -f infra/manifests/ledger-service/secret.yaml
+```
+
+**Verify:**
+
+```bash
+kubectl get secrets -n clearledger | grep -E 'auth-service|ledger-service'
+```
+
+Expected (AGE will differ; **DATA** counts must match):
+
+```
+auth-service-secret     Opaque   2      64s
+ledger-service-secret   Opaque   1      8s
+```
+
+`auth-service-secret` holds two keys (`database_url`, `jwt_secret`). `ledger-service-secret` holds one (`database_url`). Stage 5 replaces these with Vault, for now they live in the cluster as Kubernetes Secrets.
+
+---
+
+#### 0.5.5 — Layer 5: Application workloads
+
+You're about to start the four app services: auth, ledger, notification, and frontend. Postgres, Redis, and the Secrets from the last two layers are already in place — now Kubernetes needs to pull your Docker Hub images and run them as pods.
+
+**Two files per service (mostly).** A **Deployment** tells Kubernetes *which container image to run* and *how many copies*. A **Service** gives that app a stable name inside the cluster (e.g. `auth-service` → so ledger can find auth without knowing pod IP addresses). You apply the Deployment first, then the Service.
+
+**Why the `sed` command?** The deployment YAML files in Git contain a placeholder — literally the text `DOCKER_USERNAME` — because everyone's Docker Hub username is different. You already set yours in §0.3 (`export DOCKER_USERNAME=veeno`). The `sed` line swaps that placeholder for your real username **on the fly**, as the manifest is sent to Kubernetes. You never edit the file in Git. If you skip `sed` and apply the raw file, Kubernetes tries to pull an image called `DOCKER_USERNAME/clearledger-auth-service` — which does not exist.
+
+**Why files under `stages/stage-0-raw-kubernetes/`?** Stage 0 deployments read secrets from Kubernetes (`secretKeyRef`). The copies under `infra/manifests/` are for GitOps later — using those too early is a common mistake (see the CrashLoop note in **Verify** below). The `STAGE0=...` variable from the top of §0.5 points at the right folder.
+
+Deploy each service in order. Run these from the repo root with `DOCKER_USERNAME` still exported:
+
+**1. auth-service** — login and registration
+
+```bash
+sed "s|DOCKER_USERNAME|${DOCKER_USERNAME}|g" \
+  "$STAGE0/auth-service/deployment.yaml" | kubectl apply -f -
+kubectl apply -f infra/manifests/auth-service/service.yaml
+```
+
+**2. ledger-service** — transactions and balance (needs Postgres + the secret you created in §0.5.4)
+
+```bash
+sed "s|DOCKER_USERNAME|${DOCKER_USERNAME}|g" \
+  "$STAGE0/ledger-service/deployment.yaml" | kubectl apply -f -
+kubectl apply -f infra/manifests/ledger-service/service.yaml
+```
+
+**3. notification-service** — listens on Redis for large-transaction alerts (no database secret in this one)
+
+```bash
+sed "s|DOCKER_USERNAME|${DOCKER_USERNAME}|g" \
+  "$STAGE0/notification-service/deployment.yaml" | kubectl apply -f -
+kubectl apply -f infra/manifests/notification-service/service.yaml
+```
+
+**4. frontend** — the web UI (Deployment and Service are in one file here)
+
+```bash
+sed "s|DOCKER_USERNAME|${DOCKER_USERNAME}|g" \
+  "$STAGE0/frontend/deployment.yaml" | kubectl apply -f -
+```
+
+**Verify** (all app pods should reach `Running` — auth and ledger may take ~30s while they connect to Postgres):
+
+```bash
+kubectl get pods -n clearledger
+```
+
+Expected — you should see postgres and redis from earlier layers **plus** new pods for each app (exact pod names vary):
+
+```
+NAME                                      READY   STATUS    RESTARTS   AGE
+postgres-0                                1/1     Running   0          15m
+redis-xxxxxxxxxx-xxxxx                    1/1     Running   0          10m
+auth-service-xxxxxxxxxx-xxxxx             1/1     Running   0          45s
+auth-service-xxxxxxxxxx-xxxxx             1/1     Running   0          45s
+ledger-service-xxxxxxxxxx-xxxxx           1/1     Running   0          40s
+ledger-service-xxxxxxxxxx-xxxxx           1/1     Running   0          40s
+notification-service-xxxxxxxxxx-xxxxx     1/1     Running   0          35s
+frontend-xxxxxxxxxx-xxxxx                 1/1     Running   0          30s
+```
+
+If auth-service or ledger-service is `CrashLoopBackOff`, check logs:
+
+```bash
+kubectl logs -n clearledger deploy/auth-service --tail=20
+```
+
+Common cause: you applied `infra/manifests/*/deployment.yaml` instead of the Stage 0 files above — logs may show `DATABASE_URL is not set`. Re-run the `sed` + `kubectl apply` commands in this section.
+
+**✋ Hands-on checkpoint — workloads before ingress**
+
+```bash
+kubectl get deployment -n clearledger
+kubectl get pods -n clearledger --field-selector=status.phase!=Running
+```
+
+Expected: four Deployments (`auth-service`, `ledger-service`, `notification-service`, `frontend`) with `READY` matching desired replicas (auth and ledger show `2/2`). The second command prints **nothing** — no pods stuck in Pending or CrashLoopBackOff.
+
+---
+
+#### 0.5.6 — Layer 6: Ingress
+
+Exposes the cluster to `http://clearledger.local`.
+
+```bash
+kubectl apply -f infra/manifests/ingress.yaml
+```
+
+**Verify:**
+
+```bash
+kubectl get ingress -n clearledger
+curl -s -o /dev/null -w "%{http_code}\n" http://clearledger.local/
+# Expected: 200
+```
+
+---
+
+#### 0.5.7 — Watch until stable
+
+```bash
 kubectl get pods -n clearledger -w
 ```
 
@@ -496,12 +946,21 @@ kubectl logs POD_NAME -n clearledger --previous
 
 ### 0.6 — Verify the running system
 
+Use **one test account** for both browser and curl so nothing conflicts:
+
+| Field | Value |
+|---|---|
+| Email | `test@clearledger.io` |
+| Password | `SecurePass123` |
+
+If you already registered in the browser with a **different** password, either sign in with that password or pick a new email — the curl commands below must use the **same** email and password you actually registered with.
+
 **Browser verification (recommended):**
 
 Open `http://clearledger.local` in your browser. You should see the ClearLedger login screen.
 
-1. Click **Register** and create an account (use a real-looking email like `test@clearledger.io` — Pydantic rejects obviously fake ones)
-2. Sign in with the credentials you just created
+1. Click **Register** and create an account with **`test@clearledger.io`** / **`SecurePass123`** (same as the curl block below — Pydantic rejects obviously fake emails like `test@test.com`)
+2. Sign in with that email and password
 3. On first login the dashboard auto-seeds demo transactions — wait a few seconds for them to appear
 4. Look at the **Current Balance** card — it should show a dollar amount with a sparkline chart
 5. Look at **Transaction History** — you should see entries like "Salary — Acme Corp", "Rent — May 2026", etc.
@@ -517,25 +976,27 @@ Open `http://clearledger.local` in your browser. You should see the ClearLedger 
 
 **Take a screenshot of the dashboard showing transactions and at least one alert.** This is the first piece of your portfolio.
 
-**Alternatively via curl** (useful if the browser is not cooperating):
+**Alternatively via curl** (same account — useful if the browser is not cooperating):
 
 ```bash
-# Register
+# Register (skip if you already registered in the browser with the same email)
 curl -s -X POST http://clearledger.local/auth/register \
   -H "Content-Type: application/json" \
   -d '{"email":"test@clearledger.io","password":"SecurePass123"}' | jq .
 ```
 
-Expected: `{"user_id":"...","email":"test@clearledger.io"}`
+Expected: `{"user_id":"...","email":"test@clearledger.io"}` — or an error that the email is already registered (fine if you used the browser first).
 
 ```bash
-# Login — save the token
+# Login — save the token (must match the password you registered with)
 TOKEN=$(curl -s -X POST http://clearledger.local/auth/login \
   -H "Content-Type: application/json" \
   -d '{"email":"test@clearledger.io","password":"SecurePass123"}' \
   | jq -r .access_token)
 echo "Token: ${TOKEN:0:30}..."
 ```
+
+If `TOKEN` is empty or login returns `401`, your browser password does not match — re-register with the table above or use your actual password in the `-d` JSON.
 
 ```bash
 # Create a large transaction (triggers notification alert)
@@ -558,7 +1019,7 @@ curl -s http://clearledger.local/ledger/balance \
 curl -s http://clearledger.local/notifications/alerts | jq .
 ```
 
-Expected: `{"total":1,"alerts":[{"type":"LARGE_TRANSACTION","amount":15000,...}]}`
+Expected (curl-only path, no browser demo seed): at least one alert for the $15,000 transaction — e.g. `{"total":1,"alerts":[{"type":"LARGE_TRANSACTION","amount":15000,...}]}`. If you already used the browser, `total` may be **3 or more** (two demo alerts plus yours) — that is also correct.
 
 > **If you see `{"detail":"Unauthorized"}`:** your token has expired. JWTs are short-lived for security — this is intentional. Re-run the login command above to get a fresh token, then retry the failed command. This only affects the `$TOKEN` variable in your current terminal session. If you open a new terminal, you need to run the login command again because `$TOKEN` does not persist across sessions.
 
@@ -568,9 +1029,9 @@ make check-0
 
 ---
 
-### 0.7 — Feel the pain (intentional)
+### 0.7 — Why manual deploys can't be trusted
 
-This section is deliberately uncomfortable. You are going to deploy a change the same way most real teams do it before they set up automation — manually. The goal is not to learn a good process. The goal is to feel why this process is bad, so every tool in the next stages makes immediate sense.
+You already built, pushed, and deployed by hand in Stage 0. This section does it once more with a small code change so you can watch a rollout end to end. The goal is not to learn a good process — it is to notice what manual deploys *don't* give you: an audit trail, a reliable rollback, or proof of what is actually running. Stages 1 and 2 exist to fix those gaps.
 
 **Step 1 — Make a visible change.**
 
@@ -612,9 +1073,9 @@ Expected: `{"status":"ok","service":"auth-service","version":"0.2.0"}`
 
 If you still see the old response without `"version"`, wait a few more seconds and retry — Kubernetes is still rolling out the new pods.
 
-**Step 4 — Now sit with these questions.**
+**Step 4 — Notice what manual deploy doesn't give you.**
 
-You just deployed a change. It works. But think about what just happened:
+You deployed a change. It works. But think about what just happened:
 
 - **Who deployed this?** There is no record. You ran `kubectl` from your laptop. If three people have cluster access, no one knows who changed what.
 - **What changed?** The only evidence is the Docker Hub tag `v0.2.0`. Nothing links that tag to a specific commit or code review.
@@ -622,7 +1083,7 @@ You just deployed a change. It works. But think about what just happened:
 - **What if someone else runs `kubectl apply` with `v0.1.0` while you are pushing `v0.2.0`?** The cluster silently reverts to the old version. No error. No notification. You think your fix is live, but it is not.
 - **Where is the audit trail?** Nowhere. In a regulated environment (banking, healthcare, government), you need proof of who deployed what and when. Right now you have nothing.
 
-There are no good answers with this approach. That is the point. Remember this feeling — it is why every subsequent stage exists.
+Manual deploys can work for a demo. They don't hold up for a team or a regulated environment. Keep these gaps in mind — they are why the next stages exist.
 
 **Step 5 — Revert your change before continuing.**
 
@@ -636,15 +1097,47 @@ Stage 1 automates the build. Stage 2 fixes the deployment.
 - How Kubernetes manifests describe the desired state of your system
 - How an Ingress routes external traffic to internal services
 - How to build, push, and deploy container images manually
-- **Why manual deployment is a problem** — no audit trail, no rollback, no consistency
+- **Why manual deploys can't be trusted** — no audit trail, no rollback, no consistency
+
+**What you can now put on your CV / say in an interview:**
+
+> Deployed a multi-service application to Kubernetes by hand — namespace, RBAC, a StatefulSet database, Deployments, Services, and path-based Ingress routing — and can explain why each layer deploys in that order.
+
+**Save your VM before Stage 1.** This lab runs for days. Your Git repo on the Mac/Linux/Windows host survives a broken VM — Postgres data, deployed pods, and in-cluster config do not. After `make check-0` passes:
+
+```bash
+make snapshot STAGE=0
+make snapshots    # must show clearledger.stage0 — do not skip
+```
+
+If the VM corrupts later: `make snapshots` → `make restore STAGE=0`. See [Saving your progress](#saving-your-progress).
 
 ---
 
 ## Stage 1 — CI Pipeline (GitHub Actions + Self-Hosted Runner)
 
-> The build is automated. The deployment is not. That gap has a name.
+> In Stage 0 you built and deployed by hand. Stage 1 automates the build side: a `git push` runs a pipeline that produces images and updates your infra repo on GitHub. The cluster still does not change on its own — that is what Stage 2 (GitOps) fixes.
 
-**Goal:** a `git push` to GitHub automatically builds images, pushes them to Docker Hub, and updates the image tags in the `clearledger-infra` repo on GitHub. You still deploy manually. One pain point removed — the cluster drift remains.
+**Goal:** every push to GitHub automatically builds images, pushes them to Docker Hub, and updates image tags in `clearledger-infra`. You still apply changes to the cluster yourself for now — one problem solved, cluster drift remains until ArgoCD.
+
+> **Am I ready for Stage 1?**
+>
+> Run these **yourself** before §1.1:
+>
+> ```bash
+> make check-0
+> echo "$DOCKER_USERNAME"    # must not be empty or "your-username"
+> curl -s -o /dev/null -w "%{http_code}" http://clearledger.local/auth/health
+> ```
+>
+> Expected: health check green; `echo` prints your Docker Hub user; curl prints `200`.
+>
+> - [ ] Docker Hub account with four `clearledger-*` repositories (see [QUICKSTART.md §1b](../QUICKSTART.md#step-1b--docker-hub-setup-required-before-stage-1))
+> - [ ] GitHub account; you can create repos and personal access tokens
+> - [ ] ~2–4 hours for runner install + first green pipeline (this is the hardest stage for beginners)
+>
+> **Done when:** `make check-1` passes **and** you manually confirmed the five items in §1.6 below.
+> **Then save:** `make snapshot STAGE=1` → `make snapshots` (confirm `clearledger.stage1`).
 
 ### What you need to know first
 
@@ -673,7 +1166,7 @@ Runner executes the jobs
         ↓
 Docker images are built and pushed
         ↓
-Infra manifests are updated with the new image tags
+Infra manifests are updated with the new image tags  (in clearledger-infra — §1.3)
 ```
 
 The important idea: **the build no longer depends on your laptop**. Your laptop writes code. The pipeline produces the release artifact.
@@ -688,50 +1181,67 @@ GitHub Actions normally uses GitHub-hosted runners in the cloud. In this lab, th
 
 So you install a **self-hosted runner** inside the VM. It connects outbound to GitHub, waits for work, then executes pipeline jobs locally where it can reach everything.
 
+**Two GitHub repos — introduced here, created in §1.3.** Stage 0 used manifests from this repo on your laptop. Stage 1 splits things in two: **`clearledger`** (app code + `.github/workflows/ci.yaml`) and **`clearledger-infra`** (Kubernetes YAML only — the “what should be running” contract). You have not created the second repo yet; that is §1.3. For now, just know CI will push image tag updates there after each successful build — it never runs `kubectl`.
+
 ```text
-GitHub.com
-  stores app repo
-  starts workflow on git push
+GitHub — clearledger (app repo)
+  stores your code
+  starts the workflow on git push
         ↓
-Self-hosted runner inside Multipass VM
+Self-hosted runner (inside Multipass VM)
   builds Docker images
   pushes images to Docker Hub
-  updates image tags in clearledger-infra on GitHub
+  updates image tags in clearledger-infra  ← second repo; you create it in §1.3
         ↓
-GitHub (clearledger-infra repo)
-  stores Kubernetes YAML with updated image tags
-  ArgoCD watches this in Stage 2
+GitHub — clearledger-infra (infra repo)
+  stores Kubernetes YAML with the new image tags
+  ArgoCD watches this repo in Stage 2 (not yet)
 ```
 
 Both repos live on GitHub. The runner is the only piece that runs locally — and it only needs outbound internet access to GitHub and Docker Hub.
 
-This stage intentionally stops before automatic deployment. After the pipeline runs, the infra repo has changed, but the cluster has not. That unfinished handoff is the lesson: **CI automates building; GitOps automates applying.** Stage 1 gives you CI. Stage 2 adds GitOps.
+This stage intentionally stops before automatic deployment. After the pipeline runs, the infra repo has changed, but the cluster has not — CI does not run `kubectl` in Stage 1 (the ArgoCD refresh step is **off** until you set repository variable `ENABLE_ARGOCD_SYNC=true` in Stage 2). That unfinished handoff is the lesson: **CI automates building; GitOps automates applying.** Stage 1 gives you CI. Stage 2 adds GitOps.
 
 ---
 
-### 1.1 — Push the App Repo to GitHub
+### 1.1 — Push the app repo to GitHub (not `clearledger-infra` yet)
 
-First, put the application repo somewhere a pipeline host can see it.
+This step is **repo #1 — `clearledger`** (application code + CI workflow). You are pushing the clone on your laptop — the same folder where you ran Stage 0 (`make setup`, `kubectl apply`, etc.).
 
-Go to GitHub → New Repository:
+**`clearledger-infra` comes later in §1.3.** That second repo holds Kubernetes manifests only. Do not create it here.
 
-- Repository name: `clearledger`
-- Visibility: Public
-- Do not initialize with a README or `.gitignore`
+First, put the application repo somewhere GitHub Actions can see it.
+
+Go to GitHub → **New Repository**:
+
+- Repository name: **`clearledger`** (exact name — not `clearledger-infra`)
+- Visibility: **Public**
+- Do **not** initialize with a README or `.gitignore`
 
 The repo already has those files locally. If GitHub creates its own, your first push may fail because the histories do not match.
 
+Run from your **local `clearledger` project root** on your Mac (where `app/`, `infra/`, and `.github/workflows/ci.yaml` live):
+
 ```bash
+cd ~/Desktop/personal-projects/devsecops/clearledger   # your clone path
 git remote add origin https://github.com/YOUR_USERNAME/clearledger.git
 git branch -M main
 git push -u origin main
 ```
 
+If `git remote add` fails because `origin` already exists:
+
+```bash
+git remote -v
+git remote set-url origin https://github.com/YOUR_USERNAME/clearledger.git
+git push -u origin main
+```
+
 Verify in the browser: `https://github.com/YOUR_USERNAME/clearledger`.
 
-You should see your application code, Dockerfiles, Kubernetes manifests, and `.github/workflows/ci.yaml`.
+You should see `app/`, `infra/manifests/`, `docs/`, and `.github/workflows/ci.yaml`. That confirms GitHub can trigger the pipeline on your next push.
 
-What you proved: GitHub can now see your code and can trigger automation when you push.
+**What you proved:** the **app repo** is on GitHub. CI will run from here. Deployment manifests for GitOps land in **`clearledger-infra`** in §1.3.
 
 ### 1.2 — Install the Self-Hosted Runner Inside the VM
 
@@ -740,7 +1250,7 @@ The workflow file tells GitHub *what* to run. The runner is *where* it runs.
 This lab uses a self-hosted runner because your infrastructure is local. GitHub's cloud servers cannot reach your MicroK8s cluster or Docker daemon inside the Multipass VM. The runner solves that by living inside the VM — it connects outbound to GitHub to pick up jobs, then executes everything locally.
 
 ```
-GitHub (cloud)
+GitHub (cloud) — clearledger app repo
   sees the git push
   schedules a workflow job
   ↓
@@ -748,20 +1258,39 @@ Self-hosted runner (inside VM)
   receives the job
   builds Docker images
   pushes images to Docker Hub
-  updates image tags in clearledger-infra on GitHub
+  updates image tags in clearledger-infra  ← §1.3 creates this repo
 ```
 
 If the runner is missing or offline, the pipeline cannot execute. The workflow may sit queued, or it may fail because no matching runner is available.
 
-**Step 1 — Generate a runner token on GitHub**
+**Step 1 — Open GitHub’s runner setup page (keep this tab open)**
 
-Go to: github.com/YOUR_USERNAME/clearledger → Settings → Actions → Runners → New self-hosted runner
+GitHub gives you a full copy-paste install guide on one page. Use it — don’t hunt for URLs or tokens elsewhere.
 
-Select: Linux → x64
+1. Open **`https://github.com/YOUR_USERNAME/clearledger`**
+2. **Settings** → **Actions** → **Runners** → **New self-hosted runner**
+3. Select **Linux** and **x64**
 
-Copy the token shown. It looks like: `AXXXXXXXXXXXXXXXXXXXXXXXXX`
+The page title should look like: **Add new self-hosted runner · YOUR_USERNAME/clearledger** (e.g. `Osomudeya/clearledger`).
 
-Do NOT close this page yet — the token expires in 1 hour.
+That page has three sections you will use:
+
+| Section on GitHub | What to do with it |
+|---|---|
+| **Download** | Copy the `mkdir`, `curl`, and `tar` commands into the VM in Step 4 (same versions as below) |
+| **Configure** | Copy the **token** from the `./config.sh ... --token ...` line — do **not** run GitHub’s `./config.sh` as-is |
+| **Using your self-hosted runner** | Ignore for now — the lab workflow needs the `clearledger` label (Step 4) |
+
+Scroll to **Configure**. You will see something like:
+
+```bash
+./config.sh --url https://github.com/YOUR_USERNAME/clearledger --token AXXXXXXXXXXXXXXXXXXXXXXXXX
+./run.sh
+```
+
+**The token is the long string after `--token`** (starts with `A`, about 26 characters). Copy **only** that string.
+
+Keep this tab open until Step 4 finishes — the token expires in about **1 hour**. If it expires, click **New self-hosted runner** again for a fresh token.
 
 **Step 2 — Enter the VM**
 
@@ -795,36 +1324,35 @@ newgrp docker
 docker --version
 ```
 
-Expected: Docker prints a version number.
+Expected: Docker prints a version number (e.g. `Docker version 29.x.x`).
 
-The runner uses Docker **inside the Ubuntu VM**, not Docker Desktop on your Mac. If a GitHub Actions job later fails with:
-
-```text
-permission denied while trying to connect to the Docker API at unix:///var/run/docker.sock
-```
-
-it usually means the runner process started before the `ubuntu` user picked up the `docker` group membership. Restart the runner inside the VM:
+**Verify Docker works for the `ubuntu` user now** — the runner does not exist yet (Step 4 creates `~/actions-runner`):
 
 ```bash
-cd ~/actions-runner
-pkill -f "Runner.Listener|Runner.Worker|./run.sh" || true
-nohup ./run.sh > _diag/manual-runner.log 2>&1 &
 docker ps
 ```
 
-`docker ps` should run without `sudo`. That proves the runner user can build images in the VM.
+Expected: a table header (CONTAINER ID, IMAGE, …) — even if no containers are listed. **Not** `permission denied while trying to connect to the Docker API`.
 
-What you proved: the VM can build container images without relying on Docker Desktop on your host.
+If `docker ps` fails with permission denied, the `docker` group has not applied yet. Run `newgrp docker` again, or log out of the VM (`exit`) and `multipass shell clearledger` back in, then retry `docker ps`.
+
+What you proved: the VM can run Docker without Docker Desktop on your Mac. Continue to Step 4 to install the runner.
 
 **Step 4 — Install and register the runner**
+
+Still inside the VM (`ubuntu@clearledger` prompt).
+
+**Download:** you can copy the commands from the **Download** section on GitHub’s runner page (Step 1), or run the block below — they should match. Paste into the VM, not your Mac.
+
+**Configure:** use the lab command below, not GitHub’s `./config.sh` line. Paste your token from Step 1 and replace `YOUR_USERNAME`.
 
 ```bash
 mkdir -p ~/actions-runner && cd ~/actions-runner
 
-curl -o actions-runner-linux-x64.tar.gz -L \
-  https://github.com/actions/runner/releases/download/v2.317.0/actions-runner-linux-x64-2.317.0.tar.gz
+curl -o actions-runner-linux-x64-2.335.1.tar.gz -L \
+  https://github.com/actions/runner/releases/download/v2.335.1/actions-runner-linux-x64-2.335.1.tar.gz
 
-tar xzf ./actions-runner-linux-x64.tar.gz
+tar xzf ./actions-runner-linux-x64-2.335.1.tar.gz
 
 ./config.sh \
   --url https://github.com/YOUR_USERNAME/clearledger \
@@ -838,7 +1366,11 @@ sudo ./svc.sh install
 sudo ./svc.sh start
 ```
 
-The `clearledger` label is required. The workflow uses:
+Do **not** run GitHub’s `./run.sh` for day-to-day use — the lab uses `sudo ./svc.sh` so the runner survives VM reboots. GitHub shows `./run.sh` for a quick test only.
+
+Expected after `./config.sh`: `Runner successfully added` (or similar). If you see **Invalid token** or **Expired token**, go back to Step 1 in the browser and copy a fresh token.
+
+The **`clearledger` label is required** — GitHub’s default `./config.sh` on the setup page does not add it. The workflow uses:
 
 ```yaml
 runs-on: [self-hosted, clearledger]
@@ -866,6 +1398,24 @@ sudo ./svc.sh status
 ```
 
 Expected: the service is installed and running.
+
+**If `docker ps` worked in Step 3 but a CI job later fails with Docker socket permission denied**, the runner probably started before the `docker` group applied. Restart it **after** Step 4 (only when `~/actions-runner` exists):
+
+```bash
+cd ~/actions-runner
+sudo ./svc.sh stop
+sudo ./svc.sh start
+docker ps    # must work without sudo
+```
+
+Or, if you started the runner manually with `./run.sh` instead of systemd:
+
+```bash
+cd ~/actions-runner
+pkill -f "Runner.Listener|Runner.Worker|./run.sh" || true
+nohup ./run.sh > _diag/manual-runner.log 2>&1 &
+docker ps
+```
 
 If you see this:
 
@@ -905,6 +1455,25 @@ clearledger
 
 If `clearledger` is missing, add it in the runner settings before rerunning the workflow. The runner name alone is not enough.
 
+**✋ Hands-on checkpoint — runner ready for jobs**
+
+Still on GitHub → Settings → Actions → Runners, confirm:
+
+| Field | Expected |
+|---|---|
+| Status | **Idle** (green) |
+| Labels | includes `self-hosted` **and** `clearledger` |
+| OS | Linux |
+
+Then trigger a dry run from your laptop (no code change needed):
+
+```bash
+git commit --allow-empty -m "test: verify runner picks up jobs"
+git push
+```
+
+Open `https://github.com/YOUR_USERNAME/clearledger/actions` — within 30 seconds a workflow run should show **Queued** then **In progress**, not stuck on “Waiting for a runner.” If it waits more than 2 minutes, the labels are wrong — edit the runner on GitHub and add `clearledger`.
+
 If it shows Offline:
 
 ```bash
@@ -916,72 +1485,50 @@ What you proved: GitHub can now send work into your local lab environment.
 
 ### 1.3 — Create the Infra Repo on GitHub
 
-Now separate **application code** from **deployment state**.
+Now separate **application code** from **deployment state**. Stage 1 introduces a second GitHub repository alongside the `clearledger` app repo you pushed in §1.1.
 
-You now use two GitHub repositories:
+You will use two repositories for the rest of the lab:
 
 | Repo | What lives there | Who changes it | Why it exists |
 |---|---|---|---|
 | `clearledger` | App source code, Dockerfiles, tests, `.github/workflows/ci.yaml`, lab docs | You, the developer | This is where code changes start |
 | `clearledger-infra` | Kubernetes manifests only: `deployment.yaml`, `service.yaml`, ingress, secrets templates | The CI pipeline, then ArgoCD reads it | This is the desired state of the cluster |
 
-The important idea:
+Think of **`clearledger`** as the question *“What is the application?”* — Python services, Dockerfiles, tests, and the CI workflow. Think of **`clearledger-infra`** as *“What exact version should be running in Kubernetes right now?”* — Deployments, Services, ingress rules, and the image tags that point at Docker Hub.
 
-```text
-clearledger
-  "Here is the application code"
-
-clearledger-infra
-  "Here is the exact version that should run in Kubernetes"
-```
-
-Why not keep everything in one repo?
-
-Because the two repos answer different questions:
-
-```text
-clearledger asks:
-  What is the application code?
-
-clearledger-infra asks:
-  What exact version should the cluster run right now?
-```
-
-Imagine you edit `README.md` in `clearledger`. That is a code/documentation repo change, but it should not mean "deploy the application." Now imagine you change `auth-service` code and the pipeline builds image tag `abc123`. Only after tests and scans pass should the desired running version change.
-
-That is why the pipeline writes this kind of change into `clearledger-infra`:
+Teams split these on purpose. If you edit `README.md` in `clearledger`, that is a documentation change; it should not trigger a deployment. If you change `auth-service` code, the pipeline builds a new image (for example tag `abc123`) and, only after scans pass, records that tag in `clearledger-infra`:
 
 ```yaml
-image: osomudeya/clearledger-auth-service:abc123
+image: $DOCKER_USERNAME/clearledger-auth-service:abc123
 ```
 
-Then ArgoCD watches `clearledger-infra` and says:
+That line is a **deployment contract**: Git now says the cluster *should* run `abc123`. In Stage 1, the cluster does not change yet — you will prove that in §1.6. In **Stage 2**, ArgoCD watches `clearledger-infra`, compares Git to what is running, and syncs the cluster when they differ. The app repo is where work begins; the infra repo is what production is supposed to look like.
 
-```text
-Git says auth-service should run abc123.
-The cluster is running the old tag.
-I will update the cluster to match Git.
-```
-
-So the app repo is where work starts. The infra repo is the deployment contract.
-
-The pipeline flow is:
+The full path looks like this:
 
 ```text
 You push code to clearledger
         ↓
-GitHub Actions builds Docker images
+GitHub Actions builds and scans Docker images
         ↓
 Images are pushed to Docker Hub
         ↓
-Pipeline updates clearledger-infra with the new image tags
+The pipeline updates image tags in clearledger-infra
         ↓
-Stage 2: ArgoCD watches clearledger-infra and deploys it
+Stage 2: ArgoCD reads clearledger-infra and deploys to the cluster
 ```
 
-The pipeline does **not** deploy directly to the cluster. That is Stage 2 (ArgoCD).
+The pipeline never runs `kubectl apply` on your app in Stage 1. It updates Git; GitOps (Stage 2) applies Git to the cluster.
 
-Go to github.com → New Repository → Name: `clearledger-infra` → Public → Create.
+**Create the infra repo on GitHub:** go to github.com → **New Repository** → name **`clearledger-infra`** → **Public** → **Create** (do not add a README — you will push manifests from your laptop).
+
+**Before pushing:** set your Docker Hub username in Kustomize (image tags are resolved here, not in deployment YAML):
+
+```bash
+# Replace YOUR_DOCKERHUB_USERNAME with the same value as $DOCKER_USERNAME from §0.3
+sed -i.bak "s/YOUR_DOCKERHUB_USERNAME/${DOCKER_USERNAME}/g" infra/manifests/kustomization.yaml
+rm -f infra/manifests/kustomization.yaml.bak
+```
 
 Push only the Kubernetes manifests from `infra/manifests/` (not everything under `infra/`):
 
@@ -995,23 +1542,33 @@ git add . && git commit -m "feat: initial manifests" && git push -u origin main
 cd -
 ```
 
-**Do not copy** `infra/deferred-by-stage/` into `clearledger-infra`. That folder holds manifests for later stages (for example network policies for **Stage 6**) so ArgoCD does not apply them too early.
+**✋ Hands-on checkpoint — infra repo on GitHub (do this before §1.4)**
 
-| Folder | Goes to `clearledger-infra`? | When it takes effect |
-|---|---|---|
-| `infra/manifests/` | **Yes** — Stage 1 push, ArgoCD from Stage 2 | App deployments, ingress, postgres, etc. |
-| `infra/deferred-by-stage/` | **No** — stays in the `clearledger` repo only | Manual `kubectl apply` at the stage named in the path |
+On your laptop:
 
-Stage 1 does not keep a separate copy of manifests inside `stages/stage-1-ci-pipeline/infra`. If that folder is empty or missing, that is expected. The GitOps source for this stage is:
-
-```text
-infra/manifests/          → clearledger-infra (ArgoCD)
-infra/deferred-by-stage/  → apply later (see README there)
+```bash
+grep "docker.io/${DOCKER_USERNAME}/" infra/manifests/kustomization.yaml | wc -l
+grep YOUR_DOCKERHUB_USERNAME infra/manifests/kustomization.yaml || echo "OK: placeholder replaced"
 ```
 
-You copy `infra/manifests/` into the separate GitHub repo named `clearledger-infra`. That repo is the real Stage 1 infra target. The app repo stays focused on application code and pipeline logic; `clearledger-infra` becomes the desired-state repo that the pipeline updates after successful builds.
+Expected: first command prints `4` (four image lines). Second prints `OK: placeholder replaced` — not four lines still saying `YOUR_DOCKERHUB_USERNAME`.
 
-What you proved: the infrastructure definition has its own Git history, separate from application code.
+In the browser, open `https://github.com/YOUR_USERNAME/clearledger-infra/tree/main/manifests` and confirm **with your eyes**:
+
+| File / folder | Must exist |
+|---|---|
+| `kustomization.yaml` | Yes — open it; `newName:` lines use **your** Docker Hub user |
+| `auth-service/secret.yaml` | Yes — Stages 2–4 need this until Stage 5 |
+| `ledger-service/secret.yaml` | Yes |
+| `auth-service/deployment.yaml` | Yes — open it; must contain `secretKeyRef`, **not** `vault.hashicorp.com` |
+| `netpol/` | **No** — if present, delete the folder on GitHub before Stage 2 |
+| `vault/` | **No** — Vault rotation is Stage 5 only |
+
+**Which folders matter?** You only pushed **`infra/manifests/`** to GitHub — that is correct. Everything else in this repo stays local for now. Some manifests for later stages (network policies, Vault extras) live under **`infra/deferred-by-stage/`** in the **`clearledger`** repo; you apply those by hand when you reach that stage — do **not** copy that folder into `clearledger-infra`, or ArgoCD would deploy things too early.
+
+You might notice `stages/stage-1-ci-pipeline/` has no copy of the manifests. That is normal — the lab does not duplicate YAML there. The canonical copy is **`infra/manifests/`** in this repo, and the live GitOps copy is **`clearledger-infra`** on GitHub.
+
+**What you proved:** Kubernetes config now has its own repo and Git history, separate from application code. CI will update `clearledger-infra` after each build; your app repo stays for code and the pipeline file.
 
 ### 1.4 — Set up GitHub Secrets
 
@@ -1032,7 +1589,7 @@ This is just your Docker Hub username.
 Example:
 
 ```text
-osomudeya
+$DOCKER_USERNAME
 ```
 
 Get it from Docker Hub: hub.docker.com → profile menu → Account Settings.
@@ -1088,7 +1645,8 @@ Cosign signs container images after the pipeline pushes them to Docker Hub. Late
 Generate the key pair on your host machine, not inside the Multipass VM:
 
 ```bash
-brew install cosign
+# macOS: brew install cosign
+# Linux/WSL2: curl -sSL -o cosign https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-amd64 && chmod +x cosign && sudo mv cosign /usr/local/bin/
 cosign generate-key-pair
 ```
 
@@ -1110,6 +1668,15 @@ Add these five secrets to the `clearledger` repo, not `clearledger-infra`:
 | `INFRA_REPO_TOKEN` | The GitHub PAT from above | Pipeline pushes image tag updates to clearledger-infra |
 | `COSIGN_PRIVATE_KEY` | Contents of `cosign.key` | Pipeline signs pushed container images |
 | `COSIGN_PASSWORD` | Password used when creating the Cosign key | Unlocks the private key during signing |
+
+**Repository variables (not secrets)** — optional toggles for later stages. Add under **Settings → Secrets and variables → Actions → Variables**:
+
+| Variable | Stage 1 | When to enable |
+|---|---|---|
+| `ENABLE_ARGOCD_SYNC` | Leave **unset** | **Stage 2** — after ArgoCD’s first sync is healthy (see [Enable CI → ArgoCD handoff](#enable-ci--argocd-handoff-close-the-stage-1-deployment-gap)) |
+| `ENABLE_DAST` | Leave **unset** | **Stage 3** — after the app is live at `clearledger.local` (see [Enable DAST](#enable-dast-optional--after-stage-2)) |
+
+**Do not add either variable in Stage 1.** If you set them now, CI will try to refresh ArgoCD or run ZAP before the cluster is ready — and the pipeline output gets harder to read. The guide calls out the exact moment to turn each one on; you only need to remember that both exist.
 
 What you proved: the pipeline can authenticate to external systems without hardcoding credentials in the repo.
 
@@ -1158,9 +1725,9 @@ Real teams **never push first and scan later**. The pipeline separates three con
 
 You do **not** run `scripts/ci-publish-image.sh` yourself before pushing code. GitHub Actions checks out the repo and calls it inside `publish-images`.
 
-On the self-hosted runner, images stay in the local Docker daemon between jobs (same VM, same daemon). That is why build and scan can be separate jobs without uploading multi-gigabyte tarballs — a lab shortcut that matches how a dedicated build VM works in production.
+**Why can `build-images` and `scan-images` be separate jobs?** Each job is a fresh checkout on GitHub-hosted runners — they do not share a disk. On **your** self-hosted runner, all three jobs run on the **same Multipass VM** and use the **same Docker engine**. Job 1 runs `docker build` and leaves the images on that machine. Job 2 runs Trivy against those same local images — no upload, no download. Job 3 pushes to Docker Hub only if the scan passed.
 
-Stage 8 AWS (`ci-aws.yaml`) uses the same pattern on GitHub-hosted runners: `build-images` saves `images.tar` as an artifact, `scan-images` loads and scans it, `publish-images` loads and pushes to ECR.
+That is a practical lab setup: one persistent build machine with Docker installed, like a dedicated CI worker in a real office. In **Stage 8 (AWS)**, the pipeline uses GitHub-hosted runners instead — there, `build-images` saves the images to a file (`images.tar`) and passes that file to the next job as a workflow artifact, because those runners are throwaway VMs with no shared Docker cache.
 
 Then comes the GitOps handoff:
 
@@ -1176,128 +1743,136 @@ Runner commits and pushes back to clearledger-infra
 Stage 1 ends here
 ```
 
-Important: the image tag is based on the commit SHA. That means you can answer "which code produced this image?" just by looking at the tag.
+**How the image tag ties to your code:** every pipeline run is triggered by a git commit. GitHub gives that commit a unique ID called the **SHA** (a long hex string like `a1b2c3d4e5f6789…`). The workflow sets `IMAGE_TAG` to that SHA and uses it everywhere:
 
-#### GitOps manifest flow — three layers (read this once)
+1. **Build** — `docker build -t clearledger-auth-service:a1b2c3d4…`
+2. **Publish** — push to Docker Hub as `veeno/clearledger-auth-service:a1b2c3d4…`
+3. **Update manifests** — `kustomize edit set image …:a1b2c3d4…` in `clearledger-infra`
+4. **Commit message** — `ci: deploy a1b2c3d4… — all gates passed`
 
-Do not confuse **app code**, **manifest templates**, and **what ArgoCD deploys**:
+So if production is running `veeno/clearledger-auth-service:a1b2c3d4…`, you paste that tag into GitHub (`https://github.com/Osomudeya/clearledger/commit/a1b2c3d4…`) and see the **exact source code** that built it. No guessing, no “maybe it was `latest`”. That one-to-one link is why teams use commit SHAs instead of floating tags like `v0.1.0` for deploys.
 
-| Layer | Where | Who changes it |
-|---|---|---|
-| 1. Application code | `app/` in **clearledger** | You (developer) |
-| 2. Canonical manifests | `infra/manifests/` in **clearledger** | You (Kubernetes YAML, probes, Vault, limits) |
-| 3. GitOps desired state | **clearledger-infra** on GitHub | **CI** (after every successful build) |
+#### GitOps manifest flow — three places, one chain
+
+Three folders sound similar but do different jobs. Keep them straight:
+
+- **`app/`** in **`clearledger`** — your Python/frontend code. You edit this when you change features or fix bugs.
+- **`infra/manifests/`** in **`clearledger`** — Kubernetes YAML you write by hand (deployments, probes, limits, secrets layout). This is the template.
+- **`clearledger-infra`** on GitHub — what the cluster should actually run. CI updates this after every green build. ArgoCD watches it from Stage 2 onward.
+
+When you push code, the chain looks like this:
 
 ```text
-You edit infra/manifests/  +  push app code
+You push app code (+ you may have edited infra/manifests/)
         ↓
-CI builds images → scans → publishes
+CI builds images → scans → publishes to Docker Hub
         ↓
-CI copies infra/manifests/ → clearledger-infra  (full tree, every deploy)
+CI copies the full infra/manifests/ tree into clearledger-infra
         ↓
-CI updates image SHAs in kustomization.yaml only  (Kustomize — not sed)
+CI updates only the image tags in kustomization.yaml (Kustomize, not sed)
         ↓
-ArgoCD auto-syncs cluster to match Git
+Stage 2+: ArgoCD syncs the cluster to match Git
 ```
 
-**Deployments never store the real registry tag.** They use a placeholder:
+**The placeholder trick (read this slowly).**
+
+`auth-service/deployment.yaml` does not say `docker.io/veeno/clearledger-auth-service:abc123`. It says:
 
 ```yaml
-# auth-service/deployment.yaml (canonical — same in both repos)
 image: clearledger/auth-service:gitops
 ```
 
-**Kustomize** maps that to the real image in `kustomization.yaml`:
+That string is not a real image on Docker Hub — it is a **label** Kustomize recognizes. The real address lives in one other file, `kustomization.yaml`:
 
 ```yaml
 images:
-  - name: clearledger/auth-service
-    newName: docker.io/YOUR_USER/clearledger-auth-service
-    newTag: d7bccf485dd06c319cabfebb310f52d872788a2f   # CI writes this SHA
+  - name: clearledger/auth-service          # matches the label in deployment.yaml
+    newName: docker.io/veeno/clearledger-auth-service   # real registry path
+    newTag: abc123def456…                                 # real version (commit SHA)
 ```
 
-ArgoCD renders `kustomize build` and applies the result. **Same pattern as Stage 8 AWS** — you learn it twice, not two different systems.
+When ArgoCD deploys, it runs `kustomize build`. Kustomize reads both files and substitutes the label with `docker.io/veeno/clearledger-auth-service:abc123…`.
 
-#### Lab vs larger prod — accurate comparison
+**What you edit vs what CI edits**
 
-| Piece | This lab (Stages 1–7) | Larger prod often adds |
-|---|---|---|
-| **Image tag updates** | Kustomize `images:` + `kustomize edit set image` in CI | Same — or Argo CD Image Updater / Flux Image Automation |
-| **Manifest structure** | CI copies full `infra/manifests/` each deploy | Monorepo or infra repo with PR review on every change |
-| **ArgoCD refresh** | `kubectl annotate` hard refresh (self-hosted runner) | Argo CD webhook, ApplicationSet, or Notifications |
-| **Drift recovery** | `make fix-argocd` (break-glass; should be rare now) | Policy bots; drift should not happen with single source |
+You already edited `kustomization.yaml` once in §1.3 — you replaced `YOUR_DOCKERHUB_USERNAME` with `veeno` in the `newName:` lines. That is a one-time setup step. You might edit the `resources:` list later when a new stage adds files (Vault in Stage 5, for example).
 
-**Does Kustomize make learning harder?** No — you touch **one file** (`kustomization.yaml`) and **one CI step**. Deployments stay readable placeholders. Stage 8 reuses the same idea for ECR. Without Kustomize, the old `sed`-only approach caused **9-hour OutOfSync** bugs because CI updated image lines but not probes/limits.
+You do **not** update `newTag:` yourself after every git push. When CI passes, it writes the new commit SHA into `newTag:` for you. If you did that by hand on every deploy, you would eventually typo a tag and break production.
 
-#### Image tags — SHA now, digest later
+**Stage 1: CI updates GitHub, not the cluster**
 
-| Approach | This lab | Prod teams often add later |
-|---|---|---|
-| **Git SHA tag** (`:abc123…`) | **Yes — primary tag** | Same — traceability anchor |
-| **`:latest` or semver** (`:v1.2.3`) | No | Human-friendly pointer; CI moves `:latest` after scan passes |
-| **Digest pinning** (`image@sha256:…`) | No | Strongest immutability — tag can be retagged, digest cannot |
+After a green pipeline run, three things are true:
 
-The pipeline does **not** deploy to Kubernetes directly. It updates `clearledger-infra`. Stage 2 installs ArgoCD, and ArgoCD watches `clearledger-infra` to deploy the change.
+- New images exist on Docker Hub
+- `clearledger-infra` on GitHub has new SHAs in `kustomization.yaml`
+- Your Kubernetes cluster is **unchanged** — still running whatever Stage 0 left there
 
-| Section | What it does | Why |
-|---|---|---|
-| `on: push: branches: [main]` | Triggers on every push to main | Every change gets built automatically |
-| `runs-on: [self-hosted, clearledger]` | Uses your local runner | Needed to reach the local cluster and Docker daemon |
-| `prepare-scanners` | Installs scanner CLIs; downloads Trivy DB once per workflow | Avoids repeating ~95MB DB download per service |
-| `build-images` | Builds all service images locally | Produces artifacts before any registry write |
-| `scan-images` | Trivy + SBOM gates | Blocks publish if CVEs are found |
-| `publish-images` | Docker Hub login + `ci-publish-image.sh` | Push and sign only after scan passes |
-| `update-manifests` | Copies `infra/manifests/` + Kustomize image SHAs → clearledger-infra | Single source of truth; no manifest drift |
+CI never runs `kubectl apply`. It only commits to `clearledger-infra`. That is the whole Stage 1 lesson: build and scan are automated, but **deploy** is not — yet. Stage 2 installs ArgoCD, which reads `clearledger-infra` and updates the cluster for you.
 
-The Kubernetes Checkov scan in Stage 1 is evidence-only. It uploads findings so you can see the hardening work ahead, but it does not block the first CI pipeline run. That is intentional: Stage 1 proves the build-push-update flow. Later stages tighten Kubernetes policy with security gates, admission control, and secrets management.
+---
 
-DAST is also disabled by default in Stage 1. It needs a live deployed application, but Stage 1 only updates `clearledger-infra`; ArgoCD does not deploy that change until Stage 2. To enable DAST later, add a repository variable named `ENABLE_DAST` with value `true`.
+#### What each pipeline job does
 
-#### Stage 1 security posture — strict vs evidence-only
+Open `.github/workflows/ci.yaml` if you want the full detail. At a high level:
 
-Stage 1 is **not** “security turned off.” Some checks **block the pipeline**; others **run and upload evidence** so you can see what still needs work. This table is your reference — bookmark it and come back when you reach later stages.
+1. **Secrets / SAST / Dockerfile Checkov** — block bad commits early.
+2. **`prepare-scanners`** — installs Trivy, Syft, Grype once per run (avoids re-downloading the CVE database for every service).
+3. **`build-images`** — `docker build` all four services on the runner.
+4. **`scan-images`** — Trivy + Grype; publish is skipped if CVEs fail the gate.
+5. **`publish-images`** — push to Docker Hub and Cosign-sign (signing is non-blocking until Stage 4).
+6. **`update-manifests`** — copy `infra/manifests/` into `clearledger-infra` and set image SHAs in `kustomization.yaml`.
 
-| Check | Stage 1 behavior | Blocks pipeline? | Hardened in | What changes later |
-|---|---|---|---|---|
-| Gitleaks (secrets in Git) | Runs on full history | **Yes** | Stage 3 (break exercise) | You deliberately leak a secret and watch it fail |
-| Semgrep (SAST) | Runs on Python services | **Yes** | Stage 3 (break exercise) | You inject unsafe code and watch SAST catch it |
-| Checkov (Dockerfiles) | Scans production Dockerfiles | **Yes** | Stage 3 (break exercise) | Remove `HEALTHCHECK` and watch IaC fail |
-| Checkov (Kubernetes manifests) | Scans `infra/manifests/` | **No — evidence only** | **Stage 4** | Kyverno enforces the same rules at the cluster gate |
-| Trivy (image CVEs) | Blocks fixable HIGH/CRITICAL (`--ignore-unfixed`) | **Yes** | Stage 3 (break exercise) | Downgrade base image and watch scan fail |
-| Grype (SBOM, auth-service) | Blocks fixable HIGH+ (`--only-fixed`) | **Yes** | Stage 3 | Same CVE story from a second scanner angle |
-| Syft (SBOM generation) | Generates inventory | No | Stage 3 | Used for supply-chain evidence and Grype input |
-| Cosign sign + SLSA attest | Runs after push | **No — non-blocking** | **Stage 4** | Kyverno rejects unsigned images at admission |
-| DAST (OWASP ZAP) | Disabled unless `ENABLE_DAST=true` | N/A in Stage 1 | After Stage 2 deploy | Needs a live app URL to scan |
-| Manifest update → Git | Updates `clearledger-infra` tags | **Yes** (must succeed) | Stage 2 | ArgoCD auto-syncs those tags to the cluster |
+Push to `main` triggers the workflow. Jobs run on your self-hosted runner (`runs-on: [self-hosted, clearledger]`) so they can reach the local Docker daemon and, from Stage 2, the cluster.
 
-**Will you remember which stage hardens what?** Probably not from memory alone — that is normal. Use this table as the map:
+**Two toggles stay off until later** (see §1.4 — the guide tells you when to flip each):
 
-| If Stage 1 left this loose… | Come back in… | You will… |
-|---|---|---|
-| Kubernetes Checkov findings (no `runAsNonRoot`, missing limits, etc.) | **Stage 4** | Install Kyverno; watch it **block** bad pods at admission |
-| Cosign signing errors ignored / non-blocking | **Stage 4** | Configure `require-signed-images`; unsigned images **cannot deploy** |
-| Passwords in Git / base64 K8s Secrets | **Stage 5** | Move credentials to Vault; secrets never live in YAML again |
-| Nothing watches running containers | **Stage 6** | Falco detects shell exec, crypto mining, etc. at runtime |
-| No central view of violations | **Stage 7** | Grafana dashboards show Kyverno blocks, Falco alerts, scan trends |
+- **`ENABLE_ARGOCD_SYNC`** — unset in Stage 1. The `update-manifests` job commits to `clearledger-infra` but does not nudge ArgoCD yet.
+- **`ENABLE_DAST`** — unset until Stage 3, when the app is live at `clearledger.local`.
 
-**How to make it stick (do not rely on memory):**
+**Kubernetes Checkov** runs in Stage 1 but does **not** block the pipeline — it uploads findings so you can see hardening work ahead. Stage 4 turns those kinds of rules into cluster enforcement with Kyverno.
 
-1. **Bookmark this section** — search the lab guide for “Stage 1 security posture”.
-2. **In Stage 3**, do the “break each gate on purpose” exercises — that is where you learn what each tool catches.
-3. **In Stage 4**, open the Checkov artifact from a Stage 1 run and compare it to what Kyverno now blocks. That connects “evidence” to “enforcement”.
-4. Run `make check-3` and `make check-4` — they verify the hardening stages actually landed.
+If a job fails, start with [`docs/troubleshooting.md#stage-1-ci-troubleshooting`](troubleshooting.md#stage-1-ci-troubleshooting) before editing the workflow.
 
-> **Design intent:** Stage 1 proves CI can build, scan, push, and update Git without you touching Docker manually. Stages 3–7 turn evidence into enforcement, runtime detection, and audit trails. Relaxations in Stage 1 are deliberate — not accidental weakening.
+---
 
-If a Stage 1 job fails, use `docs/troubleshooting.md#stage-1-ci-troubleshooting` before changing the workflow. It covers the failures this lab commonly exposes: runner label mismatch, Docker socket permissions, Docker Hub IPv6 connectivity, missing `pip`, Gitleaks demo secrets, Checkov behavior, Trivy install problems, real Python and frontend CVEs, Cosign download issues, Syft/Grype installs, wrong manifest image paths, and DAST being too early for Stage 1.
+#### Stage 1 security posture — what blocks vs what waits
 
-Notice what the pipeline does **not** do: it does not run `kubectl`.
+Stage 1 is not “security off.” Some gates **stop the pipeline**; others **run for evidence** and tighten in later stages.
 
-That is intentional. CI should produce artifacts and update desired state. It should not directly mutate the cluster. Direct cluster mutation is hard to audit and easy to drift from Git.
+**Blocks the pipeline today**
+
+- Gitleaks (secrets in Git)
+- Semgrep (SAST on Python)
+- Checkov on Dockerfiles
+- Trivy (fixable HIGH/CRITICAL CVEs in images)
+- Grype on auth-service SBOM (fixable HIGH+)
+- Manifest update to `clearledger-infra` (must succeed)
+
+**Runs but does not block yet**
+
+- Checkov on Kubernetes manifests → enforced in **Stage 4** (Kyverno)
+- Cosign sign + SLSA attest → enforced in **Stage 4** (unsigned images rejected)
+- Syft SBOM generation → supply-chain evidence; you break gates on purpose in **Stage 3**
+- ArgoCD refresh → **Stage 2** (`ENABLE_ARGOCD_SYNC=true`)
+- DAST / ZAP → **Stage 3** (`ENABLE_DAST=true`)
+
+**If you forget which stage fixes what**, search this guide for “Stage 1 security posture” or follow the stage order: Stage 3 breaks gates on purpose, Stage 4 connects Checkov findings to Kyverno, Stage 5 moves secrets off Git, Stage 6 adds runtime detection, Stage 7 adds dashboards. Run `make check-3` and `make check-4` after those stages to confirm hardening landed.
+
+> **Design intent:** Stage 1 proves CI can build, scan, push, and update Git without you touching Docker manually. Later stages turn evidence into enforcement. The relaxations here are deliberate.
 
 ### 1.6 — Activate the pipeline
 
-The pipeline file already exists at `.github/workflows/ci.yaml`. Push any small change to trigger it:
+**Run this in the `clearledger` app repo — not `clearledger-infra`.**
+
+§1.3 created `clearledger-infra` with only Kubernetes manifests. It has no `.github/workflows/` and no pipeline. If your shell prompt says `clearledger-infra`, or you used `/tmp/clearledger-infra`, you are in the wrong place.
+
+```bash
+cd /path/to/clearledger          # the app repo you pushed in §1.1
+git remote -v                    # must show .../clearledger.git — NOT clearledger-infra
+ls .github/workflows/ci.yaml     # must exist before you commit
+```
+
+The pipeline file already lives at `.github/workflows/ci.yaml`. Push any small change to **`clearledger`** on `main`:
 
 ```bash
 echo "# Pipeline activated $(date)" >> README.md
@@ -1306,7 +1881,9 @@ git commit -m "ci: activate GitHub Actions pipeline"
 git push origin main
 ```
 
-Watch the run at: `https://github.com/YOUR_USERNAME/clearledger/actions`
+Watch the run at: `https://github.com/YOUR_USERNAME/clearledger/actions` (app repo Actions tab — not the infra repo).
+
+When the pipeline succeeds, it updates **`clearledger-infra`** for you. You do not need to push anything to the infra repo by hand for this step.
 
 Expected: all jobs green in about 8 minutes.
 
@@ -1319,6 +1896,8 @@ Expected: all jobs green in about 8 minutes.
 ```
 
 You may also see **DAST (OWASP ZAP + fintech API tests)** listed as **skipped** — that is expected. DAST is off until you set the repository variable `ENABLE_DAST` to `true` (after Stage 2, when the app is deployed and reachable). A skipped DAST job is not a failure.
+
+The **Trigger ArgoCD refresh** step inside `update-manifests` is also skipped in Stage 1 — that is expected. Do not enable `ENABLE_ARGOCD_SYNC` until Stage 2.
 
 Note: this lab includes `.gitleaksignore` because some intentional demo secrets are already present in git history. Gitleaks still runs normally. The ignore file only suppresses known lab fingerprints. Do not add new findings to it unless you have confirmed they are intentional test data.
 
@@ -1350,9 +1929,57 @@ The Kubernetes cluster did not update automatically.
 
 That is not a failure. It is the deployment gap. Stage 1 automated the build, but no controller is watching the infra repo yet. Stage 2 installs ArgoCD to close that gap.
 
+### 1.6 — Hands-on checkpoint: prove Stage 1 is really done
+
+Do not rely on a green workflow badge alone. Run each check yourself:
+
+**1 — Infra repo still has app secrets (critical for Stage 2)**
+
+Open `https://github.com/YOUR_USERNAME/clearledger-infra/tree/main/manifests/auth-service` — `secret.yaml` must be visible.
+
+On your laptop:
+
+```bash
+git clone --depth 1 https://github.com/YOUR_USERNAME/clearledger-infra.git /tmp/verify-infra
+grep secretKeyRef /tmp/verify-infra/manifests/auth-service/deployment.yaml
+grep secret.yaml /tmp/verify-infra/manifests/kustomization.yaml
+rm -rf /tmp/verify-infra
+```
+
+Expected: `secretKeyRef` in deployment output; kustomization lists `auth-service/secret.yaml` and `ledger-service/secret.yaml`. If secrets are missing, re-push §1.3 manifests before Stage 2.
+
+**2 — Kustomize image tags updated by CI**
+
+```bash
+git clone --depth 1 https://github.com/YOUR_USERNAME/clearledger-infra.git /tmp/verify-infra
+grep newTag /tmp/verify-infra/manifests/kustomization.yaml
+rm -rf /tmp/verify-infra
+```
+
+Expected: `newTag` is a **40-character git SHA** (or your commit hash), not still `v0.1.0` only — unless you have not pushed since §0.3.
+
+**3 — Docker Hub has signed images from this pipeline**
+
+Open hub.docker.com → `clearledger-auth-service` → **Tags** — latest tag should match the SHA from step 2.
+
+**4 — Cluster unchanged (deployment gap — intentional)**
+
+```bash
+kubectl get deployment auth-service -n clearledger \
+  -o jsonpath='{.spec.template.spec.containers[0].image}' && echo
+```
+
+Expected: still your **Stage 0** tag (e.g. `$DOCKER_USERNAME/clearledger-auth-service:v0.1.0`), not the new SHA. That proves CI did not touch the cluster.
+
+**5 — Runner still idle**
+
+GitHub → Settings → Actions → Runners → `clearledger-runner` → **Idle**.
+
 ```bash
 make check-1
 ```
+
+All five pass → Stage 2.
 
 ### What you learned in Stage 1
 
@@ -1362,9 +1989,22 @@ make check-1
 - **Good pipelines do not secretly mutate clusters.** This pipeline updates Git instead of running `kubectl`.
 - **The gap that remains:** the infra repo changed, but the cluster did not. Someone still has to apply the change manually. Stage 2 fixes that with GitOps.
 
+**What you can now put on your CV / say in an interview:**
+
+> Built a CI pipeline on a self-hosted GitHub Actions runner that builds and pushes container images on every push, and can debug a workflow that fails before any job is created.
+
 ### DevSecOps lesson — Stage 1 in one paragraph
 
 **Automate the boring path first, and separate “built” from “deployed.”** Stage 1 turns `git push` into a repeatable factory: scan, build, sign, push images, then update **desired state** in `clearledger-infra` — not the cluster directly. That split is core DevSecOps: the pipeline produces **evidence** (scan reports, signed images, immutable tags tied to commit SHA) and records **intent** (which image *should* run) in Git. Security starts here too — some gates already block bad commits — but the deliberate lesson is operational: nobody SSHs to build, nobody runs `kubectl` to “deploy,” and when the infra repo changes but the cluster does not, you feel the **deployment gap** that Stage 2 closes. CI automates *building*; GitOps (next) automates *applying*.
+
+**Save your VM before Stage 2.** After `make check-1` passes and §1.6 is done:
+
+```bash
+make snapshot STAGE=1
+make snapshots    # must show clearledger.stage1 — do not skip
+```
+
+If the VM corrupts later: `make snapshots` → `make restore STAGE=1`. See [Saving your progress](#saving-your-progress).
 
 ---
 
@@ -1373,6 +2013,25 @@ make check-1
 > **Git is truth.** The infra repo says what *should* run. **ArgoCD** keeps the cluster matching that and fixes drift on its own.
 
 **Goal:** Install ArgoCD so it watches `clearledger-infra` and deploys to the cluster. CI still only updates Git; it never runs `kubectl`.
+
+> **Am I ready for Stage 2?**
+>
+> Complete §1.6 first. Then run:
+>
+> ```bash
+> make check-1
+> grep secretKeyRef infra/manifests/auth-service/deployment.yaml
+> grep vault.hashicorp infra/manifests/auth-service/deployment.yaml && echo "STOP: Vault annotations present" || echo "OK"
+> ```
+>
+> Expected: check-1 green; `secretKeyRef` present; `OK` (no Vault annotations in Stages 2–4).
+>
+> - [ ] `clearledger-infra` on GitHub has `auth-service/secret.yaml` and `ledger-service/secret.yaml`
+> - [ ] Self-hosted runner **Idle** with label `clearledger`
+> - [ ] Repository variable `ENABLE_ARGOCD_SYNC` is **not** set yet (Stage 1) — you enable it after ArgoCD is installed below
+>
+> **Done when:** `make check-2` passes and `http://argocd.local` shows ArgoCD syncing `clearledger`.
+> **Then save:** `make snapshot STAGE=2` → `make snapshots` (confirm `clearledger.stage2`).
 
 ### What you need to know first
 
@@ -1395,6 +2054,37 @@ push code → CI updates clearledger-infra → ArgoCD syncs cluster
 | What should be running? | Whatever the manifests in Git say |
 | Roll back? | Revert the commit in the infra repo |
 | Someone changed the cluster by hand? | ArgoCD undoes it (you will prove this below) |
+
+### Pre-sync checklist — run before `argocd app sync`
+
+ArgoCD applies whatever is in `clearledger-infra`. Wrong content causes red pods that look like a broken install. **You verify Git manually:**
+
+**On GitHub** (`https://github.com/YOUR_USERNAME/clearledger-infra/tree/main/manifests`):
+
+| Check | Pass criteria |
+|---|---|
+| `auth-service/deployment.yaml` | Contains `secretKeyRef` — **no** `vault.hashicorp.com` lines |
+| `auth-service/secret.yaml` | File exists |
+| `ledger-service/secret.yaml` | File exists |
+| `kustomization.yaml` → `resources:` | Lists both `*-service/secret.yaml` |
+| `kustomization.yaml` → `newName:` | Your Docker Hub user — replace `YOUR_DOCKERHUB_USERNAME` before Stage 1.3 |
+| `netpol/` folder | **Absent** |
+| `vault/` folder | **Absent** until Stage 5 |
+
+**On your laptop:**
+
+```bash
+# Application manifest must point at YOUR infra repo (after sed in next section)
+grep repoURL stages/stage-2-gitops/argocd/clearledger-app.yaml
+
+# Stage 0 workloads still healthy before ArgoCD takes over
+kubectl get pods -n clearledger
+curl -s -o /dev/null -w "%{http_code}" http://clearledger.local/auth/health
+```
+
+Expected: `repoURL` contains your GitHub username; all app pods `Running`; curl `200`.
+
+Only when every row passes → install ArgoCD and sync below.
 
 ---
 
@@ -1449,8 +2139,11 @@ argocd login argocd.local --username admin --password YOUR_PASSWORD --insecure -
 argocd repo add https://github.com/YOUR_USERNAME/clearledger-infra.git
 
 # Update the repo URL in the Application manifest before applying
-sed -i '' "s|YOUR_USERNAME|$(git config user.name)|g" \
+# Use your GitHub username (not git config user.name — that is often your full name)
+sed -i.bak "s|YOUR_GITHUB_USERNAME|your-github-username|g" \
   stages/stage-2-gitops/argocd/clearledger-app.yaml
+rm -f stages/stage-2-gitops/argocd/clearledger-app.yaml.bak
+# Or: set GITHUB_OWNER in scripts/lab.local.env and source scripts/lab-env.sh + lab_patch_argocd_apps
 
 kubectl apply -f stages/stage-2-gitops/argocd/clearledger-app.yaml
 argocd app sync clearledger --grpc-web
@@ -1463,6 +2156,32 @@ argocd app resources clearledger --grpc-web | grep Deployment
 ```
 
 You should see `auth-service`, `ledger-service`, `frontend`, and the other app Deployments. ArgoCD renders `manifests/kustomization.yaml`, which lists every resource under `manifests/` — not just `ingress.yaml` at the top level.
+
+**✋ Hands-on checkpoint — first sync healthy**
+
+```bash
+kubectl get pods -n clearledger
+kubectl get application clearledger -n argocd \
+  -o jsonpath='sync={.status.sync.status} health={.status.health.status}{"\n"}'
+curl -s -o /dev/null -w "%{http_code}" http://clearledger.local/auth/health
+kubectl logs -n clearledger deploy/auth-service --tail=5 2>/dev/null | head -3
+```
+
+Expected: auth/ledger pods `1/1 Running` (Vault sidecars come in Stage 5); `sync=Synced health=Healthy`; curl `200`; logs show HTTP requests — not `DATABASE_URL is not set`.
+
+### Enable CI → ArgoCD handoff (close the Stage 1 deployment gap)
+
+GitHub → your `clearledger` repo → **Settings → Secrets and variables → Actions → Variables** → **New repository variable**:
+
+| Name | Value |
+|---|---|
+| `ENABLE_ARGOCD_SYNC` | `true` |
+
+The next green pipeline run will refresh ArgoCD after updating `clearledger-infra`. Leave this **unset during Stage 1** — that is how you proved the cluster did not change until GitOps existed.
+
+Leave **`ENABLE_DAST` unset** for now. Stage 3 walks you through turning on OWASP ZAP once the app is reliably live at `clearledger.local`.
+
+If health is **Progressing** or pods are red → read the section below **before** taking screenshots or continuing to Stage 3.
 
 ### If the UI shows red pods or "Progressing" (read this before the screenshot)
 
@@ -1479,6 +2198,8 @@ This is a common first-sync surprise, not a broken install.
 You can be **Synced** and **Progressing** at the same time: manifests applied, but not every pod is healthy yet.
 
 **Why it happens in Stage 2**
+
+ArgoCD syncs whatever is in `clearledger-infra`. Deployments must use **`secretKeyRef`** (Stages 2–4) — not Vault injection. If your infra repo has Vault annotations from an older lab copy, auth/ledger crash with `DATABASE_URL is not set` until Stage 5.
 
 Network policies belong to **Stage 6** (runtime security). They live in `infra/deferred-by-stage/stage-6-runtime-security/netpol/` in this repo — **not** in `infra/manifests/`.
 
@@ -1760,7 +2481,7 @@ git pull
 
 # Edit manifests/notification-service/deployment.yaml
 # Change the image tag to a tag that does not exist, e.g.:
-#   image: docker.io/veeno/clearledger-notification-service:broken-tag
+#   image: docker.io/$DOCKER_USERNAME/clearledger-notification-service:broken-tag
 
 # Commit and push it
 git add manifests/notification-service/deployment.yaml
@@ -1836,9 +2557,22 @@ You have now practised a rollback end-to-end. The `git revert` commit is permane
 - **No one runs `kubectl` to deploy anymore.** The pipeline updates Git, ArgoCD does the rest.
 - **How to roll back safely:** `git revert` in the infra repo is the correct answer; ArgoCD emergency rollback is the break-glass option, and you must disable auto-sync first or selfHeal will silently undo it
 
+**What you can now put on your CV / say in an interview:**
+
+> Implemented GitOps with ArgoCD so cluster state is driven from Git, with drift detection, auto-sync, and a Git-based rollback of a bad deploy.
+
 ### DevSecOps lesson — Stage 2 in one paragraph
 
 **Git is the contract; the controller enforces it.** Stage 1 wrote *what should run* into `clearledger-infra`. Stage 2 installs a reconciler — ArgoCD — that continuously compares the cluster to that repo and fixes drift. Manual `kubectl set image` does not change Git; it only changes the live cluster, and `selfHeal` puts the cluster back. That is the DevSecOps/GitOps payoff: deployments are **auditable** (Git history), **repeatable** (revert a commit to roll back), and **tamper-evident** (unauthorized cluster edits get reverted). The full chain is now push → CI updates infra Git → ArgoCD syncs cluster — still no human deploy step. Stage 3 adds security gates on the CI side; Stage 4 adds a cluster gate for anything that tries to skip them.
+
+**Save your VM before Stage 3.** After `make check-2` passes and repository variable `ENABLE_ARGOCD_SYNC` is `true`:
+
+```bash
+make snapshot STAGE=2
+make snapshots    # must show clearledger.stage2 — do not skip
+```
+
+If the VM corrupts later: `make snapshots` → `make restore STAGE=2`. See [Saving your progress](#saving-your-progress).
 
 ---
 
@@ -1848,7 +2582,18 @@ You have now practised a rollback end-to-end. The `git revert` commit is permane
 
 **Goal:** six security tools scan every commit. Each one catches a different category of vulnerability. Some findings block immediately, such as secrets, SAST, vulnerable images, and production Dockerfile issues. Kubernetes manifest findings are collected first, then become deployment enforcement in Stage 4 with Kyverno. You will deliberately trigger each category to see exactly what it catches and why it matters.
 
-> **Reminder:** Stage 1 already ran most of these tools — some in blocking mode, some as evidence only. See [Stage 1 security posture — strict vs evidence-only](#stage-1-security-posture--strict-vs-evidence-only) for the full map of what was relaxed in Stage 1 and which later stage tightens it.
+> **Am I ready for Stage 3?**
+>
+> - [ ] `make check-2` passes — ArgoCD deploys from `clearledger-infra`
+> - [ ] Repository variable `ENABLE_ARGOCD_SYNC` = `true` (set in Stage 2 after first healthy sync)
+> - [ ] Repository variable `ENABLE_DAST` is still **unset** — you enable it in §3 below
+> - [ ] You can log in to `http://argocd.local` and see apps **Synced**
+> - [ ] You understand what CI already scans (review [Stage 1 security posture](#stage-1-security-posture--what-blocks-vs-what-waits) if unsure)
+>
+> **Done when:** `make check-3` passes and you have triggered each security gate at least once (§3.4).
+> **Then save:** `make snapshot STAGE=3` → `make snapshots` (confirm `clearledger.stage3`).
+
+> **Reminder:** Stage 1 already ran most of these tools — some in blocking mode, some as evidence only. See [Stage 1 security posture — what blocks vs what waits](#stage-1-security-posture--what-blocks-vs-what-waits) for the full map of what was relaxed in Stage 1 and which later stage tightens it.
 
 ### What you need to know first
 
@@ -1869,21 +2614,37 @@ No single tool covers everything. That is why you need all six. In Stage 1, Kube
 
 ---
 
+### Enable DAST (optional — after Stage 2)
+
+DAST (Dynamic Application Security Testing) scans the **running** app at `http://clearledger.local`. It was off in Stages 1–2 on purpose: Stage 1 never deployed to the cluster, and Stage 2 was about getting GitOps healthy first.
+
+If `make check-2` passes and `curl http://clearledger.local/auth/health` returns `200`, you can turn DAST on:
+
+GitHub → your `clearledger` repo → **Settings → Secrets and variables → Actions → Variables** → **New repository variable**:
+
+| Name | Value |
+|---|---|
+| `ENABLE_DAST` | `true` |
+
+Push a small commit (or re-run the last workflow on `main`). The **DAST (OWASP ZAP + fintech API tests)** job should run instead of **skipped**. A failed ZAP scan is a real finding to investigate; **skipped** before this step only means the toggle was off.
+
+---
+
 ### 3.1 — Install pre-commit hooks
 
 ```bash
 # macOS (Homebrew — avoids PEP 668 "externally-managed-environment" from pip3):
 brew install pre-commit
 
-# Linux / venv (if pip3 works on your system):
-# python3 -m venv .venv && source .venv/bin/activate
-# pip install pre-commit
+# Linux/WSL2:
+# sudo apt install -y pre-commit
+# or: python3 -m pip install --user pre-commit
 
 pre-commit install
 pre-commit run --all-files
 ```
 
-If some hooks fail on first run, see [Stage 3 README — expected failures at Stage 3](../stages/stage-3-security-gates/README.md#pre-commit-run---all-files--expected-failures-at-stage-3). **Gitleaks and Ruff must pass** — YAML/Terraform issues on later-stage files are OK until you reach those stages.
+If some hooks fail on first run, see [§3.1 — Install pre-commit hooks](#31--install-pre-commit-hooks). **Gitleaks and Ruff must pass** — YAML/Terraform issues on later-stage files are OK until you reach those stages.
 
 Test it catches secrets locally before CI does:
 
@@ -1899,13 +2660,28 @@ The commit was blocked before it even reached Git. If the pre-commit hook was no
 
 > **Already did Cosign in Stage 1?** That counts. Stage 3 does not require regenerating keys — confirm `infra/cosign.pub` exists and GitHub has `COSIGN_PRIVATE_KEY` + `COSIGN_PASSWORD`. Stage 4 turns signing into **enforcement** at the cluster gate.
 
+**✋ Hands-on checkpoint — pre-commit actually blocks a secret**
+
+Installed-but-not-wired is the classic silent failure. Prove the hooks fire:
+
+```bash
+echo 'AWS_SECRET='"$(printf '%s%s' 'AKIA' 'IOSFODNN7EXAMPLE')" > leak-test.env
+git add leak-test.env
+pre-commit run --all-files; echo "exit=$?"
+git reset leak-test.env >/dev/null; rm -f leak-test.env
+```
+
+Expected: the secret-scanning hook **fails** the run (`exit=1`) and flags `leak-test.env`. If `exit=0`, your hooks are installed but not catching anything — re-run `pre-commit install` and confirm `.git/hooks/pre-commit` exists.
+
+If you skip this, commits sail through unscanned and you will believe Stage 3 is protecting you when it is not.
+
 ### 3.2 — Generate Cosign keys
 
 **Cosign** signs your Docker images with a cryptographic key. When you deploy to the cluster, Kyverno (Stage 4) can verify the signature and reject any image that was not signed by your pipeline. This prevents someone from pushing a malicious image to your Docker Hub and having the cluster run it.
 
 ```bash
 # macOS: brew install cosign
-# Linux: curl -O -L https://github.com/sigstore/cosign/releases/download/v2.2.4/cosign-linux-amd64 && chmod +x cosign-linux-amd64 && sudo mv cosign-linux-amd64 /usr/local/bin/cosign
+# Linux/WSL2: curl -O -L https://github.com/sigstore/cosign/releases/download/v2.2.4/cosign-linux-amd64 && chmod +x cosign-linux-amd64 && sudo mv cosign-linux-amd64 /usr/local/bin/cosign
 
 cosign generate-key-pair   # enter a password when prompted
 ```
@@ -1920,6 +2696,21 @@ Add secrets to GitHub (github.com/YOUR_USERNAME/clearledger → Settings → Sec
 |---|---|
 | `COSIGN_PRIVATE_KEY` | Contents of `cosign.key` |
 | `COSIGN_PASSWORD` | The password you entered when generating keys |
+
+**✋ Hands-on checkpoint — Cosign keypair exists and is gitignored**
+
+Stage 4's image-signing policy depends on this exact state:
+
+```bash
+test -f cosign.key && echo "private key present"
+test -f cosign.pub && echo "public key present"
+grep -q "BEGIN PUBLIC KEY" cosign.pub && echo "public key valid"
+git check-ignore cosign.key && echo "private key correctly ignored"
+```
+
+Expected: all four success lines print. If `git check-ignore` prints nothing, your private key is **not** ignored — add it to `.gitignore` before any commit.
+
+If you skip this, §4.2 fails confusingly later — pods admitted then ImagePullBackOff, or a silent pass.
 
 ### 3.3 — Activate the full security pipeline
 
@@ -2063,7 +2854,9 @@ git checkout app/auth-service/Dockerfile
 **Inject:** older base image in `app/auth-service/Dockerfile`:
 
 ```bash
-sed -i '' 's/FROM python:3.12-slim/FROM python:3.8-slim/' app/auth-service/Dockerfile
+sed -i.bak 's/FROM python:3.12-slim/FROM python:3.8-slim/' app/auth-service/Dockerfile
+# revert after the exercise:
+# git checkout app/auth-service/Dockerfile
 ```
 
 **Dry-run (no full build — scan the base image directly):**
@@ -2176,7 +2969,7 @@ You are **done with Stage 3** when all of these are true:
 
 - Kubernetes Checkov findings blocking the pipeline (evidence only until **Stage 4**)
 - Cosign **blocking** deploys (non-blocking until **Stage 4** Kyverno)
-- DAST / ZAP (needs live app; optional later)
+- DAST / ZAP — enable with `ENABLE_DAST=true` in §3 above when ready (optional)
 
 **What “move to Stage 4” means:** CI scans code and images before they reach GitOps. Stage 4 adds **admission control** — Kyverno rejects bad pods and unsigned images **inside the cluster**, even if someone bypasses CI with `kubectl`. Run `make check-4` after Stage 4.
 
@@ -2188,9 +2981,22 @@ You are **done with Stage 3** when all of these are true:
 - What image signing proves and why it matters for supply chain security
 - **The pattern:** deliberately break → read the error → understand it → fix it. This is how you build operational instinct.
 
+**What you can now put on your CV / say in an interview:**
+
+> Added a CI security gate — secret scanning, SAST, dependency and IaC scanning, and Cosign image signing — and can show each gate blocking a real issue on purpose.
+
 ### DevSecOps lesson — Stage 3 in one paragraph
 
 **Security is not a final review before release — it is a pipeline.** In Stage 2, any commit could reach the cluster through GitOps. Stage 3 adds automated gates that **fail fast**: secrets never enter git, vulnerable code and images never get tagged for deploy, and every artifact is signed so you can prove where it came from. No single scanner sees everything — Gitleaks, Semgrep, Checkov, and Trivy each guard a different layer — so **defense in depth** means stacking tools, not picking one. Pre-commit on your laptop plus CI on push is the same idea twice: catch problems **before** they become incidents. Stage 3 secures the **path into production**; Stage 4 secures the **cluster door** for anything that tries to bypass that path.
+
+**Save your VM before Stage 4.** After `make check-3` passes:
+
+```bash
+make snapshot STAGE=3
+make snapshots    # must show clearledger.stage3 — do not skip
+```
+
+If the VM corrupts later: `make snapshots` → `make restore STAGE=3`. See [Saving your progress](#saving-your-progress).
 
 ---
 
@@ -2200,7 +3006,36 @@ You are **done with Stage 3** when all of these are true:
 
 **Goal:** Kyverno intercepts every pod creation and rejects any that violate policy — before the container runtime ever sees them.
 
-> **This is where Stage 1 evidence becomes enforcement.** Kubernetes Checkov findings that did not block CI in Stage 1 now stop bad pods at the cluster gate. Cosign signing that was non-blocking in Stage 1 is now required for deployment. See [Stage 1 security posture — strict vs evidence-only](#stage-1-security-posture--strict-vs-evidence-only).
+> **Am I ready for Stage 4?**
+>
+> - [ ] `make check-3` passes — pre-commit hooks and CI security gates active
+> - [ ] `infra/cosign.pub` exists (from Stage 3)
+> - [ ] ArgoCD still syncing — app reachable at `http://clearledger.local`
+>
+> **Done when:** `make check-4` passes and all three break-it scenarios in §4.4 deny bad pods.
+> **Then save:** `make snapshot STAGE=4` → `make snapshots` (confirm `clearledger.stage4`).
+
+> **This is where Stage 1 evidence becomes enforcement.** Kubernetes Checkov findings that did not block CI in Stage 1 now stop bad pods at the cluster gate. Cosign signing that was non-blocking in Stage 1 is now required for deployment. See [Stage 1 security posture — what blocks vs what waits](#stage-1-security-posture--what-blocks-vs-what-waits).
+
+### Platform stability — from Stage 4 onward
+
+A pod can show `Running` while crash-looping. High `RESTARTS` on **platform** pods (Kyverno, `hostpath-provisioner`, Prometheus operator) leads to API timeouts and wasted days debugging the wrong component.
+
+**After every stage from here on:**
+
+```bash
+bash scripts/health-check.sh <stage>    # e.g. 4, 7, 7.5
+```
+
+The script ends with a **Platform stability** section. Also scan the highest restart counts:
+
+```bash
+kubectl get pods -A --sort-by='.status.containerStatuses[0].restartCount' \
+  -o custom-columns='NS:.metadata.namespace,NAME:.metadata.name,RESTARTS:.status.containerStatuses[0].restartCount' \
+  | tail -15
+```
+
+**Gate:** Kyverno controllers and other platform pods should show **RESTARTS under 5** after the stage settles (~10 minutes). If any platform pod is climbing past 10, stop and fix with the documented Helm values or [troubleshooting.md](troubleshooting.md) — do not `kubectl patch` around it.
 
 ### What you need to know first
 
@@ -2303,6 +3138,21 @@ The policy ships with a placeholder — you **must** paste your key before apply
 ```
 
 Your key will differ from the example above — it must match the key your CI uses to sign images in Stage 3.
+
+**✋ Hands-on checkpoint — Cosign key really in the policy**
+
+After you save the file, run:
+
+```bash
+grep -c PASTE_YOUR_COSIGN_PUBLIC_KEY_HERE infra/policies/require-signed-images.yaml || echo "OK: placeholder removed"
+grep -c "BEGIN PUBLIC KEY" infra/policies/require-signed-images.yaml
+diff <(grep -v '^#' infra/cosign.pub | grep -v '^$') \
+     <(grep -A20 'publicKeys' infra/policies/require-signed-images.yaml | grep -E 'BEGIN|END|^[A-Za-z0-9+/=]')
+```
+
+Expected: `OK: placeholder removed`; count `1` for BEGIN line; `diff` prints **nothing** (key in policy matches `cosign.pub`).
+
+If you skip this, Scenario 3 in §4.4 will fail in a confusing way (pods admitted, then ImagePullBackOff, or silent pass).
 
 ---
 
@@ -2477,7 +3327,7 @@ kubectl get pod nolimits-test -n clearledger
 **Step 1 — push a deliberately unsigned test image** (one-time):
 
 ```bash
-export DOCKER_USERNAME=your-dockerhub-username   # e.g. veeno
+export DOCKER_USERNAME=your-dockerhub-username
 
 docker pull nginx:alpine
 docker tag nginx:alpine ${DOCKER_USERNAME}/clearledger-auth-service:unsigned-test
@@ -2528,7 +3378,7 @@ Error from server: error when creating "STDIN": admission webhook "mutate.kyvern
 resource Pod/clearledger/unsigned-test was blocked due to the following policies
 
 require-signed-images:
-  verify-cosign-signature: 'failed to verify image index.docker.io/veeno/clearledger-auth-service:unsigned-test:
+  verify-cosign-signature: 'failed to verify image index.docker.io/$DOCKER_USERNAME/clearledger-auth-service:unsigned-test:
     .attestors[0].entries[0].keys: no signatures found'
 ```
 
@@ -2561,7 +3411,7 @@ When the image **is** signed by your pipeline and the pod spec is compliant, adm
 # Your deployed tag (signed in CI) — should start if spec is compliant:
 kubectl get deployment auth-service -n clearledger \
   -o jsonpath='{.spec.template.spec.containers[0].image}'
-# docker.io/veeno/clearledger-auth-service:v0.1.0
+# docker.io/$DOCKER_USERNAME/clearledger-auth-service:v0.1.0
 ```
 
 Existing Deployments synced before policies existed keep running. New pods using your signed tags pass verification.
@@ -2686,7 +3536,7 @@ Kyverno enforces *what workloads* are allowed to run. **kube-bench** audits *how
 bash stages/stage-4-admission-control/scripts/run-kube-bench.sh
 ```
 
-This applies a Job, waits for completion, saves JSON to `stages/stage-4-admission-control/scripts/kube-bench-report.json`, and compares against the committed baseline. On MicroK8s you will see WARN/FAIL items for flags under `/var/snap/microk8s/current/args/` — see [stage-4 README](../stages/stage-4-admission-control/README.md#48--prove-your-cluster-passes-cis-benchmark) for fixes.
+This applies a Job, waits for completion, saves JSON to `stages/stage-4-admission-control/scripts/kube-bench-report.json`, and compares against the committed baseline. On MicroK8s you will see WARN/FAIL items for flags under `/var/snap/microk8s/current/args/` — see [§4.7 — CIS benchmark evidence](#47--cis-benchmark-evidence-kube-bench) below for fixes.
 
 ---
 
@@ -2756,6 +3606,10 @@ You are **done with Stage 4** when all of these are true:
 - That operational issues (Helm, image pulls, registry URL format) affect whether controls actually fire
 - **Why both CI and admission control are needed:** CI catches problems in your code; Kyverno catches everything else that touches the cluster
 
+**What you can now put on your CV / say in an interview:**
+
+> Enforced admission control with Kyverno — blocking root containers, privilege escalation, unsigned images, and missing resource limits at deploy time — mapped to CIS Kubernetes benchmarks.
+
 ### DevSecOps lesson — Stage 4
 
 **CI is the front door; admission control is the bouncer.** Stage 3 proved your pipeline signs images and scans manifests — but anyone with `kubectl apply` could bypass all of it. Kyverno closes that gap: every pod creation is evaluated against CIS-aligned policies before it runs. Checkov findings that were evidence-only in Stage 1 are now live enforcement. Cosign signatures that were non-blocking in Stage 1 are now required at deploy time.
@@ -2764,6 +3618,15 @@ You are **done with Stage 4** when all of these are true:
 
 **Defense in depth has a order.** CI → GitOps → admission control are three gates on the same path. Each catches what the previous one misses: CI never sees a manual `kubectl apply`; GitOps does not validate image signatures; Kyverno does not scan source code. Stacking all three is normal in regulated environments — no single gate is enough.
 
+**Save your VM before Stage 5.** After `make check-4` passes:
+
+```bash
+make snapshot STAGE=4
+make snapshots    # must show clearledger.stage4 — do not skip
+```
+
+If the VM corrupts later: `make snapshots` → `make restore STAGE=4`. See [Saving your progress](#saving-your-progress).
+
 ---
 
 ## Stage 5 — Secrets Management (Vault)
@@ -2771,6 +3634,15 @@ You are **done with Stage 4** when all of these are true:
 > No credentials in Git. No credentials in etcd. Vault injects them at runtime.
 
 **Goal:** delete the Kubernetes app Secrets. The app keeps working. That is when secrets management clicks.
+
+> **Am I ready for Stage 5?**
+>
+> - [ ] `make check-4` passes — Kyverno policies enforcing, break-it scenarios worked
+> - [ ] Kyverno pods `1/1 Running` with **RESTARTS under 5** (see [platform stability](#platform-stability--from-stage-4-onward))
+> - [ ] App still works at `http://clearledger.local` after Stage 4 policies applied
+>
+> **Done when:** `make check-5` passes, K8s app Secrets deleted, login still works via Vault-injected files.
+> **Then save:** `make snapshot STAGE=5` → `make snapshots` (confirm `clearledger.stage5`).
 
 ### What you need to know first
 
@@ -2963,25 +3835,56 @@ updated_time            2026-06-01T15:31:53.538991153Z
 
 ### 5.4 — GitOps: update `clearledger-infra` (fixes ArgoCD OutOfSync)
 
-ArgoCD watches **`clearledger-infra`**, not this app repo. Stage 5 must land there:
+ArgoCD watches **`clearledger-infra`**, not this app repo. Stage 5 is a **manual Git surgery** — work slowly, verify after each step.
 
-1. Vault-enabled `deployment.yaml` for **auth** and **ledger**.
-2. **Delete** `manifests/auth-service/secret.yaml` and `manifests/ledger-service/secret.yaml` from the **infra repo**.
-
-**First push of Stage 5 to your infra repo:**
+**5.4a — Update manifests in the app repo (`clearledger`)**
 
 ```bash
-# Copy stage-5 deployments into this repo’s infra/ (edit DOCKER_USERNAME → your Docker Hub user)
 cp stages/stage-5-secrets-management/infra/manifests/auth-service/deployment.yaml \
    infra/manifests/auth-service/deployment.yaml
 cp stages/stage-5-secrets-management/infra/manifests/ledger-service/deployment.yaml \
    infra/manifests/ledger-service/deployment.yaml
-# sed -i '' 's/DOCKER_USERNAME/your-dockerhub-user/g' infra/manifests/auth-service/deployment.yaml
-# sed -i '' 's/DOCKER_USERNAME/your-dockerhub-user/g' infra/manifests/ledger-service/deployment.yaml
+mkdir -p infra/manifests/vault
+cp infra/deferred-by-stage/stage-5-secrets-management/vault/rotation-cronjob.yaml \
+   infra/manifests/vault/rotation-cronjob.yaml
+rm -f infra/manifests/auth-service/secret.yaml infra/manifests/ledger-service/secret.yaml
+```
 
+**5.4b — Edit `infra/manifests/kustomization.yaml` by hand**
+
+Open the file in your editor. In the `resources:` list:
+
+- **Delete** these two lines:
+  ```yaml
+  - auth-service/secret.yaml
+  - ledger-service/secret.yaml
+  ```
+- **Add** this line (with the other resources):
+  ```yaml
+  - vault/rotation-cronjob.yaml
+  ```
+
+Save. Verify:
+
+```bash
+grep secret.yaml infra/manifests/kustomization.yaml && echo "STOP: secrets still listed" || echo "OK"
+grep vault/rotation-cronjob.yaml infra/manifests/kustomization.yaml
+grep vault.hashicorp infra/manifests/auth-service/deployment.yaml | head -1
+```
+
+Expected: `OK`; rotation cronjob listed; first line shows `vault.hashicorp.com/agent-inject`.
+
+Commit in the **app** repo when ready: `git add infra/manifests && git commit -m "feat(stage-5): Vault deployments in canonical manifests"`.
+
+**5.4c — Push the same changes to `clearledger-infra`**
+
+```bash
 git clone https://github.com/YOUR_USERNAME/clearledger-infra.git /tmp/clearledger-infra
 cp infra/manifests/auth-service/deployment.yaml /tmp/clearledger-infra/manifests/auth-service/
 cp infra/manifests/ledger-service/deployment.yaml /tmp/clearledger-infra/manifests/ledger-service/
+mkdir -p /tmp/clearledger-infra/manifests/vault
+cp infra/manifests/vault/rotation-cronjob.yaml /tmp/clearledger-infra/manifests/vault/
+cp infra/manifests/kustomization.yaml /tmp/clearledger-infra/manifests/kustomization.yaml
 rm -f /tmp/clearledger-infra/manifests/auth-service/secret.yaml
 rm -f /tmp/clearledger-infra/manifests/ledger-service/secret.yaml
 
@@ -2993,11 +3896,25 @@ git push
 cd -
 ```
 
-**Expected — `git status` before commit:**
+**✋ Hands-on checkpoint — Stage 5 GitOps landed**
+
+```bash
+git clone --depth 1 https://github.com/YOUR_USERNAME/clearledger-infra.git /tmp/verify-s5
+test ! -f /tmp/verify-s5/manifests/auth-service/secret.yaml && echo "OK: app secret removed from Git"
+grep vault.hashicorp /tmp/verify-s5/manifests/auth-service/deployment.yaml | head -1
+grep vault/rotation-cronjob.yaml /tmp/verify-s5/manifests/kustomization.yaml
+rm -rf /tmp/verify-s5
+```
+
+Expected: `OK`; Vault annotation present; rotation job in kustomization.
+
+**Expected — `git status` before commit (step 5.4c):**
 
 ```text
 modified:   manifests/auth-service/deployment.yaml
 modified:   manifests/ledger-service/deployment.yaml
+modified:   manifests/kustomization.yaml
+new file:   manifests/vault/rotation-cronjob.yaml
 deleted:    manifests/auth-service/secret.yaml
 deleted:    manifests/ledger-service/secret.yaml
 ```
@@ -3185,9 +4102,22 @@ If Vault injection or ArgoCD sync fails, see [troubleshooting.md — Vault Issue
 - That **order matters**: Vault ready → seed KV → GitOps → healthy pods → delete K8s Secrets
 - **The security improvement:** app credentials are not in Git, not in etcd as K8s Secrets, and disappear when the pod stops
 
+**What you can now put on your CV / say in an interview:**
+
+> Replaced Kubernetes Secrets with HashiCorp Vault agent injection so no credentials live in Git or etcd, and can explain runtime injection and rotation.
+
 ### DevSecOps lesson — Stage 5
 
 **Secrets belong in a vault, not in YAML.** Stage 4 hardened *what runs*; Stage 5 removes *what attackers find in Git and etcd*. The migration pattern is: configure Vault → seed KV from a local `.env` once → deploy via GitOps without `secret.yaml` → delete K8s app Secrets → prove the app still works. Operational scripts configure the platform; they do not embed credentials. Rotation becomes updating Vault and letting the agent refresh files — not editing manifests in Git.
+
+**Save your VM before Stage 6.** After `make check-5` passes:
+
+```bash
+make snapshot STAGE=5
+make snapshots    # must show clearledger.stage5 — do not skip
+```
+
+If the VM corrupts later: `make snapshots` → `make restore STAGE=5`. See [Saving your progress](#saving-your-progress).
 
 ---
 
@@ -3198,6 +4128,15 @@ If Vault injection or ArgoCD sync fails, see [troubleshooting.md — Vault Issue
 **Goal:** Understand what runtime security *detects* and *why* — then prove it by triggering an alert and reading it like an operator would.
 
 This stage is not “install Falco and move on.” You are learning a **gap in the stack**: everything before Stage 6 secures **what gets deployed**; Falco secures **what running software actually does**. That is the same problem space as incident response, forensics, and zero-trust — not just another Helm chart.
+
+> **Am I ready for Stage 6?**
+>
+> - [ ] `make check-5` passes — Vault injecting secrets, app Secrets removed from Git/cluster
+> - [ ] Login and transactions still work at `http://clearledger.local`
+> - [ ] Platform pods stable (low RESTARTS — [platform stability](#platform-stability--from-stage-4-onward))
+>
+> **Done when:** `make check-6` passes and you have triggered at least one Falco alert (§6.2 or §6.3).
+> **Then save:** `make snapshot STAGE=6` → `make snapshots` (confirm `clearledger.stage6`).
 
 ### What you need to know first
 
@@ -3374,6 +4313,20 @@ kubectl logs -n falco -l app.kubernetes.io/name=falco -c falco --tail=30 | grep 
 ```
 
 If you see `LOAD_ERR_COMPILE_CONDITION` instead, the custom rule YAML uses an invalid field — see [troubleshooting.md — Stage 6](../docs/troubleshooting.md#stage-6--runtime-security-falco).
+
+**✋ Hands-on checkpoint — Falco is running AND your custom rules loaded**
+
+The classic silent failure: Falco pods run, but `clearledger_rules.yaml` never loaded via Helm — so your custom detections never fire.
+
+```bash
+kubectl get pods -n falco
+kubectl get configmap clearledger-falco-rules -n falco
+kubectl logs -n falco -l app.kubernetes.io/name=falco -c falco --tail=200 | grep clearledger_rules | head
+```
+
+Expected: the Falco DaemonSet pod shows `2/2 Running`; ConfigMap `clearledger-falco-rules` exists; logs include `clearledger_rules.yaml | schema validation: ok`. An empty grep means your custom rules did **not** load.
+
+If you skip this, every break-it scenario in §6.3 looks like it passed (no alert) when really Falco never had your rules.
 
 ---
 
@@ -3578,6 +4531,20 @@ kubectl exec -n clearledger \
 
 If notification health fails after netpol, see [troubleshooting.md — Stage 6](../docs/troubleshooting.md#stage-6--runtime-security-falco).
 
+**✋ Hands-on checkpoint — network policy locked down traffic without breaking the app**
+
+Applying a NetworkPolicy is the #1 way to silently break auth→Postgres.
+
+```bash
+kubectl get networkpolicy -n clearledger
+curl -s -o /dev/null -w "%{http_code}\n" http://clearledger.local/
+kubectl get pods -n clearledger --field-selector=status.phase!=Running
+```
+
+Expected: policies listed (`default-deny-all`, `allow-auth-service`, `allow-postgres`, and the other Stage 6 allows); HTTP `200`; the last command prints **nothing**. If auth/ledger start restarting after the policy, your egress rule is too strict — fix it before continuing.
+
+If you skip this, auth-service silently loses Postgres, pods restart-loop, and you will blame Falco or Vault when the cause is the policy.
+
 ---
 
 ### 6.6 — Health check
@@ -3627,9 +4594,22 @@ All checks passed. Ready for the next stage.
 - How to trigger and interpret alerts — incident response skills
 - **The full stack:** code scanning → admission control → secrets management → runtime detection → (next) observability
 
+**What you can now put on your CV / say in an interview:**
+
+> Deployed Falco for runtime threat detection with custom rules, and can trigger and read an alert for a shell-in-container or sensitive-file read the way an on-call engineer would.
+
 ### DevSecOps lesson — Stage 6
 
 **Detection at runtime closes the last gap on the node.** CI and Kyverno guard the path in; Vault guards credentials at rest in Git/etcd; Falco watches what processes *do* after a pod is running. Network policies add **prevention** while Falco adds **detection** — both are normal in regulated environments. The break-it scenarios produce audit evidence: named rules, pod, container, and command — exactly what you need when triaging a real incident.
+
+**Save your VM before Stage 6.5 or Stage 7.** After `make check-6` passes:
+
+```bash
+make snapshot STAGE=6
+make snapshots    # must show clearledger.stage6 — do not skip
+```
+
+If the VM corrupts later: `make snapshots` → `make restore STAGE=6`. See [Saving your progress](#saving-your-progress).
 
 ---
 
@@ -3639,6 +4619,19 @@ All checks passed. Ready for the next stage.
 
 **Goal:** Understand the difference between **detection** and **resilience**, then prove auth-service stays available when a pod is killed.
 
+> **Optional — you can skip to Stage 7.** Stage 6.5 is portfolio/interview depth, not required for Stages 7–8. If you are time-limited or your laptop is under memory pressure, skip this entire stage and continue at [Stage 7](#stage-7--security-observability).
+>
+> **Fast path:** `make check-6` passes → jump to Stage 7.
+>
+> **Full path — Am I ready for Stage 6.5?**
+>
+> - [ ] `make check-6` passes — Falco installed and alerting
+> - [ ] `auth-service` pods stable (run `make fix-65-prereqs` if restarts are high — §6.5.0)
+> - [ ] ~1 hour for Litmus install + one chaos experiment
+>
+> **Done when:** `make check-65` passes (or you deliberately skip and note it in your portfolio).
+> **Then save:** `make snapshot STAGE=65` → `make snapshots` (confirm `clearledger.stage65`).
+
 **Why the Litmus UI looked empty:** ChaosCenter is a **control plane**. It does not know about your cluster until an **agent** (subscriber pod) registers. Install now connects the agent automatically; you then **run chaos from the UI** while watching the terminal.
 
 **Path:**
@@ -3647,7 +4640,8 @@ All checks passed. Ready for the next stage.
 make fix-65-prereqs
 export LITMUS_PASSWORD='your-password'   # only if you changed it from default litmus
 bash stages/stage-6.5-chaos-engineering/scripts/install-litmus.sh
-# → open http://litmus.local
+# macOS:        open http://litmus.local
+# Linux/WSL2:   xdg-open http://litmus.local
 # → follow §6.5.1c (navigate) + §6.5.2 (ChaosHub → Launch Experiment)
 # → optional §6.5.3 (make demo-65 — same test from terminal)
 ```
@@ -4367,9 +5361,22 @@ All checks passed. Ready for the next stage.
 - **Platform vs app namespaces** — Kyverno blocks chaos runners in `clearledger`; engines run in `litmus`
 - **MTTR** — time from pod kill to 2/2 Ready again (Stage 7 graphs this)
 
+**What you can now put on your CV / say in an interview:**
+
+> Ran chaos experiments with LitmusChaos (pod-delete, network latency, memory pressure) to prove the system recovers, and can distinguish detection from resilience.
+
 ### DevSecOps lesson — Stage 6.5
 
 Security tooling tells you when something looks wrong. **Resilience testing** tells you whether the business keeps running anyway. Together they match what production teams and DORA expect: detect incidents *and* prove you tested recovery before auditors ask.
+
+**Save your VM before Stage 7** (optional stage — skip if you did not run 6.5). After `make check-65` passes:
+
+```bash
+make snapshot STAGE=65
+make snapshots    # must show clearledger.stage65 — do not skip
+```
+
+If the VM corrupts later: `make snapshots` → `make restore STAGE=65`. See [Saving your progress](#saving-your-progress).
 
 ---
 
@@ -4380,6 +5387,16 @@ Security tooling tells you when something looks wrong. **Resilience testing** te
 **Goal:** Understand how **metrics**, **logs**, and **dashboards** fit together — then prove it by running commands in the terminal, watching the same events appear in Grafana, and explaining what each panel means.
 
 This stage is **not** “install Grafana and move on.” **Stage 7 is not complete** until your dashboards show **real** Kyverno violations and Falco alerts that **you triggered** in §7.4 — plus portfolio screenshots (§7.6). `make check-7` only proves the stack is up; it does **not** prove you can detect security events.
+
+> **Am I ready for Stage 7?**
+>
+> - [ ] `make check-6` passes — Falco runtime detection working (Stage 6.5 optional; skip is fine)
+> - [ ] Platform pods stable — low RESTARTS, load average reasonable (`multipass exec clearledger -- uptime`)
+> - [ ] Run [§7.0](#70--free-node-resources-scale-down-litmus) first if you completed Stage 6.5 (scale Litmus to zero)
+> - [ ] ~half day; heaviest stage on a single-node VM
+>
+> **Done when:** §7.6 checklist complete — dashboards show **your** Kyverno denial and Falco alert, not empty panels.
+> **Then save:** `make snapshot STAGE=7` → `make snapshots` (confirm `clearledger.stage7`) — after `make check-7` in §7.7.
 
 > **Already installed?** If `kubectl get pods -n monitoring` shows Grafana **3/3** and Loki **1/1**, skip §7.1 and start at **§7.2** (verify the stack), then **§7.4** (hands-on lab).
 
@@ -4423,7 +5440,7 @@ You run a command (terminal)
 
 ### 7.0 — Free node resources (scale down Litmus)
 
-Stage 6.5 is complete — you do not need the Litmus UI, MongoDB, or chaos operator running while Prometheus, Loki, and Grafana start. They compete for the same 4 CPUs on a single-node lab VM. Scaling Litmus to zero frees ~500–800MB RAM and reduces CPU churn before the observability install.
+Stage 6.5 is complete — you do not need the Litmus UI, MongoDB, or chaos operator running while Prometheus, Loki, and Grafana start. They compete for the same CPUs on a single-node lab VM (6 by default; see `scripts/setup-cluster.sh`). Scaling Litmus to zero frees ~500–800MB RAM and reduces CPU churn before the observability install.
 
 ```bash
 kubectl scale deployment,statefulset -n litmus --replicas=0 --all
@@ -4495,6 +5512,21 @@ Log in: **http://grafana.local** — `admin` / `admin123`
 > Empty panels right after install are **normal**. You have not generated events yet. Continue to §7.2–§7.4.
 
 If Helm fails: wait 30s, then `FORCE=1 bash stages/stage-7-observability/scripts/install-observability.sh`. See [troubleshooting.md — Stage 7](troubleshooting.md#stage-7--observability-grafana--prometheus--loki).
+
+**✋ Hands-on checkpoint — the whole stack is healthy, especially Loki**
+
+This is where single-node runs die: Loki crash-loops and the dashboard ConfigMaps never land, but Grafana looks fine — so you waste an hour on "empty dashboards."
+
+```bash
+kubectl get pods -n monitoring
+kubectl get pods -n monitoring -l app.kubernetes.io/name=loki \
+  -o jsonpath='{.items[*].status.containerStatuses[*].restartCount}{"\n"}'
+kubectl get configmap -n monitoring -l clearledger_dashboard=1 --no-headers | wc -l
+```
+
+Expected: all monitoring pods `Running`; Loki restart count `0` (or low and **stable**, not climbing); the ConfigMap count is `6` — your six dashboards. If Loki restarts keep climbing or the count is `0`, stop here — opening Grafana now only shows empty panels.
+
+If you skip this, you spend the rest of Stage 7 debugging "why are my dashboards empty" when the real failure was Loki crash-looping at install.
 
 ---
 
@@ -4751,6 +5783,17 @@ After A + B + C, open [Compliance Posture](http://grafana.local/d/clearledger-co
 
 This is the **one screenshot** that shows defense-in-depth: admission + runtime + application.
 
+**✋ Hands-on checkpoint — a real event you triggered shows up in Grafana**
+
+```bash
+curl -s -u admin:admin123 'http://grafana.local/api/search?tag=clearledger' | jq -r '.[].title'
+curl -s -u admin:admin123 'http://grafana.local/api/datasources' | jq -r '.[].name'
+```
+
+Expected: your six dashboard titles list; datasources include **both** Prometheus and Loki. Then in the UI, the Security Event Timeline shows the denial/alert you just caused — not an empty panel.
+
+If you skip this: `make check-7` passes on an empty stack. Passing the health check is not the same as proving you can detect a security event — and detection is the whole point of the stage.
+
 ---
 
 ### 7.5 — Optional: Prometheus metrics for Request Rate
@@ -4837,7 +5880,7 @@ make check-7
   ✓ ClearLedger dashboards imported (6 found)
 ```
 
-Warnings about Loki restarts or missing dashboards — fix with §7.1 before claiming Stage 7 complete.
+Warnings about Loki restarts or missing dashboards — fix with §7.1 before claiming Stage 7 complete. **Save your VM** after §7.6 and `make check-7` — see the block at the end of Stage 7 below.
 
 ---
 
@@ -4859,7 +5902,7 @@ Trivy caches its CVE database on the runner. After several days, the cache excee
 
 **Docker DNS drops mid `pip install`**
 
-The Multipass VM uses NAT. Docker containers during `docker build` inherited Docker's embedded DNS resolver (`127.0.0.1:53`), which became unreliable when NAT sessions were reused. Pip downloads timed out mid-transfer, then all retries failed with `[Errno -2] Name or service not known`. Fixed by configuring the Docker daemon to use Google DNS directly (`/etc/docker/daemon.json` with `{“dns”:[“8.8.8.8”,”8.8.4.4”]}`) and adding TCP keepalive (`net.ipv4.tcp_keepalive_time=60`) on the VM so NAT sessions stay alive during long downloads.
+Builds failed when the host resolver (`127.0.0.53`) or Docker's inherited DNS flaked — nginx metadata pulls, GitHub checkout, and pip inside `docker build` all hit the same problem. Fixed with `scripts/configure-vm-network.sh` (pins upstream DNS on `systemd-resolved` and in `/etc/docker/daemon.json`). Mac: `bash scripts/configure-vm-network.sh` · Linux/WSL2: `bash scripts/configure-vm-network.sh --inside-vm`. If builds still fail with `[Errno 101] Network is unreachable`, check the **Network diagnostic (on build failure)** step in GitHub Actions for `host_dns=` / `container_dns=` — `1 0` points at Docker bridge/NAT, not DNS.
 
 **Python 3.13 wheel compatibility**
 
@@ -5019,6 +6062,10 @@ Once all three are in place, `http_requests_total` appears in Prometheus and the
 - Kubernetes Audit Log dashboard is empty on MicroK8s by design — the API server audit pipeline (audit-policy → file → Promtail → Loki) is not enabled by default
 - Request Rate requires the full chain: app image with `/metrics`, PodMonitor, and network policy — any one missing means the panel stays empty
 
+**What you can now put on your CV / say in an interview:**
+
+> Built security observability with Prometheus, Loki, and Grafana — dashboards correlating Kyverno violations, Falco alerts, and DORA metrics — and can prove a security event end-to-end from terminal to dashboard.
+
 #### Stage 7 done checklist
 
 - `make check-7` → 6/6 ✓ (Stage 6.5 Litmus failure is expected — scaled down for memory)
@@ -5028,6 +6075,15 @@ Once all three are in place, `http_requests_total` appears in Prometheus and the
 - `http://grafana.local/d/clearledger-service-health` — Failed Login Attempts > 0, Request Rate > 0
 - Portfolio screenshots 1–3 saved
 
+**Save your VM before Stage 7.5 or Stage 8.** Stage 7 is heavy — disk pressure and Loki crash-loops are common if you skip this. After `make check-7` passes and §7.6 screenshots are done:
+
+```bash
+make snapshot STAGE=7
+make snapshots    # must show clearledger.stage7 — do not skip
+```
+
+If the VM corrupts later: `make snapshots` → `make restore STAGE=7`. See [Saving your progress](#saving-your-progress).
+
 ---
 
 ## Stage 7.5 — OpenTelemetry (Optional)
@@ -5035,6 +6091,20 @@ Once all three are in place, `http_requests_total` appears in Prometheus and the
 > Metrics and logs tell you what happened. Traces tell you **where time was spent and which service caused the delay.**
 
 **Goal:** send a real transaction and open Grafana Tempo to see its full journey: `POST /transactions` (ledger-service) → `GET /verify` (auth-service) → SQL INSERT (postgres) as a single waterfall with exact timings on each hop.
+
+> **Optional — you can skip to Stage 8.** Traces are interview gold, but metrics + logs from Stage 7 are enough to complete the homelab. Skip if memory is tight or you are moving to AWS.
+>
+> **Fast path:** `make check-7` passes + §7.6 screenshots done → jump to [Stage 8](#stage-8--aws-migration).
+>
+> **Full path — Am I ready for Stage 7.5?**
+>
+> - [ ] `make check-7` passes — Prometheus, Loki, Grafana healthy
+> - [ ] §7.6 done checklist complete (dashboards show real events)
+> - [ ] [§7.5.1](#751--check-memory-and-load-before-starting) — at least 1.5 Gi free RAM, load below ~2× VM CPU count
+> - [ ] Litmus scaled down (§7.0) if you ran Stage 6.5
+>
+> **Done when:** `bash scripts/health-check.sh 7.5` passes and you have a Tempo trace screenshot.
+> **Then save:** `make snapshot STAGE=75` → `make snapshots` (confirm `clearledger.stage75`).
 
 ### What you need to know first
 
@@ -5085,7 +6155,7 @@ multipass exec clearledger -- free -h
 # You need at least 1.5Gi available
 
 multipass exec clearledger -- uptime
-# load average (1m) should be below ~10 on a 4-CPU VM
+# load average (1m) should stay below ~2× your VM CPU count (e.g. <12 on the default 6-CPU VM)
 
 bash scripts/health-check.sh 7
 ```
@@ -5259,6 +6329,8 @@ Expected output:
   ✓ auth-service has OTEL_EXPORTER_OTLP_ENDPOINT set
 ```
 
+**Save your VM** after `make check-75` — see the block at the end of Stage 7.5 below.
+
 ---
 
 ### What you learned in Stage 7.5
@@ -5270,9 +6342,22 @@ Expected output:
 - Why OTel is vendor-neutral: the same instrumentation works with Tempo today and Datadog or Jaeger tomorrow with only a collector config change
 - The collector pattern: apps never talk directly to storage — they talk to a collector, which routes to whatever backend you configure
 
+**What you can now put on your CV / say in an interview:**
+
+> Added distributed tracing with OpenTelemetry and Grafana Tempo, and can follow a single request across services in one trace.
+
 ### DevSecOps lesson — Stage 7.5 in one paragraph
 
 **Observability is not one tool, it is three signals working together.** Prometheus told you ledger-service had an error spike. Loki told you which log line fired. Tempo told you the auth-service JWT check was taking 200ms because it was hitting a cold Postgres connection — that is the root cause, and neither metrics nor logs could show it alone. OpenTelemetry is the 2026 standard because it is vendor-neutral and already built into modern frameworks — you instrument once and route to whatever backend you choose. The collector in the middle is the routing layer: change the exporter config, not the application.
+
+**Save your VM before Stage 8** (optional stage — skip if you did not run 7.5). After `make check-75` passes:
+
+```bash
+make snapshot STAGE=75
+make snapshots    # must show clearledger.stage75 — do not skip
+```
+
+If the VM corrupts later: `make snapshots` → `make restore STAGE=75`. See [Saving your progress](#saving-your-progress).
 
 ---
 
@@ -5281,6 +6366,15 @@ Expected output:
 > The architecture survives the migration because the contracts are portable.
 
 **Goal:** the same application, the same security layers, running on AWS managed services instead of your laptop.
+
+> **Am I ready for Stage 8?**
+>
+> - [ ] Homelab complete through Stage 7 (Stage 7.5 optional)
+> - [ ] `make check-7` passes (and `health-check.sh 7.5` if you did traces)
+> - [ ] AWS account with billing alerts enabled — `make aws-up` creates billable resources
+> - [ ] Understand what Stages 0–7 built (read §8.2 even if you use `make aws-up`)
+>
+> **Done when:** app reachable on AWS ALB, ArgoCD syncing, `make aws-down` run when finished to stop charges.
 
 ### Demo stack vs production
 
@@ -5454,6 +6548,18 @@ kubectl get ingress clearledger-ingress -n clearledger
 
 ArgoCD watches **`stages/stage-8-aws-migration/manifests/` in this repo** (app `clearledger-aws`). Homelab Stages 1–7 still use `clearledger-infra`; AWS Stage 8 uses the in-repo kustomize path so ESO/CSI manifests stay colocated.
 
+**✋ Hands-on checkpoint — EKS nodes are Ready and the app pulls from ECR**
+
+```bash
+kubectl get nodes
+kubectl get pods -n clearledger
+kubectl get pods -n clearledger --field-selector=status.phase!=Running
+```
+
+Expected: nodes `Ready`; app pods `Running`; the last command prints **nothing**. `ImagePullBackOff` here means your images aren't in ECR or the node IAM role can't pull them.
+
+If you skip this, you move on to secrets (§8.4) on top of an app that was never actually running, and every later failure inherits this one.
+
 ---
 
 ### 8.4 — Verify ESO (default secret path)
@@ -5462,7 +6568,7 @@ After sync, confirm External Secrets pulled from Secrets Manager:
 
 ```bash
 kubectl get externalsecret,secret -n clearledger
-kubectl describe externalsecret auth-service-secrets -n clearledger | grep -A2 Status
+kubectl describe externalsecret auth-service-secret -n clearledger | grep -A2 Status
 kubectl get pods -n clearledger -l app=auth-service
 kubectl exec -n clearledger deploy/auth-service -c auth-service -- env | grep DATABASE_URL
 # Expect DATABASE_URL set from K8s Secret — not a file path
@@ -5474,6 +6580,17 @@ If `SecretSynced=False`, check ESO logs and IRSA:
 kubectl logs -n external-secrets deploy/external-secrets -c external-secrets | tail -30
 kubectl get sa auth-service -n clearledger -o yaml | grep role-arn
 ```
+
+**✋ Hands-on checkpoint — External Secrets actually synced from AWS**
+
+```bash
+kubectl get externalsecret -n clearledger
+kubectl get secret -n clearledger
+```
+
+Expected: `auth-service-secret` and `ledger-service-secret` each show `SecretSynced` / Ready `True`; the matching Kubernetes Secrets exist in `clearledger`. A `SecretSyncedError` means IRSA/IAM can't reach Secrets Manager — fix the role binding before §8.5.
+
+If you skip this, §8.5 (CSI driver) builds on working secret access, and a silent IAM failure here surfaces as an unrelated-looking pod error two sections later.
 
 ---
 
@@ -5545,7 +6662,7 @@ Think of it this way:
 
 ```text
 GitHub Actions OIDC
-  GitHub job proves: "I am an approved job in the production environment of Osomudeya/clearledger"
+  GitHub job proves: "I am an approved job in the production environment of YOUR_GITHUB_USERNAME/clearledger"
   AWS replies: "Here are short-lived credentials to push images to ECR"
 
 IRSA
@@ -5590,8 +6707,8 @@ The lab architecture is production-style, but a real production setup needs extr
 Protect both GitHub repos:
 
 ```text
-github.com/Osomudeya/clearledger
-github.com/Osomudeya/clearledger-infra
+github.com/YOUR_GITHUB_USERNAME/clearledger
+github.com/YOUR_GITHUB_USERNAME/clearledger-infra
 ```
 
 Go to each repo:
@@ -5647,7 +6764,7 @@ Better option:
 
 ```text
 Fine-grained personal access token
-→ Repository access: only Osomudeya/clearledger-infra
+→ Repository access: only YOUR_GITHUB_USERNAME/clearledger-infra
 → Permissions:
    Contents: Read and write
    Metadata: Read
@@ -5672,7 +6789,7 @@ The Stage 8 Terraform does this in `iam.tf`:
 
 ```text
 token.actions.githubusercontent.com:sub
-= repo:Osomudeya/clearledger:environment:production
+= repo:YOUR_GITHUB_USERNAME/clearledger:environment:production
 ```
 
 That means AWS only trusts GitHub jobs from the `production` environment. A random branch, fork, or unapproved workflow run cannot assume the ECR push role.
@@ -5764,6 +6881,18 @@ See `stages/stage-8-aws-migration/README.md` for the full walkthrough and cost r
 - Three AWS secret delivery paths: ESO (default), CSI file mounts (§8.5), vs Vault on homelab
 - AWS-specific security services: GuardDuty (threat detection), CloudTrail (API audit), GitHub Actions OIDC (pipeline AWS auth without long-lived keys), and IRSA (pod-level IAM without long-lived credentials)
 
+**What you can now put on your CV / say in an interview:**
+
+> Migrated the same architecture to AWS — EKS, ECR, RDS, ALB, with secrets via External Secrets Operator and IRSA — provisioned by Terraform, without rewriting the application.
+
+**When you are done on AWS, tear down to stop charges:**
+
+```bash
+make aws-down
+```
+
+Your homelab VM is separate — if you plan to return to it, you should already have a snapshot from Stage 7 (`make snapshots` to confirm). See [Saving your progress](#saving-your-progress).
+
 ---
 
 ## Troubleshooting
@@ -5811,6 +6940,15 @@ multipass info clearledger | grep IPv4
 grep clearledger /etc/hosts
 # If the IP changed, update /etc/hosts
 ```
+
+**VM disk full or pods Evicted (disk pressure):**
+
+```bash
+make doctor     # PASS / WARN / FAIL + PVC and Prometheus TSDB sizes
+make reclaim    # safe reclaim — unused images + journald only (not PVCs)
+```
+
+If still FAIL after reclaim, tear down and recreate: `make teardown && make setup`. Full guidance: [Disk health (long-running lab VM)](#disk-health-long-running-lab-vm) and [troubleshooting.md — VM disk](troubleshooting.md#vm-disk-full-or-nearly-full).
 
 ---
 

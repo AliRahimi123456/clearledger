@@ -1,19 +1,22 @@
 #!/usr/bin/env bash
-# chmod +x stages/stage-8-aws-migration/scripts/aws-spinup.sh
+# Stage 8 — AWS first-boot orchestrator (demo stack, production-shaped)
 #
-# INTRODUCED: Stage 8 — AWS Migration
-# PURPOSE: Orchestrate the full ClearLedger AWS deployment in one command.
-#          Provisions infrastructure, builds images, deploys to EKS, and
-#          prints the live URL when done.
+# What this script does:
+#   1. Terraform — VPC, EKS, RDS, ECR, GuardDuty, CloudTrail, IRSA roles
+#   2. Build + push images to ECR (optionally Cosign-sign for Kyverno)
+#   3. Install platform: ArgoCD, Kyverno, Falco, ESO, observability (Stage 7)
+#   4. GitOps deploy via ArgoCD Application clearledger-aws (NOT kubectl apply on app Deployments)
+#
+# Secrets on AWS: External Secrets Operator (ESO) reads AWS Secrets Manager via IRSA.
+# Homelab Stages 5–7 use HashiCorp Vault agent injection instead — same app code, different backend.
 #
 # Usage: bash stages/stage-8-aws-migration/scripts/aws-spinup.sh
-# Run from the repository root.
+# Tear down: bash stages/stage-8-aws-migration/scripts/aws-destroy.sh
 
 set -euo pipefail
 
-trap 'echo "" && echo "❌  Setup failed at line $LINENO." && echo "    Run stages/stage-8-aws-migration/scripts/aws-destroy.sh to clean up any partially created resources." && exit 1' ERR
+trap 'echo "" && echo "❌  Setup failed at line $LINENO." && echo "    Run stages/stage-8-aws-migration/scripts/aws-destroy.sh to clean up." && exit 1' ERR
 
-# ── Colours ───────────────────────────────────────────────────────────────────
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -21,257 +24,276 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-banner() { echo -e "\n${CYAN}${BOLD}══════════════════════════════════════════════${NC}"; echo -e "${CYAN}${BOLD}  $1${NC}"; echo -e "${CYAN}${BOLD}══════════════════════════════════════════════${NC}"; }
-
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-TF_DIR="${REPO_ROOT}/stages/stage-8-aws-migration/terraform"
-MANIFESTS_DIR="${REPO_ROOT}/infra/manifests"
-
-# ── 1. Prerequisite checks ────────────────────────────────────────────────────
-banner "Step 1 of 12 — Checking prerequisites"
-
-check_cmd() {
-  local cmd=$1 install_hint=$2
-  if ! command -v "$cmd" &>/dev/null; then
-    echo -e "${RED}✗  $cmd not found.${NC}  Install: $install_hint"
-    exit 1
-  fi
-  echo -e "${GREEN}✓  $cmd${NC}"
+banner() {
+  echo -e "\n${CYAN}${BOLD}══════════════════════════════════════════════${NC}"
+  echo -e "${CYAN}${BOLD}  $1${NC}"
+  echo -e "${CYAN}${BOLD}══════════════════════════════════════════════${NC}"
 }
 
-check_cmd aws      "https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2.html"
-check_cmd terraform "https://developer.hashicorp.com/terraform/install"
-check_cmd kubectl  "https://kubernetes.io/docs/tasks/tools/"
-check_cmd docker   "https://docs.docker.com/get-docker/"
-check_cmd helm     "https://helm.sh/docs/intro/install/"
-check_cmd git      "https://git-scm.com/downloads"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+STAGE_DIR="${REPO_ROOT}/stages/stage-8-aws-migration"
+TF_DIR="${STAGE_DIR}/terraform"
+KUSTOMIZE_DIR="${STAGE_DIR}/manifests"
+FALCO_VALUES="${REPO_ROOT}/stages/stage-6-runtime-security/infra/falco/helm-values.yaml"
+SECRETS_TF="${TF_DIR}/secrets.tf"
 
-# Verify AWS credentials are configured
-if ! aws sts get-caller-identity &>/dev/null; then
-  echo -e "${RED}✗  AWS credentials not configured or expired.${NC}"
-  echo "   Run: aws configure   (or set AWS_PROFILE / AWS_ACCESS_KEY_ID)"
+# ── 1. Prerequisites ────────────────────────────────────────────────────────
+banner "Step 1 of 15 — Checking prerequisites"
+
+check_cmd() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo -e "${RED}✗  $1 not found.${NC}  Install: $2"
+    exit 1
+  }
+  echo -e "${GREEN}✓  $1${NC}"
+}
+
+check_cmd aws "https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2.html"
+check_cmd terraform "https://developer.hashicorp.com/terraform/install"
+check_cmd kubectl "https://kubernetes.io/docs/tasks/tools/"
+check_cmd docker "https://docs.docker.com/get-docker/"
+check_cmd helm "https://helm.sh/docs/intro/install/"
+check_cmd git "https://git-scm.com/downloads"
+check_cmd kustomize "https://kubectl.docs.kubernetes.io/installation/kustomize/"
+
+aws sts get-caller-identity >/dev/null || {
+  echo -e "${RED}✗  AWS credentials not configured.${NC}"
   exit 1
-fi
+}
 echo -e "${GREEN}✓  AWS credentials valid${NC}"
 
 aws_account=$(aws sts get-caller-identity --query Account --output text)
-aws_region=$(aws configure get region || echo "eu-west-1")
+aws_region=$(aws configure get region 2>/dev/null || echo "eu-west-1")
 echo -e "   Account: ${BOLD}${aws_account}${NC}  Region: ${BOLD}${aws_region}${NC}"
 
-# ── 2. Terraform init and apply ───────────────────────────────────────────────
-banner "Step 2 of 12 — Terraform init & apply"
+# ── 2. Terraform ────────────────────────────────────────────────────────────
+banner "Step 2 of 15 — Terraform init & apply"
 
-echo -e "${YELLOW}⚠  This will create real AWS resources and incur costs.${NC}"
-echo -e "${YELLOW}   Estimated: ~\$0.30–0.45/hour for the default configuration.${NC}"
+echo -e "${YELLOW}⚠  Demo stack — creates billable AWS resources (~\$0.35–0.45/hour).${NC}"
+echo -e "${YELLOW}   Destroy with: make aws-down${NC}"
 echo ""
 read -rp "Continue? (yes/no): " confirm
 [[ "$confirm" == "yes" ]] || { echo "Aborted."; exit 0; }
 
-echo ""
-echo "Reminder: did you update CHANGE_ME_BEFORE_APPLY in infra/terraform/secrets.tf?"
-read -rp "Secrets updated? (yes/skip): " secrets_updated
-if [[ "$secrets_updated" != "yes" ]]; then
-  echo -e "${YELLOW}→  Edit infra/terraform/secrets.tf then re-run this script.${NC}"
-  exit 0
+if grep -q "CHANGE_ME_BEFORE_APPLY" "${SECRETS_TF}" 2>/dev/null; then
+  echo -e "${RED}✗  Edit ${SECRETS_TF} — replace CHANGE_ME_BEFORE_APPLY before apply.${NC}"
+  exit 1
 fi
 
-cd "$TF_DIR"
-echo "→  terraform init..."
+cd "${TF_DIR}"
 terraform init -upgrade
-
-echo "→  terraform apply..."
 terraform apply -auto-approve
 
-# Capture outputs into shell variables
-echo "→  Reading Terraform outputs..."
 ECR_REGISTRY=$(terraform output -raw ecr_registry_url)
 AUTH_ECR=$(terraform output -raw auth_service_ecr_url)
 LEDGER_ECR=$(terraform output -raw ledger_service_ecr_url)
 NOTIFICATION_ECR=$(terraform output -raw notification_service_ecr_url)
 CLUSTER_NAME=$(terraform output -raw cluster_name)
-RDS_ENDPOINT=$(terraform output -raw rds_endpoint)
 ESO_ROLE_ARN=$(terraform output -raw eso_role_arn)
+FALCO_ROLE_ARN=$(terraform output -raw falco_role_arn)
+AUTH_IRSA=$(terraform output -raw auth_service_irsa_role_arn)
+LEDGER_IRSA=$(terraform output -raw ledger_service_irsa_role_arn)
+NOTIFY_IRSA=$(terraform output -raw notification_service_irsa_role_arn)
 KUBECONFIG_CMD=$(terraform output -raw kubeconfig_command)
+cd "${REPO_ROOT}"
 
-cd "$REPO_ROOT"
-
-# ── 2.5 Verify security services ──────────────────────────────────────────────
-banner "Step 2.5 of 12 — Verifying security services"
-
-echo "Verifying security services..."
+# ── 3. Verify AWS security services ─────────────────────────────────────────
+banner "Step 3 of 15 — Verifying GuardDuty & CloudTrail"
 
 DETECTOR_ID=$(aws guardduty list-detectors --query 'DetectorIds[0]' --output text 2>/dev/null || true)
-if [[ -n "$DETECTOR_ID" && "$DETECTOR_ID" != "None" ]]; then
-  echo -e "${GREEN}✓  GuardDuty enabled: ${DETECTOR_ID}${NC}"
-else
-  echo -e "${RED}✗  GuardDuty not enabled — check Terraform output${NC}"
-fi
+[[ -n "${DETECTOR_ID}" && "${DETECTOR_ID}" != "None" ]] \
+  && echo -e "${GREEN}✓  GuardDuty: ${DETECTOR_ID}${NC}" \
+  || echo -e "${YELLOW}⚠  GuardDuty not found${NC}"
 
-TRAIL_STATUS=$(aws cloudtrail get-trail-status --name "${CLUSTER_NAME}-trail" --query IsLogging --output text 2>/dev/null || true)
-if [[ "$TRAIL_STATUS" == "True" ]]; then
-  echo -e "${GREEN}✓  CloudTrail logging active${NC}"
-else
-  # Fallback to default name from var.project_name
-  TRAIL_STATUS=$(aws cloudtrail get-trail-status --name "clearledger-trail" --query IsLogging --output text 2>/dev/null || true)
-  if [[ "$TRAIL_STATUS" == "True" ]]; then
-    echo -e "${GREEN}✓  CloudTrail logging active${NC}"
-  else
-    echo -e "${RED}✗  CloudTrail not logging${NC}"
-  fi
-fi
+TRAIL_STATUS=$(aws cloudtrail get-trail-status --name "clearledger-trail" --query IsLogging --output text 2>/dev/null || true)
+[[ "${TRAIL_STATUS}" == "True" ]] \
+  && echo -e "${GREEN}✓  CloudTrail logging${NC}" \
+  || echo -e "${YELLOW}⚠  CloudTrail not logging${NC}"
 
-echo -e "${GREEN}✓  Security services active. AWS account is being monitored.${NC}"
+# ── 4. Build & push to ECR ────────────────────────────────────────────────────
+banner "Step 4 of 15 — Build & push images to ECR"
 
-# ── 3. Authenticate Docker to ECR ─────────────────────────────────────────────
-banner "Step 3 of 12 — ECR Docker authentication"
-
-aws ecr get-login-password --region "$aws_region" \
+aws ecr get-login-password --region "${aws_region}" \
   | docker login --username AWS --password-stdin "${ECR_REGISTRY}"
-echo -e "${GREEN}✓  Logged in to ECR: ${ECR_REGISTRY}${NC}"
 
-# ── 4. Build and push images ───────────────────────────────────────────────────
-banner "Step 4 of 12 — Build & push images to ECR"
+GIT_SHA=$(git -C "${REPO_ROOT}" rev-parse --short HEAD)
+echo "→  Image tag: ${GIT_SHA}"
 
-GIT_SHA=$(git rev-parse --short HEAD)
-echo "→  Git SHA: ${GIT_SHA}"
+sign_image() {
+  local image="$1"
+  if [[ -n "${COSIGN_PRIVATE_KEY:-}" && -n "${COSIGN_PASSWORD:-}" ]]; then
+    cosign sign --key env://COSIGN_PRIVATE_KEY --tlog-upload=false "${image}" || true
+  elif [[ -f "${REPO_ROOT}/infra/cosign.key" ]]; then
+    cosign sign --key "${REPO_ROOT}/infra/cosign.key" --tlog-upload=false "${image}" || true
+  else
+    echo -e "${YELLOW}  ⚠  No Cosign key — apply Kyverno ECR policy in Audit mode or sign images before deploy${NC}"
+  fi
+}
 
 build_and_push() {
-  local service=$1 ecr_url=$2
-  echo ""
-  echo "→  Building ${service}..."
-  docker build -t "${ecr_url}:latest" -t "${ecr_url}:${GIT_SHA}" \
-    "${REPO_ROOT}/app/${service}"
-  echo "→  Pushing ${service}..."
-  docker push "${ecr_url}:latest"
+  local service="$1" ecr_url="$2"
+  echo "→  ${service}..."
+  docker build -t "${ecr_url}:${GIT_SHA}" "${REPO_ROOT}/app/${service}"
   docker push "${ecr_url}:${GIT_SHA}"
+  sign_image "${ecr_url}:${GIT_SHA}"
   echo -e "${GREEN}✓  ${service} pushed${NC}"
 }
 
-build_and_push "auth-service"          "$AUTH_ECR"
-build_and_push "ledger-service"        "$LEDGER_ECR"
-build_and_push "notification-service"  "$NOTIFICATION_ECR"
+build_and_push "auth-service" "${AUTH_ECR}"
+build_and_push "ledger-service" "${LEDGER_ECR}"
+build_and_push "notification-service" "${NOTIFICATION_ECR}"
 
-# ── 5. Update kubeconfig ───────────────────────────────────────────────────────
-banner "Step 5 of 12 — Configuring kubectl for EKS"
+# ── 5. Kustomize image tags (GitOps source) ─────────────────────────────────
+banner "Step 5 of 15 — Updating GitOps manifests (kustomization.yaml)"
 
-eval "$KUBECONFIG_CMD"
-echo -e "${GREEN}✓  kubectl context set to EKS cluster: ${CLUSTER_NAME}${NC}"
-kubectl cluster-info
+KUSTOMIZATION="${KUSTOMIZE_DIR}/kustomization.yaml"
+sed -i.bak \
+  -e "s|REPLACE_ECR_REGISTRY|${ECR_REGISTRY}|g" \
+  -e "s|REPLACE_IMAGE_TAG|${GIT_SHA}|g" \
+  "${KUSTOMIZATION}"
+rm -f "${KUSTOMIZATION}.bak"
 
-# ── 6. Update image references in manifests ────────────────────────────────────
-banner "Step 6 of 12 — Patching manifest image URLs"
+# Patch ESO + CSI region if not eu-west-1
+sed -i.bak "s|region: eu-west-1|region: ${aws_region}|g" \
+  "${KUSTOMIZE_DIR}/external-secrets.yaml" \
+  "${KUSTOMIZE_DIR}/csi/auth-service-spc.yaml" \
+  "${KUSTOMIZE_DIR}/csi/ledger-service-spc.yaml" 2>/dev/null || true
+rm -f "${KUSTOMIZE_DIR}/external-secrets.yaml.bak" \
+  "${KUSTOMIZE_DIR}/csi/auth-service-spc.yaml.bak" \
+  "${KUSTOMIZE_DIR}/csi/ledger-service-spc.yaml.bak" 2>/dev/null || true
 
-# Replace the Docker Hub placeholder with ECR URLs.
-# Uses the git SHA tag for immutability — :latest is pushed but not used for deploy.
-sed -i.bak "s|DOCKER_USERNAME/clearledger-auth-service:.*|${AUTH_ECR}:${GIT_SHA}|g" \
-  "${MANIFESTS_DIR}/auth-service/deployment.yaml"
-sed -i.bak "s|DOCKER_USERNAME/clearledger-ledger-service:.*|${LEDGER_ECR}:${GIT_SHA}|g" \
-  "${MANIFESTS_DIR}/ledger-service/deployment.yaml"
-sed -i.bak "s|DOCKER_USERNAME/clearledger-notification-service:.*|${NOTIFICATION_ECR}:${GIT_SHA}|g" \
-  "${MANIFESTS_DIR}/notification-service/deployment.yaml"
+echo -e "${GREEN}✓  kustomization.yaml points at ECR:${GIT_SHA}${NC}"
+echo -e "${YELLOW}→  Commit and push this file before ArgoCD sync (or set GIT_PUSH=1 below).${NC}"
 
-# Clean up sed backup files
-find "${MANIFESTS_DIR}" -name "*.bak" -delete
+# ── 6. kubeconfig ───────────────────────────────────────────────────────────
+banner "Step 6 of 15 — Configuring kubectl"
 
-echo -e "${GREEN}✓  Deployment manifests updated with ECR URLs (SHA: ${GIT_SHA})${NC}"
+eval "${KUBECONFIG_CMD}"
+echo -e "${GREEN}✓  Context: ${CLUSTER_NAME}${NC}"
 
-# ── 7. Install ArgoCD ─────────────────────────────────────────────────────────
-banner "Step 7 of 12 — Installing ArgoCD"
+# ── 7. ArgoCD ───────────────────────────────────────────────────────────────
+banner "Step 7 of 15 — Installing ArgoCD"
 
 kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
 kubectl apply -n argocd \
   -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
-
-echo "→  Waiting for argocd-server deployment (up to 120s)..."
-kubectl rollout status deployment/argocd-server -n argocd --timeout=120s
+kubectl rollout status deployment/argocd-server -n argocd --timeout=180s
 echo -e "${GREEN}✓  ArgoCD ready${NC}"
 
-# ── 8. Install Kyverno ────────────────────────────────────────────────────────
-banner "Step 8 of 12 — Installing Kyverno"
+# ── 8. Kyverno + policies ───────────────────────────────────────────────────
+banner "Step 8 of 15 — Installing Kyverno & policies"
 
-helm repo add kyverno https://kyverno.github.io/kyverno/ --force-update
+helm repo add kyverno https://kyverno.github.io/kyverno/ --force-update >/dev/null
 helm upgrade --install kyverno kyverno/kyverno \
   --namespace kyverno --create-namespace \
+  -f "${REPO_ROOT}/stages/stage-4-admission-control/infra/kyverno/values.yaml" \
   --set admissionController.replicas=1 \
-  --wait --timeout=120s
-echo -e "${GREEN}✓  Kyverno ready${NC}"
+  --wait --timeout=180s
 
-# ── 9. Install Falco ──────────────────────────────────────────────────────────
-banner "Step 9 of 12 — Installing Falco"
+kubectl apply -f "${REPO_ROOT}/infra/policies/" --server-side=true 2>/dev/null || \
+  kubectl apply -f "${REPO_ROOT}/infra/policies/"
+echo -e "${GREEN}✓  Kyverno + ClusterPolicies applied${NC}"
 
-helm repo add falcosecurity https://falcosecurity.github.io/charts --force-update
+# ── 9. Falco (correct IRSA + custom rules) ──────────────────────────────────
+banner "Step 9 of 15 — Installing Falco"
+
+helm repo add falcosecurity https://falcosecurity.github.io/charts --force-update >/dev/null
 helm upgrade --install falco falcosecurity/falco \
   --namespace falco --create-namespace \
-  --set driver.kind=ebpf \
-  --set "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn=${ESO_ROLE_ARN}" \
-  --wait --timeout=180s
-echo -e "${GREEN}✓  Falco ready${NC}"
+  -f "${FALCO_VALUES}" \
+  --set driver.kind=modern_ebpf \
+  --set "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn=${FALCO_ROLE_ARN}" \
+  --wait --timeout=300s
+echo -e "${GREEN}✓  Falco ready (IRSA: falco role)${NC}"
 
-# ── 10. Apply Kubernetes manifests ────────────────────────────────────────────
-banner "Step 10 of 12 — Applying Kubernetes manifests"
+# ── 10. External Secrets Operator ───────────────────────────────────────────
+banner "Step 10 of 15 — Installing ESO + IRSA ServiceAccounts"
 
-# Install External Secrets Operator first so ESO CRDs exist before ExternalSecret objects
-helm repo add external-secrets https://charts.external-secrets.io --force-update
+helm repo add external-secrets https://charts.external-secrets.io --force-update >/dev/null
 helm upgrade --install external-secrets external-secrets/external-secrets \
   --namespace external-secrets --create-namespace \
   --set "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn=${ESO_ROLE_ARN}" \
-  --wait --timeout=120s
-echo -e "${GREEN}✓  External Secrets Operator ready${NC}"
+  --wait --timeout=180s
 
-# Apply all manifests (namespace first, then the rest)
-kubectl apply -f "${MANIFESTS_DIR}/namespace.yaml"
-kubectl apply -f "${MANIFESTS_DIR}/" --recursive
+export REPLACE_AUTH_IRSA_ROLE_ARN="${AUTH_IRSA}"
+export REPLACE_LEDGER_IRSA_ROLE_ARN="${LEDGER_IRSA}"
+export REPLACE_NOTIFICATION_IRSA_ROLE_ARN="${NOTIFY_IRSA}"
+envsubst < "${STAGE_DIR}/manifests/clearledger-serviceaccounts.yaml" | kubectl apply -f -
+echo -e "${GREEN}✓  ESO + workload ServiceAccounts (IRSA)${NC}"
 
-# Apply the AWS-specific ingress (ALB, not nginx)
-kubectl apply -f "${REPO_ROOT}/stages/stage-8-aws-migration/manifests/ingress-aws.yaml"
-echo -e "${GREEN}✓  All manifests applied${NC}"
+# ── 11. Secrets Store CSI Driver ─────────────────────────────────────────────
+banner "Step 11 of 15 — Installing CSI driver + SecretProviderClasses"
 
-# ── 11. Wait for ALB provisioning ─────────────────────────────────────────────
-banner "Step 11 of 12 — Waiting for ALB provisioning"
+bash "${STAGE_DIR}/scripts/install-csi-secrets.sh"
+echo -e "${GREEN}✓  CSI driver ready (SecretProviderClasses applied; default deploy still uses ESO)${NC}"
 
-echo "→  The ALB controller is provisioning the load balancer..."
-echo "   This typically takes 60-90 seconds after the Ingress is created."
-for i in $(seq 1 9); do
-  sleep 10
-  alb_hostname=$(kubectl get ingress clearledger-ingress -n clearledger \
-    -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
-  if [[ -n "$alb_hostname" ]]; then
-    echo -e "${GREEN}✓  ALB provisioned: ${alb_hostname}${NC}"
-    break
-  fi
-  echo "   Still waiting... (${i}0s elapsed)"
-done
+# ── 12. Observability (Stage 7 stack) ───────────────────────────────────────
+banner "Step 12 of 15 — Installing observability (Prometheus + Grafana + Loki)"
 
-# Final check
-ALB_DNS=$(kubectl get ingress clearledger-ingress -n clearledger \
-  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+bash "${REPO_ROOT}/stages/stage-7-observability/scripts/install-observability.sh"
+echo -e "${GREEN}✓  Observability stack installed${NC}"
 
-if [[ -z "$ALB_DNS" ]]; then
-  echo -e "${YELLOW}⚠  ALB not yet provisioned. Check status with:${NC}"
-  echo "   kubectl get ingress clearledger-ingress -n clearledger"
-  ALB_DNS="<ALB_DNS — run above command to get hostname>"
+# ── 13. GitOps deploy (ArgoCD — not kubectl apply on Deployments) ───────────
+banner "Step 13 of 15 — GitOps deploy via ArgoCD"
+
+if [[ "${GIT_PUSH:-}" == "1" ]]; then
+  git -C "${REPO_ROOT}" add "${KUSTOMIZATION}" "${KUSTOMIZE_DIR}/external-secrets.yaml" 2>/dev/null || true
+  git -C "${REPO_ROOT}" commit -m "stage8: bootstrap ECR images ${GIT_SHA}" 2>/dev/null || true
+  git -C "${REPO_ROOT}" push origin HEAD 2>/dev/null || {
+    echo -e "${YELLOW}⚠  git push failed — push manually, then re-run: argocd app sync clearledger-aws${NC}"
+  }
+else
+  echo -e "${YELLOW}→  Push kustomization.yaml to Git, then ArgoCD will sync.${NC}"
+  echo "   Quick push: GIT_PUSH=1 bash stages/stage-8-aws-migration/scripts/aws-spinup.sh (from step 5)"
+  echo "   Or: git add ${KUSTOMIZATION} && git commit && git push"
 fi
 
-# ── 12. Print access details ──────────────────────────────────────────────────
-banner "Step 12 of 12 — ClearLedger is live!"
+kubectl apply -f "${STAGE_DIR}/argocd/clearledger-aws-app.yaml"
+
+echo "→  Waiting for ArgoCD to sync (up to 5 min)..."
+for _ in $(seq 1 30); do
+  phase=$(kubectl get application clearledger-aws -n argocd -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "")
+  health=$(kubectl get application clearledger-aws -n argocd -o jsonpath='{.status.health.status}' 2>/dev/null || echo "")
+  if [[ "${phase}" == "Synced" && "${health}" == "Healthy" ]]; then
+    echo -e "${GREEN}✓  ArgoCD Synced + Healthy${NC}"
+    break
+  fi
+  sleep 10
+done
+
+# Bootstrap sync if Git not pushed yet (local kustomize build — one-time fallback)
+if [[ "$(kubectl get application clearledger-aws -n argocd -o jsonpath='{.status.sync.status}' 2>/dev/null)" != "Synced" ]]; then
+  echo -e "${YELLOW}→  ArgoCD not synced yet — applying kustomize once for bootstrap (push Git for ongoing GitOps).${NC}"
+  kubectl apply -k "${KUSTOMIZE_DIR}"
+fi
+
+# ── 14. ALB ─────────────────────────────────────────────────────────────────
+banner "Step 14 of 15 — Waiting for ALB"
+
+ALB_DNS=""
+for i in $(seq 1 12); do
+  ALB_DNS=$(kubectl get ingress clearledger-ingress -n clearledger \
+    -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+  [[ -n "${ALB_DNS}" ]] && break
+  echo "   Waiting... (${i}0s)"
+  sleep 10
+done
+
+# ── 15. Summary ─────────────────────────────────────────────────────────────
+banner "Step 15 of 15 — ClearLedger AWS demo stack is live"
 
 echo ""
-echo -e "${GREEN}${BOLD}  ClearLedger is live at: http://${ALB_DNS}${NC}"
+echo -e "${BOLD}Demo stack (not production):${NC} HTTP ALB, public EKS API, single env."
+echo -e "${BOLD}Secrets:${NC} ESO (default deploy) + CSI driver installed (§8.5 lab switches auth to file mounts)."
+echo -e "${BOLD}Manual steps:${NC} docs/LAB-GUIDE.md §8.2 — do not skip if you only ran make aws-up."
+echo -e "${BOLD}Ongoing deploys:${NC} ci-aws.yaml → update kustomization.yaml → ArgoCD sync."
 echo ""
-echo -e "${BOLD}  Service endpoints:${NC}"
-echo -e "    Auth service:          http://${ALB_DNS}/auth/health"
-echo -e "    Ledger service:        http://${ALB_DNS}/ledger/health"
-echo -e "    Notification service:  http://${ALB_DNS}/notifications/health"
+echo -e "${GREEN}${BOLD}  URL: http://${ALB_DNS:-<pending>}${NC}"
+echo -e "    Auth:          http://${ALB_DNS:-ALB_DNS}/auth/health"
+echo -e "    Ledger:        http://${ALB_DNS:-ALB_DNS}/ledger/health"
+echo -e "    Notifications: http://${ALB_DNS:-ALB_DNS}/notifications/health"
 echo ""
-echo -e "${BOLD}  ArgoCD:${NC}"
-echo "    kubectl port-forward svc/argocd-server -n argocd 8080:443 &"
-echo "    Then visit: https://localhost:8080"
-argocd_password=$(kubectl -n argocd get secret argocd-initial-admin-secret \
-  -o jsonpath="{.data.password}" | base64 -d 2>/dev/null || echo "<run command above>")
-echo "    Initial admin password: ${argocd_password}"
-echo ""
-echo -e "${BOLD}  Tear down when done:${NC}"
-echo "    bash stages/stage-8-aws-migration/scripts/aws-destroy.sh"
-echo ""
-echo -e "${BOLD}  AWS resources live in region:${NC} ${aws_region}  Account: ${aws_account}"
+echo -e "${BOLD}  Grafana (after observability):${NC} kubectl port-forward -n monitoring svc/kube-prometheus-stack-grafana 3000:80"
+echo -e "${BOLD}  HTTPS (production add-on):${NC} see manifests/ingress-aws-https.example.yaml"
+echo -e "${BOLD}  Tear down:${NC} make aws-down"
 echo ""

@@ -1,0 +1,16 @@
+# Stage 2 — Argo CD server params for NGINX ingress (TLS terminated at ingress).
+# Apply with: kubectl apply -f stages/stage-2-gitops/infra/argocd-cmd-params.yaml
+# Then: kubectl rollout restart deployment/argocd-server -n argocd
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cmd-params-cm
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-cmd-params-cm
+    app.kubernetes.io/part-of: argocd
+data:
+  server.insecure: "true"
+  server.grpc.web: "true"
+  server.url: https://argocd.local
+  server.enable.gzip: "false"

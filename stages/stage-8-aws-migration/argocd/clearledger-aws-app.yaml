@@ -1,0 +1,38 @@
+# Stage 8 — GitOps Application for AWS EKS (ArgoCD watches this kustomize path)
+# Apply once after ArgoCD is installed:
+#   kubectl apply -f stages/stage-8-aws-migration/argocd/clearledger-aws-app.yaml
+#
+# Ongoing deploys: push image tag changes to kustomization.yaml (via ci-aws.yaml),
+# then ArgoCD syncs — do not kubectl apply deployments by hand.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: clearledger-aws
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    # Fork learners: change repoURL to your fork before first sync.
+    repoURL: https://github.com/YOUR_GITHUB_USERNAME/clearledger.git
+    targetRevision: main
+    path: stages/stage-8-aws-migration/manifests
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: clearledger
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - PrunePropagationPolicy=foreground
+      - PruneLast=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+  revisionHistoryLimit: 10

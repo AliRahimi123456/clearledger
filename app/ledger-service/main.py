@@ -80,6 +80,9 @@ class Settings(BaseSettings):
 
     @property
     def database_url(self) -> str:
+        file_path = os.environ.get("DATABASE_URL_FILE", "")
+        if file_path and os.path.exists(file_path):
+            return open(file_path).read().strip()
         vault_file = "/vault/secrets/database_url"
         if os.path.exists(vault_file):
             return open(vault_file).read().strip()

@@ -1,0 +1,31 @@
+# Stage 8 — AWS EKS manifests (GitOps source for ArgoCD clearledger-aws app)
+# Image tags are set by aws-spinup.sh (first boot) or ci-aws.yaml (ongoing deploys).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: clearledger
+
+resources:
+  - resources/namespace.yaml
+  - resources/redis.yaml
+  - resources/auth-service-service.yaml
+  - resources/ledger-service-service.yaml
+  - resources/notification-service-service.yaml
+  - deployments/auth-service.yaml
+  - deployments/ledger-service.yaml
+  - deployments/notification-service.yaml
+  - external-secrets.yaml
+  - csi/auth-service-spc.yaml
+  - csi/ledger-service-spc.yaml
+  - ingress-aws.yaml
+
+images:
+  - name: clearledger/auth-service
+    newName: REPLACE_ECR_REGISTRY/clearledger/auth-service
+    newTag: REPLACE_IMAGE_TAG
+  - name: clearledger/ledger-service
+    newName: REPLACE_ECR_REGISTRY/clearledger/ledger-service
+    newTag: REPLACE_IMAGE_TAG
+  - name: clearledger/notification-service
+    newName: REPLACE_ECR_REGISTRY/clearledger/notification-service
+    newTag: REPLACE_IMAGE_TAG

@@ -1,16 +1,22 @@
-# INTRODUCED: Stage 2 — GitOps with ArgoCD
-# PURPOSE: Expose ArgoCD UI at https://argocd.local
-# NOTE: CLI via this ingress requires --grpc-web on argocd login and other CLI calls
+# Stage 2 — ArgoCD UI at https://argocd.local
+# Terminates TLS at NGINX, talks HTTP to argocd-server (server.insecure=true).
+# Avoids ssl-passthrough — that breaks /api/v1/stream/* (ERR_HTTP2_PROTOCOL_ERROR).
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: argocd-ingress
   namespace: argocd
   annotations:
-    nginx.ingress.kubernetes.io/ssl-passthrough: "true"
-    nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
-    # Homelab: HTTP login loops (session cookie mismatch) — force HTTPS in the browser
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
     nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection "upgrade";
 spec:
   ingressClassName: nginx
   rules:
@@ -23,4 +29,4 @@ spec:
               service:
                 name: argocd-server
                 port:
-                  number: 443
+                  number: 80

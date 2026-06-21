@@ -1,0 +1,68 @@
+# Stage 7 — Loki stack overrides (production-minded defaults for lab clusters)
+grafana:
+  enabled: false
+
+promtail:
+  enabled: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+loki:
+  isDefault: false
+  persistence:
+    enabled: false
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1536Mi
+  # Under query load /ready can exceed 1s; tight probes cause crash loops (connection refused in Grafana).
+  livenessProbe:
+    httpGet:
+      path: /ready
+      port: http-metrics
+    initialDelaySeconds: 60
+    periodSeconds: 30
+    timeoutSeconds: 5
+    failureThreshold: 5
+  readinessProbe:
+    httpGet:
+      path: /ready
+      port: http-metrics
+    initialDelaySeconds: 45
+    periodSeconds: 15
+    timeoutSeconds: 5
+    failureThreshold: 4
+  datasource:
+    uid: loki
+    jsonData: |
+      {
+        "maxLines": 500,
+        "timeout": 120,
+        "maxConcurrent": 2
+      }
+  config:
+    limits_config:
+      retention_period: 72h
+      max_query_length: 1h
+      max_query_parallelism: 8
+      max_entries_limit_per_query: 3000
+      max_query_series: 300
+      split_queries_by_interval: 15m
+      ingestion_rate_mb: 8
+      ingestion_burst_size_mb: 16
+    compactor:
+      retention_enabled: true
+    query_scheduler:
+      max_outstanding_requests_per_tenant: 32
+    frontend:
+      max_outstanding_per_tenant: 32
+    querier:
+      max_concurrent: 4

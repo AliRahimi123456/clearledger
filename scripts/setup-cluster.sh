@@ -14,12 +14,21 @@ if git rev-parse --git-dir >/dev/null 2>&1; then
 fi
 
 VM_NAME="clearledger"
-VM_CPUS="4"
-VM_MEMORY="8G"
-VM_DISK="50G"
 VM_IMAGE="22.04"
 
-echo "==> Creating Multipass VM: $VM_NAME"
+# Defaults: Stages 0–7.5 on a single-node lab (24GB+ host). Override without editing this file:
+#   scripts/setup-cluster.local.env  (gitignored — copy from setup-cluster.local.env.example)
+#   CLEARLEDGER_VM_CPUS=8 CLEARLEDGER_VM_MEMORY=16G CLEARLEDGER_VM_DISK=80G make setup
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "${SCRIPT_DIR}/setup-cluster.local.env" ]; then
+  # shellcheck source=/dev/null
+  source "${SCRIPT_DIR}/setup-cluster.local.env"
+fi
+VM_CPUS="${CLEARLEDGER_VM_CPUS:-6}"
+VM_MEMORY="${CLEARLEDGER_VM_MEMORY:-12G}"
+VM_DISK="${CLEARLEDGER_VM_DISK:-80G}"
+
+echo "==> Creating Multipass VM: $VM_NAME (${VM_CPUS} CPUs, ${VM_MEMORY} RAM, ${VM_DISK} disk)"
 multipass launch \
   --name $VM_NAME \
   --cpus $VM_CPUS \
@@ -42,6 +51,73 @@ microk8s kubectl wait --for=condition=ready node --all --timeout=120s
 echo "Cluster is ready."
 NEWGRP
 INNER
+
+echo "==> Configuring disk safety (log rotation, image GC, journald cap)..."
+multipass exec "$VM_NAME" -- bash -s << 'DISKSAFETY'
+set -euo pipefail
+
+KUBELET_ARGS="/var/snap/microk8s/current/args/kubelet"
+JOURNALD_CONF="/etc/systemd/journald.conf"
+NEEDS_MICROK8S_RESTART=0
+NEEDS_JOURNALD_RESTART=0
+
+ensure_kubelet_arg() {
+  local arg="$1"
+  local key="${arg%%=*}"
+
+  if sudo grep -qxF "$arg" "$KUBELET_ARGS" 2>/dev/null; then
+    return 0
+  fi
+
+  if sudo grep -q "^${key}=" "$KUBELET_ARGS" 2>/dev/null; then
+    sudo sed -i "s|^${key}=.*|${arg}|" "$KUBELET_ARGS"
+  else
+    echo "$arg" | sudo tee -a "$KUBELET_ARGS" >/dev/null
+  fi
+  NEEDS_MICROK8S_RESTART=1
+}
+
+for arg in \
+  "--container-log-max-size=10Mi" \
+  "--container-log-max-files=3" \
+  "--image-gc-high-threshold=80" \
+  "--image-gc-low-threshold=60"; do
+  ensure_kubelet_arg "$arg"
+done
+
+if sudo grep -qxF "SystemMaxUse=300M" "$JOURNALD_CONF" 2>/dev/null; then
+  :
+elif sudo grep -q "^SystemMaxUse=" "$JOURNALD_CONF" 2>/dev/null; then
+  sudo sed -i 's/^SystemMaxUse=.*/SystemMaxUse=300M/' "$JOURNALD_CONF"
+  NEEDS_JOURNALD_RESTART=1
+elif sudo grep -q "^#SystemMaxUse=" "$JOURNALD_CONF" 2>/dev/null; then
+  sudo sed -i 's/^#SystemMaxUse=.*/SystemMaxUse=300M/' "$JOURNALD_CONF"
+  NEEDS_JOURNALD_RESTART=1
+else
+  echo "SystemMaxUse=300M" | sudo tee -a "$JOURNALD_CONF" >/dev/null
+  NEEDS_JOURNALD_RESTART=1
+fi
+
+if [ "$NEEDS_JOURNALD_RESTART" -eq 1 ]; then
+  sudo systemctl restart systemd-journald
+  echo "journald capped at SystemMaxUse=300M"
+else
+  echo "journald already capped at SystemMaxUse=300M"
+fi
+
+if [ "$NEEDS_MICROK8S_RESTART" -eq 1 ]; then
+  echo "Applying kubelet disk-safety args (restart required)..."
+  sudo microk8s stop
+  sudo microk8s start
+  sudo microk8s status --wait-ready
+  echo "kubelet disk-safety args applied"
+else
+  echo "kubelet disk-safety args already configured"
+fi
+DISKSAFETY
+
+echo "==> Configuring VM network (DNS for CI/Docker — pinned resolvers)..."
+VM_NAME="${VM_NAME}" bash "${SCRIPT_DIR}/configure-vm-network.sh"
 
 echo "==> Exporting kubeconfig to ~/.kube/$VM_NAME-config"
 mkdir -p ~/.kube

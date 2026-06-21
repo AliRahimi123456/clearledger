@@ -1,42 +1,40 @@
 # Stage 5 — Secrets Management (HashiCorp Vault)
 
-> **The problem you felt in Stage 4:** Policies enforce pod shape, but credentials still sit in
-> `secret.yaml` in Git and in etcd. Kyverno cannot fix that.
->
-> **What changes here:** Application credentials live in **Vault KV only**. A gitignored
-> **`.env`** bootstraps Vault once — nothing secret is committed. ArgoCD deploys
-> Vault-injected manifests from **`clearledger-infra`** with app `secret.yaml` files removed.
+**Goal:** Delete Kubernetes app Secrets from Git and the cluster; the app keeps working because Vault injects credentials at runtime.
 
-See **[LAB-GUIDE.md § Stage 5](../../docs/LAB-GUIDE.md#stage-5--secrets-management-vault)** for the full walkthrough (example outputs, troubleshooting).
+## Am I ready?
 
----
+- [ ] `make check-4` passes — Kyverno policies enforcing, break-it scenarios worked
+- [ ] Kyverno pods `1/1 Running` with **RESTARTS under 5**
+- [ ] App still works at `http://clearledger.local` after Stage 4 policies applied
 
-## Quick path
+**Done when:** `make check-5` passes, K8s app Secrets deleted, login still works via Vault-injected files.
 
-```bash
-cp stages/stage-5-secrets-management/.env.example stages/stage-5-secrets-management/.env
-# Edit VAULT_TOKEN and SEED_* — see lab guide §5.1
+## Full walkthrough
 
-set -a && source stages/stage-5-secrets-management/.env && set +a
-# helm install vault ... (§5.2 — use upgrade --install if already installed)
-kubectl apply -f stages/stage-5-secrets-management/infra/vault-ingress.yaml
+→ **[docs/LAB-GUIDE.md § Stage 5](../../docs/LAB-GUIDE.md#stage-5--secrets-management-vault)** — `.env` bootstrap, Vault install, seed KV, GitOps migration, delete K8s Secrets, troubleshooting.
 
-bash stages/stage-5-secrets-management/infra/vault/setup.sh
-bash stages/stage-5-secrets-management/infra/vault/seed-vault-secrets.sh
+## Hands-on checkpoint
 
-# GitOps — §5.4: cp deployments to clearledger-infra, rm secret.yaml, git push
-# Wait for auth pods 2/2 — §5.5, then delete K8s app secrets
-make check-5   # §5.7
-```
+- Vault seeded (`setup.sh` + `seed-vault-secrets.sh`); `secret.yaml` removed from **`clearledger-infra`**
+- Auth pods **`2/2`**; `ls /vault/secrets/` shows `database_url`, `jwt_secret`
+- `kubectl get secret -n clearledger` — no auth/ledger app secrets; login curl returns `access_token`
+- `make check-5` ends with **All checks passed. Ready for the next stage.**
+
+## What you can now claim
+
+> **Secrets belong in a vault, not in YAML.** You migrated app credentials out of Git and etcd into Vault KV with agent injection — and proved the app still runs after deleting Kubernetes Secrets.
 
 ---
 
-## Scripts (no credentials inside)
+## Reference
 
 | Script | Purpose |
 |---|---|
 | `infra/vault/setup.sh` | K8s auth, KV mount, policies, roles |
-| `infra/vault/seed-vault-secrets.sh` | `vault kv put` from `.env` `SEED_*` vars |
+| `infra/vault/seed-vault-secrets.sh` | `vault kv put` from gitignored `.env` `SEED_*` vars |
+
+Order: `.env` → install Vault → setup → seed → push `clearledger-infra` → wait for `2/2` pods → delete K8s app Secrets.
 
 ---
 

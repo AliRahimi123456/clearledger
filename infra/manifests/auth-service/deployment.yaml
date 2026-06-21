@@ -1,6 +1,10 @@
 # INTRODUCED: Stage 0 — Raw Kubernetes
-# UPDATED:    Stage 5 — Vault agent sidecar injection (no secretKeyRef)
-# PURPOSE: Auth service deployment with Vault secret injection and security hardening
+# UPDATED:    Stage 5 — copy stages/stage-5-secrets-management/infra/manifests/auth-service/deployment.yaml
+#             over this file to add Vault agent injection and remove secretKeyRef
+# PURPOSE: Auth service deployment with security context hardening
+#
+# STAGES 2–4 (GitOps): ArgoCD applies this file via clearledger-infra + kustomization.yaml
+# STAGE 0 manual deploy: use stages/stage-0-raw-kubernetes/infra/manifests/auth-service/deployment.yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -20,52 +24,33 @@ spec:
       labels:
         app: auth-service
         version: v0.1.0
-      annotations:
-        vault.hashicorp.com/agent-inject: "true"
-        vault.hashicorp.com/role: "auth-service"
-        vault.hashicorp.com/agent-inject-secret-database_url: "clearledger/data/auth-service"
-        vault.hashicorp.com/agent-inject-template-database_url: |
-          {{- with secret "clearledger/data/auth-service" -}}
-          {{ .Data.data.database_url }}
-          {{- end }}
-        vault.hashicorp.com/agent-inject-secret-jwt_secret: "clearledger/data/auth-service"
-        vault.hashicorp.com/agent-inject-template-jwt_secret: |
-          {{- with secret "clearledger/data/auth-service" -}}
-          {{ .Data.data.jwt_secret }}
-          {{- end }}
-        vault.hashicorp.com/agent-pre-populate-only: "false"
-        # Kyverno (Stage 4): injected agent containers need the same pod security baseline
-        vault.hashicorp.com/agent-set-security-context: "true"
-        vault.hashicorp.com/agent-run-as-user: "1000"
-        vault.hashicorp.com/agent-run-as-group: "1000"
-        vault.hashicorp.com/agent-requests-cpu: "50m"
-        vault.hashicorp.com/agent-requests-mem: "64Mi"
-        vault.hashicorp.com/agent-limits-cpu: "200m"
-        vault.hashicorp.com/agent-limits-mem: "128Mi"
     spec:
       serviceAccountName: auth-service
-      automountServiceAccountToken: true
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
         runAsGroup: 1000
-        fsGroup: 1000
-      # vault-secrets volume + /vault/secrets mount are injected by the Vault agent webhook
       volumes:
         - name: tmp
           emptyDir: {}
       containers:
         - name: auth-service
-          image: veeno/clearledger-auth-service:v0.1.0
+          image: clearledger/auth-service:gitops
           ports:
-            - containerPort: 8000
+            - name: http
+              containerPort: 8000
           env:
-            - name: DATABASE_URL_FILE
-              value: "/vault/secrets/database_url"
-            - name: JWT_SECRET_FILE
-              value: "/vault/secrets/jwt_secret"
-            - name: SERVICE_NAME
-              value: "auth-service"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: auth-service-secret
+                  key: database_url
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: auth-service-secret
+                  key: jwt_secret
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: "http://otel-collector.monitoring.svc.cluster.local:4317"
             - name: OTEL_SERVICE_NAME
@@ -84,8 +69,6 @@ spec:
             limits:
               memory: "384Mi"
               cpu: "500m"
-          # startupProbe: Python + OTEL + Vault sidecar need time before :8000 listens.
-          # Without this, liveness kills the container during cold start (CrashLoopBackOff).
           startupProbe:
             httpGet:
               path: /health
@@ -96,14 +79,17 @@ spec:
             httpGet:
               path: /health
               port: 8000
-            periodSeconds: 10
-            failureThreshold: 3
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 5
           readinessProbe:
             httpGet:
               path: /health
               port: 8000
-            periodSeconds: 5
-            failureThreshold: 6
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
           securityContext:
             runAsNonRoot: true
             allowPrivilegeEscalation: false

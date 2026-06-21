@@ -216,6 +216,16 @@ jobs:
           docker build --no-cache -t clearledger-frontend:${IMAGE_TAG} ./app/frontend
           docker images | grep "${IMAGE_TAG}"
 
+      - name: Network diagnostic (on build failure)
+        if: failure()
+        run: |
+          host_dns=0; container_dns=0
+          getent hosts registry-1.docker.io >/dev/null 2>&1 && host_dns=1
+          docker run --rm alpine:3.20 getent hosts registry-1.docker.io >/dev/null 2>&1 && container_dns=1
+          echo "host_dns=${host_dns} container_dns=${container_dns}"
+          echo "1 0 = Docker bridge/NAT broken (investigate MicroK8s iptables); 0 0 = host resolver still broken."
+          resolvectl status 2>/dev/null || true
+
   # ───────────────────────────────────────────────────────────────────────────
   # GATE 4b: SCAN — block publish if CVEs found (images stay local)
   # ───────────────────────────────────────────────────────────────────────────

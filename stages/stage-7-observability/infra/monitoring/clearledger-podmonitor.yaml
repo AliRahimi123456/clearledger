@@ -1,0 +1,23 @@
+# INTRODUCED: Stage 7 — scrape /metrics from ClearLedger app pods
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: clearledger-apps
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames: [clearledger]
+  selector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values:
+          - auth-service
+          - ledger-service
+          - notification-service
+  podMetricsEndpoints:
+    - port: http
+      path: /metrics
+      interval: 30s

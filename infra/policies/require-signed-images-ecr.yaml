@@ -1,0 +1,34 @@
+# Stage 8 — verify Cosign signatures on Amazon ECR images (same key as homelab)
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-signed-images-ecr
+  annotations:
+    policies.kyverno.io/title: Require Signed ECR Images
+    policies.kyverno.io/severity: critical
+    policies.kyverno.io/description: >
+      ECR variant of require-signed-images.yaml for Stage 8 AWS deployments.
+spec:
+  validationFailureAction: Enforce
+  background: false
+  webhookTimeoutSeconds: 30
+  failurePolicy: Fail
+  rules:
+    - name: verify-ecr-cosign-signature
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [clearledger]
+      verifyImages:
+        - imageReferences:
+            - "*.dkr.ecr.*.amazonaws.com/clearledger/auth-service*"
+            - "*.dkr.ecr.*.amazonaws.com/clearledger/ledger-service*"
+            - "*.dkr.ecr.*.amazonaws.com/clearledger/notification-service*"
+            - "*.dkr.ecr.*.amazonaws.com/clearledger/frontend*"
+          attestors:
+            - count: 1
+              entries:
+                - keys:
+                    publicKeys: |-
+                      PASTE_YOUR_COSIGN_PUBLIC_KEY_HERE

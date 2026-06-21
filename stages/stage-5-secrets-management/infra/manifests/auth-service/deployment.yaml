@@ -73,9 +73,8 @@ spec:
 
       containers:
         - name: auth-service
-          # Replace DOCKER_USERNAME with your Docker Hub username.
-          # This is updated automatically by the CI pipeline after Stage 1.
-          image: DOCKER_USERNAME/clearledger-auth-service:latest
+          # Kustomize placeholder — CI updates tags in kustomization.yaml
+          image: clearledger/auth-service:gitops
           ports:
             - containerPort: 8000
 

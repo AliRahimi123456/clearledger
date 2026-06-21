@@ -1,6 +1,6 @@
 # Quickstart
 
-Get the cluster running. Then read Stage 0.
+Get the cluster running. Then work through **one stage at a time** in [docs/LAB-GUIDE.md](docs/LAB-GUIDE.md) — do not read the full guide upfront (~6,000 lines).
 
 ---
 
@@ -10,9 +10,12 @@ Get the cluster running. Then read Stage 0.
 make setup      # Start here — provision cluster
 make stage-0    # First stage
 make check-0    # Verify stage 0 works
+make snapshot STAGE=0 && make snapshots   # after each check-N — confirm checkpoint exists
 make open-ui    # Open the web UI
 make teardown   # Clean up
 ```
+
+After every `make check-N`: snapshot → list → confirm `clearledger.stageN` before advancing. Full ritual: [LAB-GUIDE — Saving your progress](docs/LAB-GUIDE.md#saving-your-progress).
 
 Full command list: run `make` with no arguments.
 
@@ -25,12 +28,24 @@ Full command list: run `make` with no arguments.
 ### Path A — Automatic (recommended)
 
 ```bash
-bash scripts/setup-cluster.sh
-bash scripts/setup-hosts.sh
-cd stages/stage-0-raw-kubernetes && cat README.md
+make setup
+export KUBECONFIG=~/.kube/clearledger-config
+kubectl get nodes   # should show Ready
 ```
 
-**Note:** Path A runs the same commands as Path B. Use Path B if a step in Path A fails and you need to debug it.
+Then open [LAB-GUIDE.md — Stage 0](docs/LAB-GUIDE.md#stage-0--the-running-system) and continue from §0.2 (cluster is already provisioned).
+
+**Rule:** every stage in the lab guide ends with a **✋ Hands-on checkpoint**. Run it yourself before `make check-N`. Skipping checkpoints is the main reason learners quit at Stage 1 or 2.
+
+| Stage | Checkpoint (in LAB-GUIDE) | You prove |
+|---|---|---|
+| 0 | §0.3, §0.5.5 | Images on Docker Hub; pods Running before ingress |
+| 1 | §1.3, §1.6 | Infra repo has secrets + `secretKeyRef`; runner picks up jobs |
+| 2 | Pre-sync checklist, post-sync | Git correct before ArgoCD; app Healthy after sync |
+| 4 | §4.2 | Cosign public key pasted into policy YAML |
+| 5 | §5.4b, §5.4 checkpoint | Secrets removed from Git; Vault annotations present |
+
+**Note:** `make setup` runs the same steps as Path B and configures VM DNS via `scripts/configure-vm-network.sh` (Mac + Multipass). On Linux or WSL2 with MicroK8s on the host, run `bash scripts/configure-vm-network.sh --inside-vm` after provisioning.
 
 ### Path B — Manual (if you want to understand each step)
 
@@ -79,14 +94,21 @@ That is all. No local registry configuration required.
 
 ## Step 2 — Launch the Cluster
 
+**If you used Path A (`make setup`), skip Steps 2–4** — the cluster is already running. Continue at [LAB-GUIDE §0.2](docs/LAB-GUIDE.md#02--understand-the-application-before-deploying-it).
+
+<details>
+<summary>Manual launch (Path B only — if <code>make setup</code> failed)</summary>
+
 ```bash
 multipass launch \
   --name clearledger \
-  --cpus 4 \
-  --memory 8G \
-  --disk 50G \
+  --cpus 6 \
+  --memory 12G \
+  --disk 80G \
   22.04
 ```
+
+</details>
 
 ---
 

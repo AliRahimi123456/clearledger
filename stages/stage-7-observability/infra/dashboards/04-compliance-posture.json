@@ -1,113 +1,469 @@
 {
   "__inputs": [],
   "__requires": [
-    { "type": "grafana", "id": "grafana", "name": "Grafana", "version": "10.0.0" },
-    { "type": "datasource", "id": "prometheus", "name": "Prometheus", "version": "1.0.0" },
-    { "type": "datasource", "id": "loki", "name": "Loki", "version": "1.0.0" }
+    {
+      "type": "grafana",
+      "id": "grafana",
+      "name": "Grafana",
+      "version": "10.0.0"
+    },
+    {
+      "type": "datasource",
+      "id": "prometheus",
+      "name": "Prometheus",
+      "version": "1.0.0"
+    },
+    {
+      "type": "datasource",
+      "id": "loki",
+      "name": "Loki",
+      "version": "1.0.0"
+    }
   ],
-  "description": "ClearLedger — Security posture at a glance for compliance reporting. Import at http://grafana.local/dashboard/import",
+  "description": "ClearLedger - Security posture at a glance for compliance reporting. Import at http://grafana.local/dashboard/import",
   "editable": true,
   "graphTooltip": 1,
   "id": null,
   "panels": [
-    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }, "id": 20, "title": "Security Posture Overview", "type": "row" },
     {
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 20,
+      "title": "Security Posture Overview",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
-          "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] },
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
           "unit": "short",
-          "mappings": [{ "type": "value", "options": { "0": { "text": "CLEAN", "color": "green" }, "1": { "text": "VIOLATIONS", "color": "red" } } }]
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "CLEAN",
+                  "color": "green"
+                },
+                "1": {
+                  "text": "VIOLATIONS",
+                  "color": "red"
+                }
+              }
+            }
+          ]
         }
       },
-      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 1
+      },
       "id": 1,
-      "options": { "colorMode": "background", "textMode": "value" },
-      "targets": [{ "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum(increase(kyverno_policy_results_total{result=\"fail\"}[1h]))", "refId": "A" }],
-      "title": "Policy Violations (1h) — CIS K8s",
+      "options": {
+        "colorMode": "background",
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "ceil(sum(increase(kyverno_admission_requests_total{request_allowed=\"false\"}[$__range])))",
+          "refId": "A"
+        }
+      ],
+      "title": "Policy Violations (1h) - CIS K8s",
       "type": "stat"
     },
     {
-      "datasource": { "type": "loki", "uid": "loki" },
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] }, "unit": "short" } },
-      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 1 },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0,
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 1
+      },
       "id": 2,
-      "options": { "colorMode": "background", "textMode": "value" },
-      "targets": [{ "datasource": { "type": "loki", "uid": "loki" }, "expr": "sum(count_over_time({namespace=\"falco\"} | json | priority=\"CRITICAL\" [1h]))", "refId": "A" }],
-      "title": "Runtime Threats (1h) — SOC2 CC7.2",
+      "options": {
+        "colorMode": "background",
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum(count_over_time({namespace=\"falco\", container=\"falco\"} != \"libbpf\" | json | priority=~\"(?i)Critical\" [1h]))",
+          "queryType": "instant",
+          "refId": "A"
+        }
+      ],
+      "title": "Runtime Threats (1h) - SOC2 CC7.2",
       "type": "stat"
     },
     {
-      "datasource": { "type": "loki", "uid": "loki" },
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 5 }, { "color": "red", "value": 20 }] }, "unit": "short" } },
-      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 1 },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 5
+              },
+              {
+                "color": "red",
+                "value": 20
+              }
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 1
+      },
       "id": 3,
-      "options": { "colorMode": "background", "textMode": "value" },
-      "targets": [{ "datasource": { "type": "loki", "uid": "loki" }, "expr": "sum(count_over_time({namespace=\"clearledger\", app=\"auth-service\"} |= \"Failed login\" [1h]))", "refId": "A" }],
-      "title": "Failed Auth Attempts (1h) — NIST IA-5",
+      "options": {
+        "colorMode": "background",
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum(count_over_time({namespace=\"clearledger\", container=\"auth-service\"} |= \"Failed login attempt\" [1h]))",
+          "queryType": "instant",
+          "refId": "A"
+        }
+      ],
+      "title": "Failed Auth Attempts (1h) - NIST IA-5",
       "type": "stat"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": { "defaults": { "color": { "mode": "fixed", "fixedColor": "green" }, "unit": "short", "mappings": [{ "type": "value", "options": { "1": { "text": "ENFORCING", "color": "green" }, "0": { "text": "INACTIVE", "color": "red" } } }] } },
-      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "green"
+          },
+          "unit": "short",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": "ENFORCING",
+                  "color": "green"
+                },
+                "0": {
+                  "text": "INACTIVE",
+                  "color": "red"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 1
+      },
       "id": 4,
-      "options": { "colorMode": "background", "textMode": "value" },
-      "targets": [{ "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "min(kyverno_policy_results_total >= 0)", "refId": "A" }],
-      "title": "Admission Control Status — PCI-DSS 6.5",
+      "options": {
+        "colorMode": "background",
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "count(kyverno_policy_rule_info_total{status_ready=\"true\"})",
+          "refId": "A"
+        }
+      ],
+      "title": "Admission Control Status - PCI-DSS 6.5",
       "type": "stat"
     },
-    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 }, "id": 21, "title": "Compliance Control Trends", "type": "row" },
     {
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "lineWidth": 2, "fillOpacity": 5 } } },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "id": 21,
+      "title": "Compliance Control Trends",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 5
+          }
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 6
+      },
       "id": 5,
-      "targets": [{ "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum by (policy_name) (rate(kyverno_policy_results_total{result=\"fail\"}[$__rate_interval]))", "legendFormat": "{{policy_name}}", "refId": "A" }],
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (resource_kind) (rate(kyverno_admission_requests_total{request_allowed=\"false\"}[$__rate_interval]))",
+          "legendFormat": "{{resource_kind}}",
+          "refId": "A"
+        }
+      ],
       "title": "Policy Violation Trend (going down = improving)",
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "loki", "uid": "loki" },
-      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "lineWidth": 2, "fillOpacity": 5 } } },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 5
+          }
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 6
+      },
       "id": 6,
-      "targets": [{ "datasource": { "type": "loki", "uid": "loki" }, "expr": "sum by (priority) (count_over_time({namespace=\"falco\"} | json | priority != \"\" [$__interval]))", "legendFormat": "{{priority}}", "refId": "A" }],
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum by (priority) (count_over_time({namespace=\"falco\", container=\"falco\"} != \"libbpf\" | json | priority=~\"(?i)Critical|Warning\" [$__interval]))",
+          "legendFormat": "priority {{priority}}",
+          "refId": "A"
+        }
+      ],
       "title": "Runtime Threat Trend",
       "type": "timeseries"
     },
-    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 }, "id": 22, "title": "Framework Reference", "type": "row" },
     {
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 14
+      },
+      "id": 22,
+      "title": "Framework Reference",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "fieldConfig": {
-        "defaults": { "unit": "short" },
+        "defaults": {
+          "unit": "short"
+        },
         "overrides": [
-          { "matcher": { "id": "byName", "options": "Control" }, "properties": [{ "id": "custom.width", "value": 280 }] },
-          { "matcher": { "id": "byName", "options": "Tool" }, "properties": [{ "id": "custom.width", "value": 160 }] },
-          { "matcher": { "id": "byName", "options": "Status" }, "properties": [{ "id": "custom.width", "value": 100 }, { "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }] }
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Control"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 280
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Tool"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 160
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Status"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 100
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
         ]
       },
-      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 15 },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 15
+      },
       "id": 7,
-      "targets": [{ "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "vector(1)", "refId": "A", "hide": true }],
-      "transformations": [{ "id": "prepareTimeSeries", "options": {} }, { "id": "convertFieldType", "options": {} }],
-      "title": "Active Security Controls — Compliance Mapping",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "vector(1)",
+          "refId": "A",
+          "hide": true
+        }
+      ],
+      "transformations": [
+        {
+          "id": "prepareTimeSeries",
+          "options": {}
+        },
+        {
+          "id": "convertFieldType",
+          "options": {}
+        }
+      ],
+      "title": "Active Security Controls - Compliance Mapping",
       "description": "Control | Tool | Framework | Status\nSecrets detection | Gitleaks | NIST 800-53 IA-5(7) | ACTIVE\nSAST | Semgrep | OWASP ASVS V1.7 | ACTIVE\nContainer image scan | Trivy | PCI-DSS 6.3.3 | ACTIVE\nIaC scan | Checkov | CIS Kubernetes 1.8 | ACTIVE\nImage signing | Cosign | SLSA Level 2 | ACTIVE\nSBOM generation | Syft | EO 14028 | ACTIVE\nNon-root containers | Kyverno | CIS K8s 5.2.6 | ACTIVE\nResource limits | Kyverno | CIS K8s 5.2.4 | ACTIVE\nNo privilege escalation | Kyverno | CIS K8s 5.2.5 | ACTIVE\nCapabilities dropped | Kyverno | CIS K8s 5.2.7 | ACTIVE\nSecrets management | HashiCorp Vault | PCI-DSS 3.5 | ACTIVE\nRuntime threat detection | Falco | SOC2 CC7.2 | ACTIVE\nNetwork segmentation | NetworkPolicy | SOC2 CC6.6 | ACTIVE\nAudit logging | Loki | SOC2 CC7.3 | ACTIVE",
       "type": "text",
       "options": {
         "mode": "markdown",
-        "content": "| Control | Tool | Framework | Status |\n|---|---|---|---|\n| Secrets detection | Gitleaks | NIST 800-53 IA-5(7) | ✅ ACTIVE |\n| SAST | Semgrep | OWASP ASVS V1.7 | ✅ ACTIVE |\n| Container image scan | Trivy | PCI-DSS 6.3.3 | ✅ ACTIVE |\n| IaC scan | Checkov | CIS Kubernetes 1.8 | ✅ ACTIVE |\n| Image signing | Cosign | SLSA Level 2 | ✅ ACTIVE |\n| SBOM generation | Syft | EO 14028 | ✅ ACTIVE |\n| Non-root containers | Kyverno | CIS K8s 5.2.6 | ✅ ACTIVE |\n| Resource limits required | Kyverno | CIS K8s 5.2.4 | ✅ ACTIVE |\n| No privilege escalation | Kyverno | CIS K8s 5.2.5 | ✅ ACTIVE |\n| Capabilities dropped | Kyverno | CIS K8s 5.2.7 | ✅ ACTIVE |\n| Secrets management | HashiCorp Vault | PCI-DSS 3.5 | ✅ ACTIVE |\n| Runtime threat detection | Falco | SOC2 CC7.2 | ✅ ACTIVE |\n| Network segmentation | NetworkPolicy | SOC2 CC6.6 | ✅ ACTIVE |\n| Audit logging | Loki + K8s audit | SOC2 CC7.3 | ✅ ACTIVE |"
+        "content": "| Control | Tool | Framework | Status |\n|---|---|---|---|\n| Secrets detection | Gitleaks | NIST 800-53 IA-5(7) | \u2705 ACTIVE |\n| SAST | Semgrep | OWASP ASVS V1.7 | \u2705 ACTIVE |\n| Container image scan | Trivy | PCI-DSS 6.3.3 | \u2705 ACTIVE |\n| IaC scan | Checkov | CIS Kubernetes 1.8 | \u2705 ACTIVE |\n| Image signing | Cosign | SLSA Level 2 | \u2705 ACTIVE |\n| SBOM generation | Syft | EO 14028 | \u2705 ACTIVE |\n| Non-root containers | Kyverno | CIS K8s 5.2.6 | \u2705 ACTIVE |\n| Resource limits required | Kyverno | CIS K8s 5.2.4 | \u2705 ACTIVE |\n| No privilege escalation | Kyverno | CIS K8s 5.2.5 | \u2705 ACTIVE |\n| Capabilities dropped | Kyverno | CIS K8s 5.2.7 | \u2705 ACTIVE |\n| Secrets management | HashiCorp Vault | PCI-DSS 3.5 | \u2705 ACTIVE |\n| Runtime threat detection | Falco | SOC2 CC7.2 | \u2705 ACTIVE |\n| Network segmentation | NetworkPolicy | SOC2 CC6.6 | \u2705 ACTIVE |\n| Audit logging | Loki + K8s audit | SOC2 CC7.3 | \u2705 ACTIVE |"
       }
     }
   ],
   "refresh": "5m",
   "schemaVersion": 38,
-  "tags": ["clearledger", "security", "compliance"],
-  "time": { "from": "now-24h", "to": "now" },
+  "tags": [
+    "clearledger",
+    "security",
+    "compliance"
+  ],
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
   "timepicker": {},
   "timezone": "browser",
-  "title": "ClearLedger — Compliance Posture",
+  "title": "ClearLedger - Compliance Posture",
   "uid": "clearledger-compliance",
-  "version": 1
+  "version": 1,
+  "slug": "clearledger-compliance"
 }

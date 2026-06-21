@@ -1,5 +1,7 @@
 # INTRODUCED: Stage 0 — Raw Kubernetes
-# PURPOSE: Route external traffic to services via /etc/hosts domain names
+# PURPOSE: Expose the ClearLedger app at clearledger.local — one hostname, path-based routing.
+#   There is no auth.local or ledger.local. /auth, /ledger, /notifications pick the backend.
+#   Other /etc/hosts names (argocd.local, grafana.local, …) get their own Ingresses later.
 # NOTE: For AWS migration (Stage 8), replace ingressClassName and annotations
 #       with ALB-specific values. The path rules remain identical.
 #

@@ -67,7 +67,7 @@ output "notification_service_irsa_role_arn" {
 }
 
 output "github_actions_ecr_role_arn" {
-  description = "IAM role ARN for GitHub Actions OIDC — add as GITHUB_ACTIONS_ROLE_ARN secret in github.com/Osomudeya/clearledger/settings/secrets/actions"
+  description = "IAM role ARN for GitHub Actions OIDC — add as GITHUB_ACTIONS_ROLE_ARN secret in github.com/YOUR_GITHUB_USERNAME/clearledger/settings/secrets/actions"
   value       = aws_iam_role.github_actions_ecr.arn
 }
 

@@ -144,6 +144,41 @@ docker ps
 
 `docker ps` must work without `sudo`.
 
+### CI build fails: DNS `server misbehaving` or `Could not resolve host`
+
+Symptom: GitHub checkout, Docker metadata pulls, or pip inside `docker build`
+fail with errors like:
+
+```text
+lookup registry-1.docker.io on 127.0.0.53:53: server misbehaving
+Could not resolve host: github.com
+[Errno 101] Network is unreachable  (files.pythonhosted.org during pip)
+```
+
+Cause: the Ubuntu host (Multipass VM or bare Linux/WSL) uses a flaky upstream
+resolver through `systemd-resolved`, and Docker inherits that stub for image
+pulls and build-container egress.
+
+Fix: run `scripts/configure-vm-network.sh` — it pins public DNS on
+`systemd-resolved` and in `/etc/docker/daemon.json`, then verifies host and
+container resolution. **Mac + Multipass is the supported provisioning path**
+(`make setup` runs this automatically). Linux and Windows readers run the same
+fix on the host where MicroK8s lives:
+
+| Platform | Command |
+|---|---|
+| **macOS** (Multipass lab VM) | `bash scripts/configure-vm-network.sh` |
+| **Linux** (MicroK8s on host) | `bash scripts/configure-vm-network.sh --inside-vm` |
+| **Windows WSL2** (MicroK8s in Ubuntu) | `bash scripts/configure-vm-network.sh --inside-vm` (inside WSL) |
+
+If a build still fails after the DNS pin, check the **Network diagnostic (on
+build failure)** step in the GitHub Actions log for `host_dns=` /
+`container_dns=`. `1 0` means host DNS works but container path is broken
+(investigate Docker bridge/NAT / MicroK8s iptables).
+
+See also [Docker Hub IPv6](#docker-hub-login-or-push-fails-with-ipv6-network-is-unreachable)
+if pushes fail with `[2600:...]: network is unreachable` (separate issue).
+
 ### Docker Hub login or push fails with IPv6 `network is unreachable`
 
 Symptom: one or more build-and-scan jobs fail during Docker Hub login, image
