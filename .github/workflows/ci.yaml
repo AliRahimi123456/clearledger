@@ -18,6 +18,7 @@ env:
   REGISTRY: docker.io/${{ secrets.DOCKER_USERNAME }}
   # Why IMAGE_TAG: immutable traceability (each image maps to one commit).
   IMAGE_TAG: ${{ github.sha }}
+  TRIVY_VERSION: "0.70.0"
   # BuildKit pip cache + one DB refresh per workflow (not per service).
   DOCKER_BUILDKIT: "1"
   TRIVY_TIMEOUT: 15m
@@ -169,14 +170,9 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           export PATH="$HOME/.local/bin:$PATH"
           if ! command -v trivy &>/dev/null; then
-            sudo apt-get update -qq
-            sudo apt-get install -y wget gnupg
-            wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key \
-              | gpg --dearmor \
-              | sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
-            echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main" \
-              | sudo tee /etc/apt/sources.list.d/trivy.list
-            sudo apt-get update -qq && sudo apt-get install -y trivy
+            curl -sSfL \
+              "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
+              | tar -xzC "$HOME/.local/bin" trivy
           fi
           if ! command -v syft &>/dev/null; then
             curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
@@ -309,7 +305,8 @@ jobs:
   # ───────────────────────────────────────────────────────────────────────────
   # GATE 5: UPDATE MANIFESTS
   # All gates passed. All images scanned and signed.
-  # Update Git. ArgoCD handles the rest. This pipeline never touches kubectl.
+  # Stage 1: commit new tags to clearledger-infra only (no kubectl).
+  # Stage 2+: optional ArgoCD refresh when ENABLE_ARGOCD_SYNC=true.
   # ───────────────────────────────────────────────────────────────────────────
   update-manifests:
     name: "Update Manifests → GitHub"
@@ -341,9 +338,8 @@ jobs:
               | tar xz && sudo mv kustomize /usr/local/bin/
           fi
           # Copy full canonical tree — prevents probe/limit drift (prod: single source)
+          # App secrets stay in GitOps until Stage 5 (learner deletes them from both repos).
           rsync -a --delete \
-            --exclude='auth-service/secret.yaml' \
-            --exclude='ledger-service/secret.yaml' \
             app/infra/manifests/ infra/manifests/
           cd infra/manifests
           kustomize edit set image \
@@ -367,7 +363,10 @@ jobs:
             git push
           fi
 
-      - name: Trigger ArgoCD refresh (self-hosted runner reaches cluster)
+      # Stage 2+ only — off by default so Stage 1 learners see the deployment gap
+      # (infra repo updates; cluster unchanged). Enable: repo variable ENABLE_ARGOCD_SYNC=true
+      - name: Trigger ArgoCD refresh (Stage 2+ — requires ENABLE_ARGOCD_SYNC)
+        if: vars.ENABLE_ARGOCD_SYNC == 'true'
         run: |
           kubectl apply -f app/infra/argocd/clearledger-app.yaml
           kubectl annotate application clearledger -n argocd \

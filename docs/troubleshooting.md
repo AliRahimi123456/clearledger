@@ -4,6 +4,22 @@ Common problems encountered during the lab, with exact diagnostic commands and f
 
 ---
 
+## Where am I stuck? (manual decision tree — no scripts)
+
+Answer one question, run the commands, fix **before** advancing.
+
+| Symptom | You are probably at | Run this yourself | Fix |
+|---|---|---|---|
+| `your-username` / push denied | Stage 0 §0.3 | `echo "$DOCKER_USERNAME"` | `export DOCKER_USERNAME=real-name` and rebuild |
+| Workflow “Waiting for a runner” | Stage 1 §1.2 | GitHub → Runners → check label `clearledger` | Add label; empty commit + `git push` |
+| Pipeline green but Stage 2 red pods | Stage 2 pre-sync | Clone infra repo; `grep secretKeyRef manifests/auth-service/deployment.yaml` | Re-push §1.3 manifests; confirm `secret.yaml` on GitHub |
+| `DATABASE_URL is not set` after ArgoCD | Stage 2 | `grep vault.hashicorp clearledger-infra/manifests/auth-service/deployment.yaml` | Infra repo must use `secretKeyRef` until Stage 5 |
+| Scenario 3 does not deny unsigned image | Stage 4 §4.2 | `grep PASTE_YOUR infra/policies/require-signed-images.yaml` | Paste `cosign.pub` into policy by hand |
+| Auth `1/2` not `2/2` after Vault | Stage 5 §5.4 | `kubectl logs deploy/auth-service -c vault-agent-init` | Complete §5.3 seed before GitOps push |
+| `make check-2` fails on health | Stage 2 | `kubectl get pods -n clearledger` + logs | [ArgoCD red pods](#argocd-synced-but-red-pods--health-progressing-stage-2) |
+
+---
+
 ## Cluster / VM Issues
 
 ### VM not starting
@@ -30,6 +46,48 @@ export KUBECONFIG=~/.kube/clearledger-config
 kubectl get nodes
 # Should show: clearledger   Ready
 ```
+
+### VM disk full or nearly full
+
+<a id="vm-disk-full-or-nearly-full"></a>
+
+Symptoms: pods `Evicted`, `FailedScheduling` with disk-pressure taints, Helm installs timing out, or `No space left on device` in logs.
+
+**Diagnose first (read-only):**
+
+```bash
+make doctor
+```
+
+Expected output includes VM disk %, top namespaces by PVC **requested** storage, Prometheus TSDB size (if Stage 7 installed), and **PASS / WARN / FAIL**.
+
+| Verdict | Meaning | Next step |
+|---|---|---|
+| PASS | Under 75% used | No reclaim needed — look elsewhere (image pull, memory) |
+| WARN | 75–89% used | `make reclaim` |
+| FAIL | 90%+ used | `make reclaim` immediately; if still FAIL → `make teardown && make setup` |
+
+**Reclaim (safe — does not delete PVCs or running workload data):**
+
+```bash
+make reclaim
+make doctor    # confirm improvement
+```
+
+What reclaim does inside the VM:
+
+- `microk8s ctr` image prune — **unused** images only; images referenced by running pods are kept
+- `journalctl --vacuum-size=200M`
+- Before/after `df -h /`
+
+What reclaim **does not** do:
+
+- Delete PVCs, Postgres data, or Prometheus TSDB
+- Replace resizing the VM or tearing down when the disk is genuinely exhausted
+
+**Preventive caps (new VMs via `make setup`):** kubelet log rotation (`10Mi` × 3 files), image GC at 80%/60%, journald `SystemMaxUse=300M`. Existing VMs: re-run the disk-safety block in `scripts/setup-cluster.sh` or recreate the VM.
+
+**When not to run reclaim:** doctor shows PASS; you need a clean lab reset (use `make teardown` instead); you expect Prometheus or database size to shrink (reclaim will not touch those — reduce retention or tear down).
 
 ---
 
@@ -223,6 +281,43 @@ Fix: skip that dev-only file in the Dockerfile scan:
 checkov --directory . --framework dockerfile --skip-path app/frontend/Dockerfile.dev
 ```
 
+### Trivy install fails (`trivy: command not found` or apt Release errors)
+
+Symptom:
+
+```text
+E: The repository 'http://archive.ubuntu.com/ubuntu jammy Release' no longer has a Release file.
+...
+trivy: command not found
+Error: Process completed with exit code 127.
+```
+
+Cause: an older workflow installed Trivy via `apt`. That requires a healthy Ubuntu
+mirror on the runner VM. When `apt-get update` fails, Trivy never installs even
+though Syft and Grype (installed from GitHub release binaries) succeed.
+
+Fix: the workflow installs Trivy from the official GitHub release tarball into
+`$HOME/.local/bin` — same pattern as Syft, Grype, and Cosign. Pull the latest
+`clearledger` repo so `.github/workflows/ci.yaml` includes that install step, then
+re-run the pipeline.
+
+To verify on the runner VM:
+
+```bash
+multipass shell clearledger
+export PATH="$HOME/.local/bin:$PATH"
+trivy --version
+```
+
+If missing, install once manually (optional — the next CI run installs it):
+
+```bash
+mkdir -p ~/.local/bin
+curl -sL "https://github.com/aquasecurity/trivy/releases/download/v0.70.0/trivy_0.70.0_Linux-64bit.tar.gz" \
+  | tar -xzC "$HOME/.local/bin" trivy
+trivy --version
+```
+
 ### Trivy install fails after "found version"
 
 Symptom:
@@ -386,6 +481,19 @@ if: github.ref == 'refs/heads/main' && github.event_name == 'push' && vars.ENABL
 
 Enable it later by adding a repository variable named `ENABLE_DAST` with value
 `true`.
+
+### ArgoCD refresh fails in Stage 1
+
+Symptom: `update-manifests` fails on **Trigger ArgoCD refresh** — errors like
+`namespaces "argocd" not found` or `application clearledger not found`.
+
+Cause: That step is for **Stage 2+** when ArgoCD is installed. Stage 1 should
+only update `clearledger-infra`, not touch the cluster.
+
+Fix: leave repository variable `ENABLE_ARGOCD_SYNC` **unset** during Stage 1.
+The step is skipped automatically when the variable is missing or not `true`.
+Enable it after ArgoCD's first healthy sync (Stage 2): set `ENABLE_ARGOCD_SYNC`
+to `true` under **Settings → Secrets and variables → Actions → Variables**.
 
 ---
 
@@ -913,18 +1021,16 @@ argocd app resources clearledger --grpc-web | grep Deployment
 
 ### ArgoCD Synced but red pods / Health "Progressing" (Stage 2)
 
-**Symptom:** After enabling `directory.recurse: true` or the first full sync, `auth-service` / `ledger-service` show red in the ArgoCD tree, new pods are `0/1`, app health is **Progressing** while sync is **Synced**.
+**Symptom:** After the first full sync, `auth-service` / `ledger-service` show red in the ArgoCD tree, new pods are `0/1`, app health is **Progressing** while sync is **Synced**.
 
-**Cause:** `manifests/netpol/` in `clearledger-infra` (Stage 6 material; should live in `infra/deferred-by-stage/` only) was applied by ArgoCD. `default-deny-all` blocks DNS; new pods fail with `could not translate host name "postgres"`.
+**Common causes:**
 
-**Fix (Stage 2 — defer netpol to Stage 6):**
-
-1. Delete folder `manifests/netpol/` in `clearledger-infra` on GitHub and push.
-2. `argocd app sync clearledger --grpc-web`
-3. If needed: `kubectl rollout restart deployment/auth-service deployment/ledger-service -n clearledger`
-4. Optional immediate cleanup: `kubectl delete networkpolicy -n clearledger --all` (only helps once Git no longer contains netpol — otherwise ArgoCD recreates them).
-
-**Expected:** App **Healthy**, green pods, then continue with the drift demo.
+| Cause | Fix |
+|---|---|
+| `manifests/netpol/` still in `clearledger-infra` | Delete folder on GitHub, sync ArgoCD, restart auth/ledger (see LAB-GUIDE §2) |
+| Vault deployments synced before Stage 5 | Re-push `secretKeyRef` manifests from this repo (`make push-infra-manifests`) |
+| CI deleted app secrets from `clearledger-infra` | Ensure `auth-service/secret.yaml` and `ledger-service/secret.yaml` are in infra repo and listed in `kustomization.yaml`; re-push and sync |
+| Wrong Docker Hub user in `kustomization.yaml` | `sed` `YOUR_DOCKERHUB_USERNAME` → your user before Stage 1.3 push |
 
 See [LAB-GUIDE.md — Stage 2 red pods section](../docs/LAB-GUIDE.md#if-the-ui-shows-red-pods-or-progressing-read-this-before-the-screenshot).
 
