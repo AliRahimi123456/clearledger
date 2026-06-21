@@ -46,6 +46,8 @@ Manifest source for Stage 1.3: `infra/manifests/` (replace `YOUR_DOCKERHUB_USERN
 
 **CI network DNS:** if builds fail on `server misbehaving` or `Could not resolve host`, run `scripts/configure-vm-network.sh` — macOS: from repo root (Multipass); Linux/WSL: `--inside-vm` on the MicroK8s host. See [troubleshooting.md § CI build fails: DNS](../../docs/troubleshooting.md#ci-build-fails-dns-server-misbehaving-or-could-not-resolve-host).
 
+**Trivy scan failure:** if **Scan images** fails, read the CVE table (not the version notice at the bottom) — [LAB-GUIDE §3.5](../../docs/LAB-GUIDE.md#35--when-a-scan-fails-on-a-cve-you-didnt-inject).
+
 ---
 
 ## → Next: [Stage 2 — GitOps](../stage-2-gitops/README.md)

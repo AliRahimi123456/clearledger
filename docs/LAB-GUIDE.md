@@ -73,7 +73,7 @@ If you are stuck for more than 15 minutes on one checkpoint, open [troubleshooti
 
 ### Saving your progress
 
-**Snapshots need Multipass.** `make snapshot` and `make restore` only work when your cluster runs inside a Multipass VM (the default macOS path). If you run MicroK8s directly on Linux without Multipass, there is no `make snapshot` — use Path B below (`make teardown && make setup` and re-walk stages) or your own VM/LVM snapshots.
+**Mac + Multipass only:** `make snapshot` and `make restore` need a Multipass VM. Linux without Multipass has no snapshot command — use Path B below if something breaks.
 
 This lab takes days. Your **source code lives on your host** in the Git repo — a broken or deleted VM never loses your commits, manifests, or local config. What you can lose is **cluster state** inside the VM (deployed pods, Vault secrets, in-cluster Grafana work).
 
@@ -170,15 +170,37 @@ These are not buzzwords anymore because you built every one of them. The screens
 
 ## Before You Start
 
-> **Tested path:** This lab is built and checked on **macOS with Multipass**. You can finish it on Linux or Windows too — see the box below — but the supported, step-by-step path is Mac + Multipass.
+### Which setup is yours?
 
-> **Linux and Windows — read this first**
->
-> - **Linux (MicroK8s on the host, no Multipass):** Commands like `make setup`, `multipass exec`, and `multipass info` do not apply. Run `*-inside-vm` scripts on the host instead (for example `bash scripts/configure-vm-network.sh --inside-vm`). **`make snapshot` / `make restore` do not exist** on bare-metal MicroK8s — your recovery is `make teardown && make setup` plus re-walking stages (Path B in [Saving your progress](#saving-your-progress)), or a snapshot you take yourself at the VM/hypervisor level.
-> - **Windows:** Run the **whole lab inside WSL2 Ubuntu**. The `make` targets and `scripts/*.sh` files need bash — PowerShell cannot run them. Multipass on Windows (Hyper-V) is **not tested**; use WSL2.
-> - **DNS fix for CI builds:** `scripts/configure-vm-network.sh` runs on whatever host has MicroK8s and Docker. On Mac it goes through Multipass automatically; on Linux/WSL2 run `bash scripts/configure-vm-network.sh --inside-vm` on that host. See [troubleshooting.md — CI DNS](troubleshooting.md#ci-build-fails-dns-server-misbehaving-or-could-not-resolve-host).
+The lab is **written and tested for Mac + Multipass**. You can finish every stage on Linux or Windows too — just follow the row that matches your machine:
 
-**Opening URLs in your browser:** macOS → `open http://grafana.local` · Linux/WSL2 → `xdg-open http://grafana.local`
+| You are on… | Do this |
+|---|---|
+| **Mac** | Follow the guide as written. Run `make setup`, then `bash scripts/configure-vm-network.sh` if CI builds fail on DNS. |
+| **Linux** (MicroK8s on the host, no Multipass) | Skip `multipass` commands. Run scripts with `--inside-vm` on the host (e.g. `bash scripts/configure-vm-network.sh --inside-vm`). **No `make snapshot`** — save progress with `make teardown && make setup` and re-walk stages ([Path B](#saving-your-progress)). |
+| **Windows** | Install **WSL2 Ubuntu**. Run the **whole lab inside WSL** — not PowerShell. Follow the **Linux** row above from inside WSL. |
+
+**Open a URL in the browser**
+
+```bash
+# macOS
+open http://grafana.local
+
+# Linux or WSL2
+xdg-open http://grafana.local
+```
+
+**CI builds fail on DNS?** Run the network fix on the machine that has Docker and MicroK8s:
+
+```bash
+# Mac (from repo root — talks to the Multipass VM for you)
+bash scripts/configure-vm-network.sh
+
+# Linux or WSL2 (on that same machine)
+bash scripts/configure-vm-network.sh --inside-vm
+```
+
+Details: [troubleshooting — CI DNS](troubleshooting.md#ci-build-fails-dns-server-misbehaving-or-could-not-resolve-host).
 
 ### System requirements
 
@@ -197,7 +219,7 @@ These are not buzzwords anymore because you built every one of them. The screens
 | Docker Desktop | Builds container images on your machine | [docker.com](https://docs.docker.com/desktop/) | [docker.com](https://docs.docker.com/engine/install/) | [docker.com](https://docs.docker.com/desktop/) |
 | jq | Formats JSON output so you can read it | `brew install jq` | `sudo apt install jq` | `winget install jqlang.jq` |
 
-> **Windows:** Run everything inside **WSL2 Ubuntu**. PowerShell cannot run `make` or the bash scripts under `scripts/`. Do not use PowerShell for lab commands.
+> **Windows:** Use **WSL2 Ubuntu** for all lab commands. PowerShell cannot run `make` or `scripts/*.sh`.
 
 Verify everything before continuing:
 
@@ -360,16 +382,58 @@ When you continue the main lab, deploy to Kubernetes as in Stage 0 and use **cle
 
 ## Domain Names
 
-`make setup` handles this automatically — it runs `scripts/setup-hosts.sh` which adds all six domain entries to `/etc/hosts` for you. You only need this section if you skipped `make setup` and provisioned the VM manually (Step 0.1).
+`make setup` adds the six lab hostnames to `/etc/hosts` for you. You only need this section if that step failed or you set up the cluster by hand.
 
-**Why these entries exist:** Kubernetes routes traffic based on the hostname in the URL. When your browser requests `clearledger.local`, it reaches the VM, and the Ingress controller inside the cluster decides which service to forward the request to. Without the `/etc/hosts` entry, your machine does not know that `clearledger.local` means "the VM's IP address."
+**What the names are for:** Your browser needs to know where `clearledger.local` points. `make setup` maps it (and five other names) to your cluster IP. One hostname for the app — paths like `/auth` and `/ledger` route inside the cluster. Names like `grafana.local` and `argocd.local` are for tools you install in later stages.
 
-**Six names in `/etc/hosts`, but you won't see all six in `ingress.yaml`.** That confuses almost everyone the first time they open the file. `make setup` adds six hostnames, yet Stage 0's Ingress only mentions `clearledger.local` — and that's correct. The ClearLedger app does not get a separate hostname per service. There is no `auth.local` or `ledger.local`. All four app services share one address; the bit after the hostname (`/auth`, `/ledger`, `/notifications`, or `/` for the UI) tells Ingress which backend to use. The other names — `argocd.local`, `grafana.local`, `vault.local`, `falco.local`, `litmus.local` — are for platform tools you'll install in later stages. Each of those gets its own Ingress when you get there. They don't belong in this file.
+### Mac or Linux with Multipass (default)
+
+```bash
+sudo bash scripts/setup-hosts.sh
+```
+
+Or by hand:
+
+```bash
+VMIP=$(multipass info clearledger | grep IPv4 | awk '{print $2}')
+echo "$VMIP  clearledger.local argocd.local grafana.local vault.local falco.local litmus.local" | sudo tee -a /etc/hosts
+```
+
+Test: `curl -s -o /dev/null -w "%{http_code}\n" http://clearledger.local/auth/health` → expect `200` after Stage 0.
+
+### WSL2 (MicroK8s runs inside WSL)
+
+WSL does **not** use `multipass info`. Do this **inside your WSL terminal**:
+
+**Step 1 — find an IP that works**
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1/auth/health
+```
+
+If that returns `200` (after Stage 0), use `127.0.0.1`. If not, try your WSL IP:
+
+```bash
+ip -4 addr show eth0 | grep inet
+```
+
+Use the `inet` address (e.g. `172.x.x.x`).
+
+**Step 2 — add to hosts inside WSL**
+
+```bash
+LAB_IP=127.0.0.1   # change if step 1 needed a different IP
+echo "$LAB_IP  clearledger.local argocd.local grafana.local vault.local falco.local litmus.local" | sudo tee -a /etc/hosts
+```
+
+**Step 3 — only if you use a Windows browser (Chrome/Edge outside WSL)**
+
+Add the **same line** to `C:\Windows\System32\drivers\etc\hosts` (open Notepad **as Administrator**). Use the same `LAB_IP` as in WSL.
+
+Test inside WSL: `curl http://clearledger.local/auth/health`
 
 <details>
-<summary>Manual setup (only if you did not run <code>make setup</code>)</summary>
-
-**macOS / Linux:**
+<summary>Manual Multipass hosts (same as Mac block above)</summary>
 
 ```bash
 VMIP=$(multipass info clearledger | grep IPv4 | awk '{print $2}')
@@ -381,20 +445,6 @@ $VMIP  vault.local
 $VMIP  falco.local
 $VMIP  litmus.local
 EOF
-```
-
-Or run: `sudo bash scripts/setup-hosts.sh`
-
-**Windows (PowerShell as Administrator):**
-
-```powershell
-$ip = "PASTE_VM_IP_HERE"
-@(
-  "$ip  clearledger.local",
-  "$ip  argocd.local",     "$ip  grafana.local",
-  "$ip  vault.local",      "$ip  falco.local",
-  "$ip  litmus.local"
-) | Add-Content "C:\Windows\System32\drivers\etc\hosts"
 ```
 
 </details>
@@ -2879,6 +2929,85 @@ Exit code **1**. Report Summary shows **37** vulnerabilities on `python:3.8-slim
 ```bash
 git checkout app/auth-service/Dockerfile
 ```
+
+---
+
+### 3.5 — When a scan fails on a CVE you didn't inject
+
+§3.4 teaches gates by **breaking them on purpose**. In production — and in this lab months after you clone — Trivy or Grype can fail on a CVE you never touched. Base images drift, CVE databases update weekly, and a new HIGH in a pinned pip package or Debian layer fails the scan even though your code is unchanged. **That is the scanner doing its job**, not a broken lab.
+
+#### Why the gate fails
+
+The pipeline runs Trivy with:
+
+```text
+--severity CRITICAL,HIGH --ignore-unfixed --exit-code 1
+```
+
+- **`--ignore-unfixed`** — every CVE Trivy reports has a fix available (a "Fixed Version" column).
+- **`--exit-code 1`** — any fixable HIGH or CRITICAL fails the job.
+
+#### The version-notice trap
+
+Near the bottom of a failed **Scan images** log you may see:
+
+```text
+📣 Notices:
+  - Version 0.71.2 of Trivy is now available, current version is 0.70.0
+
+To suppress version checks, run Trivy scans with the --skip-version-check flag
+
+Error: Process completed with exit code 1.
+```
+
+**That notice is informational. It does not cause the failure.** Trivy does not exit 1 because a newer scanner exists. The real failure is a CVE found under `--exit-code 1`. Do **not** add `--skip-version-check` thinking it fixes the gate — it only hides the notice; the CVE still fails the scan.
+
+Scroll **up** in the log, or download the artifact (below).
+
+#### How to read the real finding
+
+The CVE table sits **above** the `Error: Process completed with exit code 1` line in the **Trivy scan all images** step. Columns to read:
+
+| Column | Meaning |
+|---|---|
+| Package | Affected library (pip or OS) |
+| CVE | Identifier |
+| Severity | HIGH or CRITICAL |
+| Installed | Version in your image |
+| Fixed Version | What you need to reach |
+
+**Artifact shortcut:** on the failed run → **Artifacts** → `image-scan-results` → `trivy-auth-results.json` (auth-service). Parse the `Vulnerabilities` array for `Severity` HIGH/CRITICAL and `FixedVersion`.
+
+#### How to fix (by layer)
+
+**pip package (Python)** — pin the Fixed Version in the service's `requirements.txt`:
+
+```diff
+# app/auth-service/requirements.txt — real example (CVE-2026-53539)
+- python-multipart==0.0.27
++ python-multipart==0.0.30
+```
+
+Rebuild, re-scan locally if you want confidence, commit, push:
+
+```bash
+docker build -t clearledger-auth-service:test ./app/auth-service
+trivy image --exit-code 1 --severity CRITICAL,HIGH --ignore-unfixed clearledger-auth-service:test
+```
+
+**OS package (Debian / Alpine)** — refresh the base image to a current digest (`python:3.13-slim`, `nginx:1.27-alpine`) or add a targeted upgrade in the Dockerfile (`apt-get upgrade -y <pkg>` or `apk upgrade --no-cache <pkg>`).
+
+Check sibling services: if ledger and notification share the same base and requirements pattern, apply the same bump in one commit so the next image does not fail on the identical CVE.
+
+#### Documented exception (rare)
+
+Use only when **no acceptable fixed version exists** — fix is beta/prerelease only, or a confirmed false positive. Add the CVE to `.trivyignore` and `.grype.yaml` **with a comment** (reason + review date). See how `CVE-2026-7210` is handled: Python 3.15.0b2 is the only fix; beta CPython is not acceptable in production. **This is the exception, not the default.**
+
+#### What never to do
+
+Do not remove `--exit-code 1`, drop HIGH from `--severity`, or add `--skip-*` flags that disable scanning. Those defeat Stage 3/4's purpose — you would ship vulnerable images while the pipeline looks green.
+
+More detail: [troubleshooting.md — Trivy blocks Python service images](troubleshooting.md#trivy-blocks-python-service-images).
 
 ---
 

@@ -11,7 +11,7 @@
 
 ## Full walkthrough
 
-→ **[docs/LAB-GUIDE.md § Stage 3](../../docs/LAB-GUIDE.md#stage-3--security-gates)** — pre-commit hooks, Cosign keys, break each gate on purpose (§3.4), DAST (§3.5), troubleshooting.
+→ **[docs/LAB-GUIDE.md § Stage 3](../../docs/LAB-GUIDE.md#stage-3--security-gates)** — pre-commit hooks, Cosign keys, break each gate on purpose (§3.4), real CVE scan failures (§3.5), [Enable DAST](../../docs/LAB-GUIDE.md#enable-dast-optional--after-stage-2) (optional), troubleshooting.
 
 ## Hands-on checkpoint
 
@@ -36,7 +36,9 @@
 | Image CVEs | Trivy |
 | SBOM | Syft + Grype |
 | Signing | Cosign |
-| DAST (optional) | `scripts/dast/smoke.sh`, ZAP (§3.5) |
+| DAST (optional) | `scripts/dast/smoke.sh`, ZAP — [Enable DAST](../../docs/LAB-GUIDE.md#enable-dast-optional--after-stage-2) |
+
+Unexpected Trivy/Grype failure (not from §3.4): [§3.5](../../docs/LAB-GUIDE.md#35--when-a-scan-fails-on-a-cve-you-didnt-inject).
 
 Pre-commit expected failures on later-stage files: see LAB-GUIDE [§3.1](../../docs/LAB-GUIDE.md#31--install-pre-commit-hooks).
 

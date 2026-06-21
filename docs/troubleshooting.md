@@ -146,38 +146,25 @@ docker ps
 
 ### CI build fails: DNS `server misbehaving` or `Could not resolve host`
 
-Symptom: GitHub checkout, Docker metadata pulls, or pip inside `docker build`
-fail with errors like:
+**You see errors like:**
 
 ```text
 lookup registry-1.docker.io on 127.0.0.53:53: server misbehaving
 Could not resolve host: github.com
-[Errno 101] Network is unreachable  (files.pythonhosted.org during pip)
 ```
 
-Cause: the Ubuntu host (Multipass VM or bare Linux/WSL) uses a flaky upstream
-resolver through `systemd-resolved`, and Docker inherits that stub for image
-pulls and build-container egress.
+**Fix — run once on the machine that runs Docker and the GitHub runner:**
 
-Fix: run `scripts/configure-vm-network.sh` — it pins public DNS on
-`systemd-resolved` and in `/etc/docker/daemon.json`, then verifies host and
-container resolution. **Mac + Multipass is the supported provisioning path**
-(`make setup` runs this automatically). Linux and Windows readers run the same
-fix on the host where MicroK8s lives:
-
-| Platform | Command |
+| Platform | Command (from repo root) |
 |---|---|
-| **macOS** (Multipass lab VM) | `bash scripts/configure-vm-network.sh` |
-| **Linux** (MicroK8s on host) | `bash scripts/configure-vm-network.sh --inside-vm` |
-| **Windows WSL2** (MicroK8s in Ubuntu) | `bash scripts/configure-vm-network.sh --inside-vm` (inside WSL) |
+| Mac | `bash scripts/configure-vm-network.sh` |
+| Linux or WSL2 | `bash scripts/configure-vm-network.sh --inside-vm` |
 
-If a build still fails after the DNS pin, check the **Network diagnostic (on
-build failure)** step in the GitHub Actions log for `host_dns=` /
-`container_dns=`. `1 0` means host DNS works but container path is broken
-(investigate Docker bridge/NAT / MicroK8s iptables).
+Then re-run the failed GitHub Actions job.
 
-See also [Docker Hub IPv6](#docker-hub-login-or-push-fails-with-ipv6-network-is-unreachable)
-if pushes fail with `[2600:...]: network is unreachable` (separate issue).
+**Still failing?** Open the build job log → step **Network diagnostic (on build failure)**. Look for `host_dns=` and `container_dns=`. If you see `1 0`, DNS is fixed but Docker networking is not — see the lab guide §7.8.
+
+**Different error** (`[2600:...]: network is unreachable` on Docker Hub push)? That is IPv6 — see [Docker Hub IPv6](#docker-hub-login-or-push-fails-with-ipv6-network-is-unreachable).
 
 ### Docker Hub login or push fails with IPv6 `network is unreachable`
 
@@ -353,6 +340,23 @@ curl -sL "https://github.com/aquasecurity/trivy/releases/download/v0.70.0/trivy_
 trivy --version
 ```
 
+### Trivy "Version X is now available" notice (not a scan failure)
+
+Symptom — at the **bottom** of a failed **Scan images** log:
+
+```text
+📣 Notices:
+  - Version 0.71.2 of Trivy is now available, current version is 0.70.0
+...
+Error: Process completed with exit code 1.
+```
+
+**This notice is informational.** Trivy does **not** exit 1 because a newer scanner release exists. The failure is a fixable HIGH/CRITICAL CVE under `--exit-code 1`. Do **not** add `--skip-version-check` to "fix" the gate — it only hides the notice; the CVE still fails the scan.
+
+**What to do:** scroll up for the CVE table (Package | CVE | Severity | Installed | Fixed Version), or download the `image-scan-results` artifact (`trivy-auth-results.json`). Fix the package or base image per [LAB-GUIDE §3.5](LAB-GUIDE.md#35--when-a-scan-fails-on-a-cve-you-didnt-inject).
+
+**Maintainers:** `TRIVY_VERSION` is pinned in `.github/workflows/ci.yaml` — bump it periodically for scanner hygiene. That is unrelated to scan gate failures; those are always real CVEs.
+
 ### Trivy install fails after "found version"
 
 Symptom:
@@ -403,7 +407,7 @@ Fixes applied in this lab:
 | `protobuf` | transitive `4.25.9` | `>=5.29.6` | Fixes protobuf HIGH CVE |
 | `setuptools` | `>=69.0.0,<82.0.0` | `>=78.1.1` | Fixes setuptools HIGH CVEs |
 | `python-jose` | `3.3.0` | `3.4.0` | Fixes auth-service CRITICAL CVE |
-| `python-multipart` | `0.0.9` | `0.0.27` | Fixes auth-service HIGH CVEs |
+| `python-multipart` | `0.0.9` | `0.0.30` | Fixes auth-service HIGH CVEs (e.g. CVE-2026-53539) |
 
 After changing requirements, rebuild the images and scan again:
 
@@ -1126,18 +1130,25 @@ kubectl exec -n clearledger \
 
 ### Services not reachable via domain name
 
+**Mac or Linux with Multipass**
+
 ```bash
-# Verify /etc/hosts entries exist
 cat /etc/hosts | grep clearledger
-
-# Verify the VM IP hasn't changed (it can change after restart)
-VMIP=$(multipass info clearledger | grep IPv4 | awk '{print $2}')
-echo "Current VM IP: $VMIP"
-
-# If the IP changed, re-run setup-hosts.sh after removing old entries
-sudo sed -i '' '/clearledger.local/d' /etc/hosts
-./scripts/setup-hosts.sh
+sudo bash scripts/setup-hosts.sh
+curl -s -o /dev/null -w "%{http_code}\n" http://clearledger.local/auth/health
 ```
+
+If the VM IP changed after a restart, remove old lines and run the script again:
+
+```bash
+sudo sed -i.bak '/\.local/d' /etc/hosts
+rm -f /etc/hosts.bak
+sudo bash scripts/setup-hosts.sh
+```
+
+**WSL2**
+
+Do **not** use `multipass info`. Follow the three steps in [Domain Names — WSL2](LAB-GUIDE.md#wsl2-microk8s-runs-inside-wsl) in the lab guide.
 
 ### Network policies blocking legitimate traffic
 

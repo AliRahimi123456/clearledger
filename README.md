@@ -86,6 +86,8 @@ curl / browser ──────►│  │  nginx  │  │  MicroK8s    │ �
 
 The pipeline runs on GitHub Actions with a self-hosted runner installed inside your VM. This lets the runner reach your local cluster and Docker Hub. Employers can see your pipeline runs publicly on GitHub.
 
+**Maintainers:** `TRIVY_VERSION` in `.github/workflows/ci.yaml` is pinned and should be bumped periodically — but a "new Trivy version available" notice in scan logs does **not** cause failures; scan gate failures are always fixable CVEs. Learners: see [LAB-GUIDE §3.5](docs/LAB-GUIDE.md#35--when-a-scan-fails-on-a-cve-you-didnt-inject).
+
 ## Setting Up Your Repository
 
 ```bash
