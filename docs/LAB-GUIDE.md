@@ -2265,7 +2265,9 @@ GitHub → your `clearledger` repo → **Settings → Secrets and variables → 
 |---|---|
 | `ENABLE_ARGOCD_SYNC` | `true` |
 
-The next green pipeline run will refresh ArgoCD after updating `clearledger-infra`. Leave this **unset during Stage 1** — that is how you proved the cluster did not change until GitOps existed.
+The next green pipeline run nudges ArgoCD after updating `clearledger-infra` (uses `microk8s kubectl` on the runner). That nudge is optional and non-fatal — if it cannot reach the cluster, the manifest push still succeeded and ArgoCD syncs on its next poll (~3 min).
+
+Leave this **unset during Stage 1** — that is how you proved the cluster did not change until GitOps existed.
 
 Leave **`ENABLE_DAST` unset** for now. Stage 3 walks you through turning on OWASP ZAP once the app is reliably live at `clearledger.local`.
 
@@ -2834,6 +2836,8 @@ Start with **Gate 1** end-to-end before the others.
 ```bash
 echo 'AWS_KEY = "'$(printf '%s%s' 'AKIA' 'IOSFODNN7EXAMPLE')'"' >> app/auth-service/main.py
 git add app/auth-service/main.py && git commit -m "test: trigger gitleaks"
+# pre-commit blocks this commit locally — that is the test.
+# For a CI screenshot only: git commit --no-verify -m "test: trigger gitleaks" && git push
 ```
 
 **Done looks like (terminal — pre-commit):**
@@ -2895,8 +2899,8 @@ git add app/auth-service/gate_test_semgrep.py && git commit -m "test: trigger se
 **Revert:**
 
 ```bash
-git checkout app/auth-service/gate_test_semgrep.py 2>/dev/null; rm -f app/auth-service/gate_test_semgrep.py
-git commit -am "revert: semgrep gate test" && git push
+rm -f app/auth-service/gate_test_semgrep.py
+git add -A && git commit -m "revert: semgrep gate test" && git push
 ```
 
 ---
@@ -2913,14 +2917,14 @@ cp /tmp/Dockerfile-nohc /tmp/checkov-demo/app/auth-service/Dockerfile
 /tmp/sec-gates-venv/bin/checkov --directory /tmp/checkov-demo --framework dockerfile
 ```
 
-**Break CI** — add a line the pipeline treats as HIGH:
+**Break CI** — add `EXPOSE 22` (shows **CKV_DOCKER_1** in the log). CI only goes red if Checkov rates it HIGH/CRITICAL (`--hard-fail-on` in `ci.yaml`); if the job stays green, you still passed the exercise by reading the finding in the log and artifact **`checkov-results`**.
 
 ```bash
 echo 'EXPOSE 22' >> app/auth-service/Dockerfile
 git add app/auth-service/Dockerfile && git commit -m "test: trigger checkov" && git push
 ```
 
-**Pass:** job **`IaC Scan (Checkov)`** red ✗; log shows **CKV_DOCKER_1** (SSH port exposed). Artifact **`checkov-results`** has the full JSON.
+**Pass:** log or artifact shows **CKV_DOCKER_1** (SSH port exposed). Job **`IaC Scan (Checkov)`** red ✗ is a bonus, not required for §3.4 — use **Gitleaks, Semgrep, or Trivy** for a screenshot of a failed job.
 
 **Revert:**
 
@@ -2959,229 +2963,74 @@ git commit -am "revert: trivy gate test" && git push
 
 ### 3.5 — When a scan fails on a CVE you didn't inject
 
-§3.4 teaches gates by **breaking them on purpose**. In production — and in this lab months after you clone — Trivy or Grype can fail on a CVE you never touched. Base images drift, CVE databases update weekly, and a new HIGH in a pinned pip package or Debian layer fails the scan even though your code is unchanged. **That is the scanner doing its job**, not a broken lab.
+§3.4 is deliberate. This section is for the other case: you changed nothing, pushed, and **Scan images** went red anyway. New CVEs land in the database every week. That is normal — fix the package, do not weaken the gate.
 
-#### Why the gate fails
+**Find the real error.** Scroll up in **Trivy scan all images** for the CVE table (Package, CVE, Installed, **Fixed Version**). Or download **Artifacts → image-scan-results → trivy-auth-results.json**.
 
-The pipeline runs Trivy with:
-
-```text
---severity CRITICAL,HIGH --ignore-unfixed --exit-code 1
-```
-
-- **`--ignore-unfixed`** — every CVE Trivy reports has a fix available (a "Fixed Version" column).
-- **`--exit-code 1`** — any fixable HIGH or CRITICAL fails the job.
-
-#### The version-notice trap
-
-Near the bottom of a failed **Scan images** log you may see:
+**Ignore this red herring** at the bottom of the log:
 
 ```text
-📣 Notices:
-  - Version 0.71.2 of Trivy is now available, current version is 0.70.0
-
-To suppress version checks, run Trivy scans with the --skip-version-check flag
-
+Version 0.71.2 of Trivy is now available
 Error: Process completed with exit code 1.
 ```
 
-**That notice is informational. It does not cause the failure.** Trivy does not exit 1 because a newer scanner exists. The real failure is a CVE found under `--exit-code 1`. Do **not** add `--skip-version-check` thinking it fixes the gate — it only hides the notice; the CVE still fails the scan.
+The version notice does not fail the job. A fixable HIGH/CRITICAL CVE does. Do not add `--skip-version-check` to “fix” it.
 
-Scroll **up** in the log, or download the artifact (below).
+**Fix it:**
 
-#### How to read the real finding
+- **pip package** — bump to the Fixed Version in `requirements.txt` (example: `python-multipart==0.0.30` for CVE-2026-53539). Apply the same bump to sibling services if they share that pin.
+- **OS package** — newer base image or a targeted `apt`/`apk` upgrade in the Dockerfile.
+- **No stable fix yet** — documented exception only: add the CVE to `.trivyignore` and `.grype.yaml` with a comment (see `CVE-2026-7210`).
 
-The CVE table sits **above** the `Error: Process completed with exit code 1` line in the **Trivy scan all images** step. Columns to read:
-
-| Column | Meaning |
-|---|---|
-| Package | Affected library (pip or OS) |
-| CVE | Identifier |
-| Severity | HIGH or CRITICAL |
-| Installed | Version in your image |
-| Fixed Version | What you need to reach |
-
-**Artifact shortcut:** on the failed run → **Artifacts** → `image-scan-results` → `trivy-auth-results.json` (auth-service). Parse the `Vulnerabilities` array for `Severity` HIGH/CRITICAL and `FixedVersion`.
-
-#### How to fix (by layer)
-
-**pip package (Python)** — pin the Fixed Version in the service's `requirements.txt`:
-
-```diff
-# app/auth-service/requirements.txt — real example (CVE-2026-53539)
-- python-multipart==0.0.27
-+ python-multipart==0.0.30
-```
-
-Rebuild, re-scan locally if you want confidence, commit, push:
-
-```bash
-docker build -t clearledger-auth-service:test ./app/auth-service
-trivy image --exit-code 1 --severity CRITICAL,HIGH --ignore-unfixed clearledger-auth-service:test
-```
-
-**OS package (Debian / Alpine)** — refresh the base image to a current digest (`python:3.13-slim`, `nginx:1.27-alpine`) or add a targeted upgrade in the Dockerfile (`apt-get upgrade -y <pkg>` or `apk upgrade --no-cache <pkg>`).
-
-Check sibling services: if ledger and notification share the same base and requirements pattern, apply the same bump in one commit so the next image does not fail on the identical CVE.
-
-#### Documented exception (rare)
-
-Use only when **no acceptable fixed version exists** — fix is beta/prerelease only, or a confirmed false positive. Add the CVE to `.trivyignore` and `.grype.yaml` **with a comment** (reason + review date). See how `CVE-2026-7210` is handled: Python 3.15.0b2 is the only fix; beta CPython is not acceptable in production. **This is the exception, not the default.**
-
-#### What never to do
-
-Do not remove `--exit-code 1`, drop HIGH from `--severity`, or add `--skip-*` flags that disable scanning. Those defeat Stage 3/4's purpose — you would ship vulnerable images while the pipeline looks green.
-
-More detail: [troubleshooting.md — Trivy blocks Python service images](troubleshooting.md#trivy-blocks-python-service-images).
+Do not remove `--exit-code 1`, drop HIGH from `--severity`, or disable scanning. More help: [troubleshooting.md — Trivy](troubleshooting.md#trivy-blocks-python-service-images).
 
 ---
 
-#### Summary — what “gate broken” looks like in GitHub Actions
+### Finish Stage 3
 
-| Gate | Failed job | What to look for |
-|---|---|---|
-| Gitleaks | `Secrets Scan (Gitleaks)` | `leaks found: 1` |
-| Semgrep | `SAST (Semgrep)` | `subprocess-shell-true` |
-| Checkov | `IaC Scan (Checkov)` | `CKV_DOCKER_1` (use `EXPOSE 22` inject) |
-| Trivy | `Scan images` | CVE table, exit code 1 |
+**Gate cheat sheet** (for §3.4 screenshots): Gitleaks → `Secrets Scan`; Semgrep → `SAST`; Trivy → `Scan images` (CVE table). Checkov → read `CKV_*` in the log (job may stay green).
 
-After each test: **revert, push, confirm all jobs green.**
+After each §3.4 test: revert, push, confirm the workflow is green again. One red-job screenshot is enough for a portfolio.
 
-**Take a screenshot of at least one red job** — portfolio evidence that you triggered and understood a security gate.
+**Done when:**
 
 ```bash
-make check-3
+make check-3   # must end: All checks passed. Ready for the next stage.
 ```
 
-### What you should see — terminal vs GitHub Actions
+You also triggered at least one gate in §3.4 (Gitleaks locally counts). Optional: `ENABLE_DAST=true` if you want ZAP later — not required to leave Stage 3.
 
-Stage 3 uses **two places** to catch problems. Know which to look at:
+**Not required yet:** Kubernetes Checkov blocking CI, Cosign blocking deploys — those tighten in **Stage 4** (Kyverno).
 
-| Where | When | What runs |
-|---|---|---|
-| **Your terminal** (pre-commit) | Every `git commit` on your laptop | Gitleaks, Ruff, Hadolint, etc. |
-| **GitHub Actions** (CI) | Every push to `main` | Full pipeline: Gitleaks, Semgrep, Checkov, Trivy, Grype, Cosign |
-
-**Local secrets test — success looks like this in the terminal:**
-
-```text
-🔑 Secrets scan (Gitleaks)...............................................Failed
-- hook id: gitleaks
-- exit code: 1
-
-Finding:     AWS_SECRET = "REDACTED"
-RuleID:      aws-access-token
-File:        app/auth-service/main.py
-Line:        316
-```
-
-What that means:
-
-- **`Failed`** on the Gitleaks hook — the gate worked
-- **`exit code: 1`** — commit was **not** created (no new commit hash)
-- **`RuleID: aws-access-token`** — which rule caught it
-- Other hooks may show `Passed` or `Skipped` — that is fine
-
-After you revert the test line, confirm clean:
+**Next:** Stage 4 stops bad pods at the cluster door even if someone uses `kubectl` and skips CI.
 
 ```bash
-pre-commit run --all-files
-# Gitleaks ................................ Passed
+make snapshot STAGE=3 && make snapshots
 ```
-
-**CI gate failures — look on GitHub, not only the terminal:**
-
-Push a deliberate bad change (§3.4), then open `github.com/YOUR_USERNAME/clearledger/actions`. Each gate fails in its own job:
-
-| Gate | Failed job name (approx.) | What to read in the log |
-|---|---|---|
-| Gitleaks | Secrets Scan | `leaks found`, file + line |
-| Semgrep | SAST | rule id, vulnerable code path |
-| Checkov | IaC Scan | policy id, Dockerfile or manifest path |
-| Trivy / Grype | Build + Scan * | CVE list, severity HIGH/CRITICAL |
-
-Revert the bad change, push again, watch the workflow go **green**.
-
-### Stage 3 complete — done checklist (move to Stage 4)
-
-You are **done with Stage 3** when all of these are true:
-
-| # | Check | How to verify |
-|---|---|---|
-| 1 | Pre-commit installed | `pre-commit install` ran; hooks run on commit |
-| 2 | Local secrets gate works | Fake AWS key **blocks** commit in terminal (see above) |
-| 3 | Cosign ready | `infra/cosign.pub` exists; GitHub secrets `COSIGN_*` set (Stage 1 is fine) |
-| 4 | Pipeline has all gates | `make check-3` lists gitleaks, semgrep, checkov, trivy, cosign |
-| 5 | Health check green | `make check-3` ends with **`All checks passed. Ready for the next stage.`** |
-
-**Recommended for portfolio (optional, not required to proceed):**
-
-- Screenshot of **one** blocked gate — terminal Gitleaks output **or** a red GitHub Actions job
-- Break at least one other gate in CI (Trivy, Semgrep, or Checkov) using §3.4, then revert
-
-**What Stage 3 does *not* require yet:**
-
-- Kubernetes Checkov findings blocking the pipeline (evidence only until **Stage 4**)
-- Cosign **blocking** deploys (non-blocking until **Stage 4** Kyverno)
-- DAST / ZAP — enable with `ENABLE_DAST=true` in §3 above when ready (optional)
-
-**What “move to Stage 4” means:** CI scans code and images before they reach GitOps. Stage 4 adds **admission control** — Kyverno rejects bad pods and unsigned images **inside the cluster**, even if someone bypasses CI with `kubectl`. Run `make check-4` after Stage 4.
-
-### What you learned in Stage 3
-
-- The difference between SAST, SCA, IaC scanning, image scanning, and secrets detection
-- Why no single tool catches everything — each gate targets a different layer
-- What pre-commit hooks are and why running checks locally + in CI is defense in depth
-- What image signing proves and why it matters for supply chain security
-- **The pattern:** deliberately break → read the error → understand it → fix it. This is how you build operational instinct.
-
-**What you can now put on your CV / say in an interview:**
-
-> Added a CI security gate — secret scanning, SAST, dependency and IaC scanning, and Cosign image signing — and can show each gate blocking a real issue on purpose.
-
-### DevSecOps lesson — Stage 3 in one paragraph
-
-**Security is not a final review before release — it is a pipeline.** In Stage 2, any commit could reach the cluster through GitOps. Stage 3 adds automated gates that **fail fast**: secrets never enter git, vulnerable code and images never get tagged for deploy, and every artifact is signed so you can prove where it came from. No single scanner sees everything — Gitleaks, Semgrep, Checkov, and Trivy each guard a different layer — so **defense in depth** means stacking tools, not picking one. Pre-commit on your laptop plus CI on push is the same idea twice: catch problems **before** they become incidents. Stage 3 secures the **path into production**; Stage 4 secures the **cluster door** for anything that tries to bypass that path.
-
-**Save your VM before Stage 4.** After `make check-3` passes:
-
-```bash
-make snapshot STAGE=3
-make snapshots    # must show clearledger.stage3 — do not skip
-```
-
-If the VM corrupts later: `make snapshots` → `make restore STAGE=3`. See [Saving your progress](#saving-your-progress).
 
 ---
 
 ## Stage 4 — Admission Control (Kyverno)
 
-> Even if CI passes, the cluster can still refuse.
+CI scans code before it ships. Stage 4 adds a **cluster bouncer**: bad pods get rejected even if someone uses `kubectl` and skips the pipeline.
 
-**Goal:** Kyverno intercepts every pod creation and rejects any that violate policy — before the container runtime ever sees them.
+**Goal:** install Kyverno, apply policies from `infra/policies/`, prove bad pods are denied (§4.4).
 
-> **Am I ready for Stage 4?**
->
-> - [ ] `make check-3` passes — pre-commit hooks and CI security gates active
-> - [ ] `infra/cosign.pub` exists (from Stage 3)
-> - [ ] ArgoCD still syncing — app reachable at `http://clearledger.local`
->
-> **Done when:** `make check-4` passes and all three break-it scenarios in §4.4 deny bad pods.
-> **Then save:** `make snapshot STAGE=4` → `make snapshots` (confirm `clearledger.stage4`).
+**Ready?** `make check-3` passes · `infra/cosign.pub` exists · app still works at `http://clearledger.local`
 
-> **This is where Stage 1 evidence becomes enforcement.** Kubernetes Checkov findings that did not block CI in Stage 1 now stop bad pods at the cluster gate. Cosign signing that was non-blocking in Stage 1 is now required for deployment. See [Stage 1 security posture — what blocks vs what waits](#stage-1-security-posture--what-blocks-vs-what-waits).
+**Done when:** §4.4 break-it tests are denied · `make check-4` passes · `make snapshot STAGE=4 && make snapshots`
 
-### Platform stability — from Stage 4 onward
+**What changes from Stage 3:** Checkov *warned* in CI — Kyverno now *blocks*. Cosign *signed* images — Kyverno now *requires* a signature to deploy.
 
-A pod can show `Running` while crash-looping. High `RESTARTS` on **platform** pods (Kyverno, `hostpath-provisioner`, Prometheus operator) leads to API timeouts and wasted days debugging the wrong component.
+**Start at §4.1** (install Kyverno). Stuck? [troubleshooting.md — Stage 4](troubleshooting.md#stage-4-admission-control-troubleshooting) before editing policy YAML.
 
-**After every stage from here on:**
+### What Kyverno enforces (reference)
 
-```bash
-bash scripts/health-check.sh <stage>    # e.g. 4, 7, 7.5
-```
+Policies live in `infra/policies/`. In plain terms they require: non-root containers, CPU/memory limits, no privilege escalation, dropped capabilities, and Cosign-signed ClearLedger images. Kyverno installs from `stages/stage-4-admission-control/infra/kyverno/values.yaml`.
 
-The script ends with a **Platform stability** section. Also scan the highest restart counts:
+### After each stage (4 onward)
+
+When a stage settles (~10 minutes), run `make check-N` (same as `health-check.sh N`). If restart counts look high, run:
 
 ```bash
 kubectl get pods -A --sort-by='.status.containerStatuses[0].restartCount' \
@@ -3189,29 +3038,7 @@ kubectl get pods -A --sort-by='.status.containerStatuses[0].restartCount' \
   | tail -15
 ```
 
-**Gate:** Kyverno controllers and other platform pods should show **RESTARTS under 5** after the stage settles (~10 minutes). If any platform pod is climbing past 10, stop and fix with the documented Helm values or [troubleshooting.md](troubleshooting.md) — do not `kubectl patch` around it.
-
-### What you need to know first
-
-CI scanning catches problems before code is merged. But what if someone applies a manifest directly with `kubectl`? What if a Helm chart you installed creates pods that violate your security standards? CI never sees those.
-
-**Admission control** is a checkpoint built into Kubernetes itself. Every time something tries to create or update a resource in the cluster, the request passes through admission webhooks before it takes effect. If a webhook rejects the request, the resource is never created.
-
-**Kyverno** is a Kubernetes-native policy engine that uses those webhooks. You write policies as YAML files (not code), and Kyverno enforces them on every resource in the cluster. For example: "reject any pod that runs as root" or "require resource limits on every container."
-
-The difference from CI: CI scans your code *before* it reaches the cluster. Kyverno enforces policy *at the cluster gate itself*. Together they create two layers of defense.
-
-| Policy | What it enforces | Framework |
-|---|---|---|
-| `disallow-root-containers` | `runAsNonRoot: true` | CIS K8s 5.2.6 |
-| `require-resource-limits` | CPU/memory requests and limits | CIS K8s 5.2.4 |
-| `disallow-privilege-escalation` | `allowPrivilegeEscalation: false` | CIS K8s 5.2.5 |
-| `drop-all-capabilities` | `capabilities.drop: [ALL]` | CIS K8s 5.2.7 |
-| `require-signed-images` | Cosign signature on ClearLedger images | SLSA Level 2 |
-
-All policy files live in `infra/policies/`. Kyverno itself is installed via Helm using `stages/stage-4-admission-control/infra/kyverno/values.yaml`.
-
-If install, policies, break-it scenarios, or `make check-4` fail, use [troubleshooting.md — Stage 4](troubleshooting.md#stage-4-admission-control-troubleshooting) before changing Helm charts or policy YAML.
+Platform pods (Kyverno, storage, monitoring) should stay under ~5 restarts. If something is past 10 and climbing, fix the platform before moving on — see troubleshooting, not random `kubectl patch`.
 
 ---
 

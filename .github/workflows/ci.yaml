@@ -375,13 +375,30 @@ jobs:
 
       # Stage 2+ only — off by default so Stage 1 learners see the deployment gap
       # (infra repo updates; cluster unchanged). Enable: repo variable ENABLE_ARGOCD_SYNC=true
+      # Nudge only: manifest push above already succeeded; ArgoCD polls clearledger-infra anyway.
       - name: Trigger ArgoCD refresh (Stage 2+ — requires ENABLE_ARGOCD_SYNC)
         if: vars.ENABLE_ARGOCD_SYNC == 'true'
+        continue-on-error: true
         run: |
-          kubectl apply -f app/infra/argocd/clearledger-app.yaml
-          kubectl annotate application clearledger -n argocd \
-            argocd.argoproj.io/refresh=hard --overwrite
-          echo "✓ ArgoCD will auto-sync clearledger-infra"
+          warn() {
+            echo "⚠ ArgoCD nudge skipped ($1). Manifests are already pushed to clearledger-infra — ArgoCD will sync on its next poll (~3 min). This is not a failure."
+          }
+          if ! command -v microk8s &>/dev/null; then
+            warn "microk8s not found"
+            exit 0
+          fi
+          if ! microk8s kubectl cluster-info &>/dev/null; then
+            warn "cluster unreachable"
+            exit 0
+          fi
+          if microk8s kubectl apply -f app/infra/argocd/clearledger-app.yaml && \
+             microk8s kubectl annotate application clearledger -n argocd \
+               argocd.argoproj.io/refresh=hard --overwrite; then
+            echo "✓ ArgoCD nudge sent — sync should start immediately"
+          else
+            warn "kubectl apply/annotate failed"
+          fi
+          exit 0
 
   # ───────────────────────────────────────────────────────────────────────────
   # GATE 6: DAST (post-deploy)
