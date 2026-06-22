@@ -1,10 +1,12 @@
 # INTRODUCED: Stage 0 — Raw Kubernetes
-# UPDATED:    Stage 5 — copy stages/stage-5-secrets-management/infra/manifests/auth-service/deployment.yaml
-#             over this file to add Vault agent injection and remove secretKeyRef
-# PURPOSE: Auth service deployment with security context hardening
-#
-# STAGES 2–4 (GitOps): ArgoCD applies this file via clearledger-infra + kustomization.yaml
-# STAGE 0 manual deploy: use stages/stage-0-raw-kubernetes/infra/manifests/auth-service/deployment.yaml
+# UPDATED:    Stage 5 — Vault agent sidecar injection
+#             readOnlyRootFilesystem is retained.
+#             Two emptyDir volumes are added:
+#               /vault/secrets  — Vault agent writes secrets here
+#               /tmp            — uvicorn needs a writable /tmp
+# PURPOSE: Auth service deployment with Vault secret injection and full security hardening
+# FRAMEWORK: PCI-DSS 3.5, CIS K8s 5.2.6
+
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -15,7 +17,6 @@ metadata:
     version: v0.1.0
 spec:
   replicas: 2
-  revisionHistoryLimit: 3
   selector:
     matchLabels:
       app: auth-service
@@ -23,45 +24,76 @@ spec:
     metadata:
       labels:
         app: auth-service
-        version: v0.1.0
+      annotations:
+        # ── Vault agent injection ─────────────────────────────────────────────
+        # The Vault injector webhook reads these annotations and injects a
+        # vault-agent-init container (runs once to fetch secrets) and a
+        # vault-agent sidecar (renews the Vault token continuously).
+        vault.hashicorp.com/agent-inject: "true"
+        vault.hashicorp.com/role: "auth-service"
+
+        vault.hashicorp.com/agent-inject-secret-database_url: "clearledger/data/auth-service"
+        vault.hashicorp.com/agent-inject-template-database_url: |
+          {{- with secret "clearledger/data/auth-service" -}}
+          {{ .Data.data.database_url }}
+          {{- end }}
+
+        vault.hashicorp.com/agent-inject-secret-jwt_secret: "clearledger/data/auth-service"
+        vault.hashicorp.com/agent-inject-template-jwt_secret: |
+          {{- with secret "clearledger/data/auth-service" -}}
+          {{ .Data.data.jwt_secret }}
+          {{- end }}
+
+        # Why agent-pre-populate-only: false (default)
+        # The sidecar stays running to renew the Vault token before TTL expiry.
+        # Secrets are refreshed on renewal — enables zero-downtime rotation.
+        vault.hashicorp.com/agent-pre-populate-only: "false"
+        vault.hashicorp.com/agent-set-security-context: "true"
+        vault.hashicorp.com/agent-run-as-user: "1000"
+        vault.hashicorp.com/agent-run-as-group: "1000"
+        vault.hashicorp.com/agent-requests-cpu: "50m"
+        vault.hashicorp.com/agent-requests-mem: "64Mi"
+        vault.hashicorp.com/agent-limits-cpu: "200m"
+        vault.hashicorp.com/agent-limits-mem: "128Mi"
     spec:
       serviceAccountName: auth-service
-      automountServiceAccountToken: false
+      # Vault Kubernetes auth requires the projected service account token (CIS 5.1.6 trade-off).
+      automountServiceAccountToken: true
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
         runAsGroup: 1000
+        fsGroup: 1000
+
+      # /vault/secrets volume + mount are created by the Vault agent injector webhook.
+      # uvicorn needs a writable /tmp when readOnlyRootFilesystem is true.
       volumes:
         - name: tmp
           emptyDir: {}
+
       containers:
         - name: auth-service
+          # Kustomize placeholder — CI updates tags in kustomization.yaml
           image: clearledger/auth-service:gitops
           ports:
-            - name: http
-              containerPort: 8000
+            - containerPort: 8000
+
+          # ── Environment: reads from Vault-injected files ─────────────────
+          # The Settings class in main.py checks for /vault/secrets/database_url
+          # before falling back to the DATABASE_URL env var.
+          # These env vars are path hints, not credentials.
           env:
-            - name: DATABASE_URL
-              valueFrom:
-                secretKeyRef:
-                  name: auth-service-secret
-                  key: database_url
-            - name: JWT_SECRET
-              valueFrom:
-                secretKeyRef:
-                  name: auth-service-secret
-                  key: jwt_secret
-            - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: "http://otel-collector.monitoring.svc.cluster.local:4317"
-            - name: OTEL_SERVICE_NAME
+            - name: DATABASE_URL_FILE
+              value: "/vault/secrets/database_url"
+            - name: JWT_SECRET_FILE
+              value: "/vault/secrets/jwt_secret"
+            - name: SERVICE_NAME
               value: "auth-service"
-            - name: OTEL_RESOURCE_ATTRIBUTES
-              value: "k8s.namespace=clearledger,k8s.deployment.name=auth-service"
-            - name: ENV
-              value: "production"
+
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+
           resources:
             requests:
               memory: "128Mi"
@@ -69,6 +101,7 @@ spec:
             limits:
               memory: "384Mi"
               cpu: "500m"
+
           startupProbe:
             httpGet:
               path: /health
@@ -79,17 +112,15 @@ spec:
             httpGet:
               path: /health
               port: 8000
-            periodSeconds: 15
-            timeoutSeconds: 5
-            failureThreshold: 5
+            periodSeconds: 10
+            failureThreshold: 3
           readinessProbe:
             httpGet:
               path: /health
               port: 8000
-            initialDelaySeconds: 15
-            periodSeconds: 10
-            timeoutSeconds: 5
-            failureThreshold: 3
+            periodSeconds: 5
+            failureThreshold: 6
+
           securityContext:
             runAsNonRoot: true
             allowPrivilegeEscalation: false

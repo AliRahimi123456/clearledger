@@ -1,10 +1,8 @@
-# INTRODUCED: Stage 0 — Raw Kubernetes
-# UPDATED:    Stage 5 — copy stages/stage-5-secrets-management/infra/manifests/ledger-service/deployment.yaml
-#             over this file to add Vault agent injection and remove secretKeyRef
-# PURPOSE: Ledger service deployment with security context hardening
-#
-# STAGES 2–4 (GitOps): ArgoCD applies this file via clearledger-infra + kustomization.yaml
-# STAGE 0 manual deploy: use stages/stage-0-raw-kubernetes/infra/manifests/ledger-service/deployment.yaml
+# Stage 5 version of ledger-service deployment
+# Changes from Stage 0:
+#   - Vault agent annotations added
+#   - DATABASE_URL secretKeyRef removed
+#   - serviceAccountName set
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -12,10 +10,8 @@ metadata:
   namespace: clearledger
   labels:
     app: ledger-service
-    version: v0.1.0
 spec:
   replicas: 2
-  revisionHistoryLimit: 3
   selector:
     matchLabels:
       app: ledger-service
@@ -23,41 +19,44 @@ spec:
     metadata:
       labels:
         app: ledger-service
-        version: v0.1.0
+      annotations:
+        vault.hashicorp.com/agent-inject: "true"
+        vault.hashicorp.com/role: "ledger-service"
+        vault.hashicorp.com/agent-inject-secret-database_url: "clearledger/data/ledger-service"
+        vault.hashicorp.com/agent-inject-template-database_url: |
+          {{- with secret "clearledger/data/ledger-service" -}}
+          {{ .Data.data.database_url }}
+          {{- end }}
+        vault.hashicorp.com/agent-pre-populate-only: "false"
+        vault.hashicorp.com/agent-set-security-context: "true"
+        vault.hashicorp.com/agent-run-as-user: "1000"
+        vault.hashicorp.com/agent-run-as-group: "1000"
+        vault.hashicorp.com/agent-requests-cpu: "50m"
+        vault.hashicorp.com/agent-requests-mem: "64Mi"
+        vault.hashicorp.com/agent-limits-cpu: "200m"
+        vault.hashicorp.com/agent-limits-mem: "128Mi"
     spec:
       serviceAccountName: ledger-service
-      automountServiceAccountToken: false
+      automountServiceAccountToken: true
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
         runAsGroup: 1000
+        fsGroup: 1000
       volumes:
         - name: tmp
           emptyDir: {}
       containers:
         - name: ledger-service
+          # Kustomize placeholder — CI updates tags in kustomization.yaml
           image: clearledger/ledger-service:gitops
           ports:
-            - name: http
-              containerPort: 8000
+            - containerPort: 8000
           env:
-            - name: DATABASE_URL
-              valueFrom:
-                secretKeyRef:
-                  name: ledger-service-secret
-                  key: database_url
             - name: AUTH_SERVICE_URL
               value: "http://auth-service.clearledger.svc.cluster.local"
             - name: REDIS_URL
               value: "redis://redis.clearledger.svc.cluster.local:6379"
-            - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: "http://otel-collector.monitoring.svc.cluster.local:4317"
-            - name: OTEL_SERVICE_NAME
-              value: "ledger-service"
-            - name: OTEL_RESOURCE_ATTRIBUTES
-              value: "k8s.namespace=clearledger,k8s.deployment.name=ledger-service"
-            - name: ENV
-              value: "production"
           volumeMounts:
             - name: tmp
               mountPath: /tmp
@@ -66,29 +65,20 @@ spec:
               memory: "128Mi"
               cpu: "100m"
             limits:
-              memory: "384Mi"
+              memory: "256Mi"
               cpu: "500m"
-          startupProbe:
-            httpGet:
-              path: /health
-              port: 8000
-            periodSeconds: 5
-            failureThreshold: 24
           livenessProbe:
-            httpGet:
-              path: /health
-              port: 8000
-            periodSeconds: 15
-            timeoutSeconds: 5
-            failureThreshold: 5
-          readinessProbe:
             httpGet:
               path: /health
               port: 8000
             initialDelaySeconds: 15
             periodSeconds: 10
-            timeoutSeconds: 5
-            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
           securityContext:
             runAsNonRoot: true
             allowPrivilegeEscalation: false

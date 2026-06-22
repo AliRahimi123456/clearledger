@@ -12,10 +12,10 @@ resources:
   - ingress.yaml
   - auth-service/deployment.yaml
   - auth-service/service.yaml
-  - auth-service/secret.yaml
+#  - auth-service/secret.yaml
   - ledger-service/deployment.yaml
   - ledger-service/service.yaml
-  - ledger-service/secret.yaml
+#  - ledger-service/secret.yaml
   - notification-service/deployment.yaml
   - notification-service/service.yaml
   - frontend/deployment.yaml
@@ -23,6 +23,7 @@ resources:
   - postgres/postgres-secret.yaml
   - redis/redis.yaml
   - rbac/rbac.yaml
+  - vault/rotation-cronjob.yaml
 
 images:
   - name: clearledger/auth-service
