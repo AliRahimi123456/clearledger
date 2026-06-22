@@ -2096,14 +2096,9 @@ If the VM corrupts later: `make snapshots` → `make restore STAGE=1`. See [Savi
 push code → CI updates clearledger-infra → ArgoCD syncs cluster
 ```
 
-**GitOps** means the infra repo is the official record of what should run, not “whatever the cluster happens to have.” **ArgoCD** is the controller inside Kubernetes that enforces that: new commit in Git → deploy; manual `kubectl` change → reverted back to Git.
+**GitOps** means the infra repo is the official record of what should run — not whatever the cluster happens to have right now. **ArgoCD** is the controller that enforces that inside Kubernetes. Push a new commit to Git and ArgoCD deploys it. Change something by hand with `kubectl` and ArgoCD puts it back to match Git.
 
-| Question | Answer |
-|---|---|
-| Who deployed what? | Git history in `clearledger-infra` |
-| What should be running? | Whatever the manifests in Git say |
-| Roll back? | Revert the commit in the infra repo |
-| Someone changed the cluster by hand? | ArgoCD undoes it (you will prove this below) |
+In practice: who deployed what lives in Git history in `clearledger-infra`. What should be running is whatever those manifests say. To roll back, revert a commit in the infra repo. If someone edits the cluster by hand, ArgoCD undoes it — you will prove that below.
 
 ### Pre-sync checklist — run before `argocd app sync`
 
@@ -2139,12 +2134,14 @@ Only when every row passes → install ArgoCD and sync below.
 ---
 
 ```bash
-kubectl create namespace argocd
-kubectl apply -n argocd -f \
+kubectl create namespace argocd 2>/dev/null || true
+kubectl apply -n argocd --server-side --force-conflicts -f \
   https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
 kubectl wait --for=condition=ready pod \
   -l app.kubernetes.io/name=argocd-server -n argocd --timeout=180s
 ```
+
+**Why `--server-side --force-conflicts`?** Argo CD ships a very large `applicationsets.argoproj.io` CRD. A normal `kubectl apply` tries to stash the whole thing in an annotation, hits a 256 KiB limit, and errors with `metadata.annotations: Too long`. Server-side apply avoids that. It is [how Argo CD expects you to install](https://argo-cd.readthedocs.io/en/stable/operator-manual/installation/) — not a lab workaround.
 
 Get the admin password:
 
@@ -2153,7 +2150,7 @@ kubectl -n argocd get secret argocd-initial-admin-secret \
   -o jsonpath="{.data.password}" | base64 -d && echo
 ```
 
-Configure Argo CD for NGINX ingress (TLS at ingress, HTTP to the server — fixes `503` / `ERR_TOO_MANY_REDIRECTS` on `/api/v1/stream/*`):
+**Configure Argo CD for your NGINX ingress.** The browser talks HTTPS to ingress; ingress talks plain HTTP to the Argo CD server. Without this, the UI often breaks with `503` or `ERR_TOO_MANY_REDIRECTS` on live-update URLs (`/api/v1/stream/*`).
 
 ```bash
 kubectl apply -f stages/stage-2-gitops/infra/argocd-cmd-params.yaml
@@ -2164,60 +2161,101 @@ kubectl rollout status deployment/argocd-server -n argocd --timeout=180s
 
 **Expected in `argocd-cmd-params-cm`:** `server.insecure: "true"`, `server.grpc.web: "true"`, `server.url: https://argocd.local`
 
-Apply the ArgoCD Ingress (HTTP backend on port 80 — do **not** use `ssl-passthrough`):
+Open **`https://argocd.local`**. Login: `admin` and the password from above. Accept the self-signed certificate warning if the browser shows one.
 
-```bash
-kubectl apply -f stages/stage-2-gitops/infra/argocd-ingress.yaml
-```
+**Expected:** The Applications page loads. In the browser console (F12 → Console), you should not see `401` or `ERR_HTTP2_PROTOCOL_ERROR`. If the UI looks fine in a normal window, you are done — incognito is not required.
 
-Open **`https://argocd.local`** in a **private/incognito** window (clears stale tokens that cause `401 Unauthorized`). Login: `admin` / the password from the command above. Accept the browser certificate warning (self-signed).
-
-**Expected:** After login, the Applications page loads with **no** red `401` or `ERR_HTTP2_PROTOCOL_ERROR` lines in the browser console (F12 → Console). If you still see them, see [troubleshooting.md — ArgoCD](troubleshooting.md#argocd-ui-401-or-err_http2_protocol_error).
+**If login fails with `401 Unauthorized`** (often after a config change or a bad earlier login), try a private/incognito window or clear site data for `argocd.local`, then log in again. Still stuck? See [troubleshooting.md — ArgoCD](troubleshooting.md#argocd-ui-401-or-err_http2_protocol_error).
 
 Connect ArgoCD to the infra repo and apply the Application manifest:
 
-```bash
-# Install the ArgoCD CLI first
-# macOS: brew install argocd
-# Linux: curl -sSL -o argocd https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64 && chmod +x argocd && sudo mv argocd /usr/local/bin/
+**1. Edit `stages/stage-2-gitops/argocd/clearledger-app.yaml`** — set `spec.source.repoURL` to your infra repo (your GitHub username, not `git config user.name`).
 
+**2. Register the repo with Argo CD:**
+
+```bash
+# macOS: brew install argocd
 argocd login argocd.local --username admin --password YOUR_PASSWORD --insecure --grpc-web
 
-# Connect ArgoCD to the infra repo on GitHub
-# Public repo: no credentials needed
-# Private repo: use your INFRA_REPO_TOKEN PAT
-argocd repo add https://github.com/YOUR_USERNAME/clearledger-infra.git
+# Public repo
+argocd repo add https://github.com/YOUR_USERNAME/clearledger-infra.git --grpc-web
 
-# Update the repo URL in the Application manifest before applying
-# Use your GitHub username (not git config user.name — that is often your full name)
-sed -i.bak "s|YOUR_GITHUB_USERNAME|your-github-username|g" \
-  stages/stage-2-gitops/argocd/clearledger-app.yaml
-rm -f stages/stage-2-gitops/argocd/clearledger-app.yaml.bak
-# Or: set GITHUB_OWNER in scripts/lab.local.env and source scripts/lab-env.sh + lab_patch_argocd_apps
+# Private repo — PAT from Stage 1 §1.4 (you saved it as GitHub secret INFRA_REPO_TOKEN)
+export INFRA_REPO_TOKEN='ghp_...'   # paste here; GitHub only shows it once at creation
+argocd repo add https://github.com/YOUR_USERNAME/clearledger-infra.git \
+  --username git --password "$INFRA_REPO_TOKEN" --grpc-web
+```
 
+**3. Apply and sync:**
+
+```bash
 kubectl apply -f stages/stage-2-gitops/argocd/clearledger-app.yaml
 argocd app sync clearledger --grpc-web
 ```
 
-Confirm ArgoCD is watching **all** manifest folders (not only ingress):
+### How to read the Argo CD UI (you are not just "looking at a UI")
+
+After sync, open the **clearledger** application in the tree view. Three badges at the top tell you almost everything:
+
+**APP HEALTH: Healthy** — Kubernetes thinks the workloads are running. Pods are up (or still starting if it says Progressing).
+
+**SYNC STATUS: Synced** — The cluster matches `clearledger-infra` on GitHub at the commit shown (e.g. `main (2c88aa1)`). Git is the source of truth and Argo CD applied it.
+
+**LAST SYNC: Succeeded** — The most recent apply from Git worked. If this failed, click it for the error.
+
+The **resource tree** below is the same app broken into pieces: namespace, secrets, services, deployments, ingress, etc. Green checkmarks = applied from Git. Click any box (e.g. `deploy/auth-service`) → **Live Manifest** vs **Desired** to see what Argo CD thinks should run.
+
+**Quick "is the app actually working?" test** (outside Argo CD):
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" http://clearledger.local/auth/health
+```
+
+`200` = the app is reachable end-to-end, not only "green in Argo CD."
+
+**When something is wrong:** HEALTH goes **Degraded** or **Progressing** for a long time; SYNC goes **OutOfSync**; a resource in the tree turns **red**. Click that resource → **Events** or **Logs**. The kubectl checks below double-check the same thing from the terminal.
+
+Confirm ArgoCD is watching **all** workloads (not only ingress):
 
 ```bash
 argocd app resources clearledger --grpc-web | grep Deployment
 ```
 
-You should see `auth-service`, `ledger-service`, `frontend`, and the other app Deployments. ArgoCD renders `manifests/kustomization.yaml`, which lists every resource under `manifests/` — not just `ingress.yaml` at the top level.
+**Pass looks like your output:**
+
+```text
+apps    Deployment    clearledger    auth-service            No
+apps    Deployment    clearledger    frontend                No
+apps    Deployment    clearledger    ledger-service          No
+apps    Deployment    clearledger    notification-service  No
+apps    Deployment    clearledger    redis                   No
+```
+
+**How to read it:** each line is one Deployment Argo CD manages from `clearledger-infra/manifests/`. Seeing all five app deployments (plus `redis`) means it rendered the full `kustomization.yaml` — not just `ingress.yaml`.
+
+The last column is **ORPHANED**. **`No` is good** — the resource belongs to this app. You would only worry if deployments were **missing** from this list, or if the UI showed **OutOfSync** / red health.
 
 **✋ Hands-on checkpoint — first sync healthy**
 
+Run these four checks. **Pass looks like:**
+
 ```bash
 kubectl get pods -n clearledger
+# Every app pod 1/1 Running (postgres/redis may show older RESTARTS from VM reboots — OK)
+
 kubectl get application clearledger -n argocd \
   -o jsonpath='sync={.status.sync.status} health={.status.health.status}{"\n"}'
-curl -s -o /dev/null -w "%{http_code}" http://clearledger.local/auth/health
+# sync=Synced health=Healthy
+
+curl -s -o /dev/null -w "%{http_code}\n" http://clearledger.local/auth/health
+# 200
+
 kubectl logs -n clearledger deploy/auth-service --tail=5 2>/dev/null | head -3
+# Lines like: GET /health HTTP/1.1" 200 OK
+# Bad sign: DATABASE_URL is not set
 ```
 
-Expected: auth/ledger pods `1/1 Running` (Vault sidecars come in Stage 5); `sync=Synced health=Healthy`; curl `200`; logs show HTTP requests — not `DATABASE_URL is not set`.
+**If all four pass → Stage 2 first sync is done.** Continue to **Enable CI → ArgoCD handoff** below, then `make check-2` and `make snapshot STAGE=2`.
 
 ### Enable CI → ArgoCD handoff (close the Stage 1 deployment gap)
 
@@ -2366,7 +2404,15 @@ syncPolicy:
     selfHeal: true
 ```
 
-`selfHeal: true` means ArgoCD continuously compares the cluster to Git. If they differ, it re-syncs the cluster back to match Git automatically. If you click the rollback button without disabling auto-sync first, ArgoCD will detect that the cluster no longer matches `HEAD` and silently undo your rollback within 3 minutes. You will think you rolled back. You did not.
+**What `selfHeal: true` means in plain English**
+
+Git (`clearledger-infra`) is the boss. The cluster must match Git. If someone changes the cluster without changing Git — manual `kubectl`, or the Argo CD **Rollback** button — Argo CD notices the mismatch and **puts the cluster back to whatever Git says**, usually within a few minutes.
+
+So the UI rollback only changes the **cluster**. It does **not** change Git. With self-heal on, Argo CD sees “cluster ≠ Git” and re-applies Git — your rollback gets undone. You thought you rolled back; Git still says the bad version, so the bad version comes back.
+
+**The GitOps rollback:** change Git (`git revert` in `clearledger-infra`). Then self-heal helps you — cluster and Git both point at the good version.
+
+**Emergency UI rollback:** turn off auto-sync first, then rollback, then fix Git. Details below.
 
 There are two correct ways to roll back, and the right one depends on how much time you have.
 
@@ -2628,39 +2674,37 @@ If the VM corrupts later: `make snapshots` → `make restore STAGE=2`. See [Savi
 
 ## Stage 3 — Security Gates
 
-> Every commit passes through security checks. The gates that protect the build artifact stop the pipeline; Kubernetes hardening findings become enforcement later.
+Every push runs security checks. Some failures stop the pipeline right away. Others you learn from now and enforce in the cluster later (Stage 4).
 
-**Goal:** six security tools scan every commit. Each one catches a different category of vulnerability. Some findings block immediately, such as secrets, SAST, vulnerable images, and production Dockerfile issues. Kubernetes manifest findings are collected first, then become deployment enforcement in Stage 4 with Kyverno. You will deliberately trigger each category to see exactly what it catches and why it matters.
+**Goal:** understand six scanners — what each one looks at, what it catches, and how to read a failure. You will break each gate on purpose (§3.4) so a red CI job is not a surprise.
 
-> **Am I ready for Stage 3?**
->
-> - [ ] `make check-2` passes — ArgoCD deploys from `clearledger-infra`
-> - [ ] Repository variable `ENABLE_ARGOCD_SYNC` = `true` (set in Stage 2 after first healthy sync)
-> - [ ] Repository variable `ENABLE_DAST` is still **unset** — you enable it in §3 below
-> - [ ] You can log in to `http://argocd.local` and see apps **Synced**
-> - [ ] You understand what CI already scans (review [Stage 1 security posture](#stage-1-security-posture--what-blocks-vs-what-waits) if unsure)
->
-> **Done when:** `make check-3` passes and you have triggered each security gate at least once (§3.4).
-> **Then save:** `make snapshot STAGE=3` → `make snapshots` (confirm `clearledger.stage3`).
+**Ready for Stage 3?**
 
-> **Reminder:** Stage 1 already ran most of these tools — some in blocking mode, some as evidence only. See [Stage 1 security posture — what blocks vs what waits](#stage-1-security-posture--what-blocks-vs-what-waits) for the full map of what was relaxed in Stage 1 and which later stage tightens it.
+- `make check-2` passes
+- `ENABLE_ARGOCD_SYNC=true` on GitHub (you set this in Stage 2)
+- `ENABLE_DAST` still **unset** (turn on later in this stage if you want)
+- Argo CD at `http://argocd.local` shows **Synced**
+- Optional: skim [Stage 1 security posture](#stage-1-security-posture--what-blocks-vs-what-waits) — Stage 1 already ran many of these tools
+
+**Done when:** `make check-3` passes and you triggered each gate once (§3.4). Then `make snapshot STAGE=3` and `make snapshots`.
+
+---
 
 ### What you need to know first
 
-Security scanning has categories, each catching problems at a different layer:
+One tool is not enough. Each scanner guards a different layer:
 
-| Category | What it scans | What it catches | Tool in this lab |
-|---|---|---|---|
-| **Secrets detection** | Your code and Git history | Leaked API keys, passwords, tokens that should never be in source code | Gitleaks |
-| **SAST (Static Application Security Testing)** | Your application source code | Code-level vulnerabilities — SQL injection, command injection, insecure deserialization | Semgrep |
-| **SCA (Software Composition Analysis)** | Your dependencies (pip packages, npm modules) | Known CVEs in third-party libraries you depend on | Trivy |
-| **IaC scanning (Infrastructure as Code)** | Your Kubernetes manifests, Dockerfiles, Terraform files | Misconfigurations — containers running as root, missing resource limits, secrets in plaintext | Checkov |
-| **Image scanning** | Your built Docker images | OS-level vulnerabilities in the base image (e.g. outdated openssl) | Trivy |
-| **Image signing** | Your built Docker images | Proves an image was built by *your* pipeline, not tampered with after the fact | Cosign |
+- **Gitleaks** — secrets in code or Git history (API keys, tokens)
+- **Semgrep (SAST)** — bugs in your Python/JS source (injection, unsafe patterns)
+- **Trivy (SCA + images)** — known CVEs in pip/npm packages and in built Docker images
+- **Checkov (IaC)** — misconfigs in Dockerfiles and Kubernetes manifests
+- **Cosign** — proves images were built and signed by your pipeline
 
-No single tool covers everything. That is why you need all six. In Stage 1, Kubernetes Checkov runs as evidence so the first CI lesson stays focused on build-push-update. In Stage 3 and Stage 4, those findings become the security story: CI tells you what is wrong, and admission control prevents bad manifests from running.
+**What blocks CI today:** secrets, bad code (SAST), vulnerable images, Dockerfile issues on production images.
 
-**Pre-commit hooks** run these checks on your laptop *before* the commit even reaches Git. The CI pipeline runs them again on the server. This is defense in depth — two chances to catch a problem.
+**What waits for later:** some Kubernetes manifest findings are reported in Stage 1 as evidence; Stage 4 (Kyverno) turns the important ones into cluster enforcement.
+
+**Where checks run:** When you `git commit`, hooks on your laptop can scan first (pre-commit). When you `git push`, GitHub Actions scans again on the runner. Same idea twice — catch mistakes before they waste a 10-minute pipeline. Pre-commit is optional to install; CI always runs on push either way.
 
 ---
 
@@ -2772,22 +2816,14 @@ git add . && git commit -m "ci: full DevSecOps pipeline" && git push origin main
 
 ### 3.4 — Break each gate on purpose
 
-This is where the learning happens. For each gate: **inject the bad change → run or push → read the failure → revert → confirm green again.**
-
-Use **local dry-run** commands first (fast feedback). Then push to CI for portfolio screenshots at `github.com/YOUR_USERNAME/clearledger/actions`.
-
-**Pattern for every gate:**
+For each gate: break something on purpose, read how the tool reports it, revert, confirm green again. Try the local command first, then push once if you want a screenshot on GitHub Actions.
 
 ```bash
-# 1. Break it (edit file)
-# 2. Test locally OR push to main
-# 3. Read the failure (terminal or GitHub Actions log)
-# 4. Revert
-git checkout -- path/to/file
-# 5. Confirm clean
-pre-commit run --all-files   # local
-git push origin main           # CI green again
+# 1. Break it   2. Run locally or push   3. Read the failure
+# 4. git checkout -- path/to/file   5. pre-commit run --all-files (optional)   6. git push
 ```
+
+Start with **Gate 1** end-to-end before the others.
 
 ---
 
@@ -2827,14 +2863,7 @@ pre-commit run gitleaks --all-files   # → Passed
 
 #### Gate 2 — Semgrep (SAST)
 
-**Inject:** command injection via `shell=True` (remote code execution if deployed).
-
-```bash
-# Add inside any route in app/auth-service/main.py (temporary test):
-#   subprocess.run(request.query_params.get("cmd"), shell=True)
-```
-
-Or dry-run on a throwaway file:
+**Local dry-run** (no repo change):
 
 ```bash
 python3 -m venv /tmp/sec-gates-venv && /tmp/sec-gates-venv/bin/pip install semgrep
@@ -2849,26 +2878,34 @@ EOF
   /tmp/semgrep-bad.py
 ```
 
-**Done looks like (terminal or CI job `SAST (Semgrep)`):**
+**Break CI** — add a throwaway file Semgrep will scan, commit, push:
 
-```text
-❯❱ python.lang.security.audit.subprocess-shell-true.subprocess-shell-true
-          ❰❰ Blocking ❱❱
-          Found 'subprocess' function 'run' with 'shell=True'. ...
+```bash
+cat > app/auth-service/gate_test_semgrep.py << 'EOF'
+import subprocess
+from fastapi import Request
+def bad(request: Request):
+    subprocess.run(request.query_params.get("cmd"), shell=True)
+EOF
+git add app/auth-service/gate_test_semgrep.py && git commit -m "test: trigger semgrep" && git push
 ```
 
-Exit code **1**. CI: `SAST (Semgrep)` job red ✗; `Build + Scan` jobs **skipped** (they `need: sast`).
+**Pass:** `subprocess-shell-true` / `Blocking` in the log. CI job **`SAST (Semgrep)`** red ✗; **`Build images`** and below do not run.
 
-**Revert:** remove the injected lines; `git checkout app/auth-service/main.py`
+**Revert:**
+
+```bash
+git checkout app/auth-service/gate_test_semgrep.py 2>/dev/null; rm -f app/auth-service/gate_test_semgrep.py
+git commit -am "revert: semgrep gate test" && git push
+```
 
 ---
 
 #### Gate 3 — Checkov (IaC / Dockerfile)
 
-**Inject:** remove `HEALTHCHECK` from a production Dockerfile (two lines at the bottom of `app/auth-service/Dockerfile`).
+**Learn locally** — missing `HEALTHCHECK` shows up in Checkov output but may not fail CI (only HIGH/CRITICAL hard-fail):
 
 ```bash
-# Dry-run: copy Dockerfile without HEALTHCHECK, scan locally
 python3 -m venv /tmp/sec-gates-venv && /tmp/sec-gates-venv/bin/pip install checkov
 sed '/^HEALTHCHECK/,+1d' app/auth-service/Dockerfile > /tmp/Dockerfile-nohc
 mkdir -p /tmp/checkov-demo/app/auth-service
@@ -2876,58 +2913,46 @@ cp /tmp/Dockerfile-nohc /tmp/checkov-demo/app/auth-service/Dockerfile
 /tmp/sec-gates-venv/bin/checkov --directory /tmp/checkov-demo --framework dockerfile
 ```
 
-**Done looks like (terminal or CI job `IaC Scan (Checkov)` → Scan Dockerfiles step):**
+**Break CI** — add a line the pipeline treats as HIGH:
 
-```text
-Check: CKV_DOCKER_2: "Ensure that HEALTHCHECK instructions have been added to container images"
-	FAILED for resource: /app/auth-service/Dockerfile.
-...
-Passed checks: 42, Failed checks: 1, Skipped checks: 0
+```bash
+echo 'EXPOSE 22' >> app/auth-service/Dockerfile
+git add app/auth-service/Dockerfile && git commit -m "test: trigger checkov" && git push
 ```
 
-Download artifact **`checkov-results`** → `checkov-dockerfile-results.json` for the full report.
-
-> **Note:** CI uses `--hard-fail-on HIGH,CRITICAL`. Some Dockerfile checks (including missing HEALTHCHECK) may appear as **FAILED** in the log but rate below HIGH — you still learn to read Checkov output. For a louder finding, add `EXPOSE 22` instead → **CKV_DOCKER_1** (port 22 exposed).
-
-**To break in CI:** edit `app/auth-service/Dockerfile`, commit, push; open Actions → `IaC Scan (Checkov)`.
+**Pass:** job **`IaC Scan (Checkov)`** red ✗; log shows **CKV_DOCKER_1** (SSH port exposed). Artifact **`checkov-results`** has the full JSON.
 
 **Revert:**
 
 ```bash
 git checkout app/auth-service/Dockerfile
+git commit -am "revert: checkov gate test" && git push
 ```
 
 ---
 
 #### Gate 4 — Trivy (image CVEs)
 
-**Inject:** older base image in `app/auth-service/Dockerfile`:
-
-```bash
-sed -i.bak 's/FROM python:3.12-slim/FROM python:3.8-slim/' app/auth-service/Dockerfile
-# revert after the exercise:
-# git checkout app/auth-service/Dockerfile
-```
-
-**Dry-run (no full build — scan the base image directly):**
+**Local dry-run** — scan an old base image (no build):
 
 ```bash
 trivy image --exit-code 1 --severity CRITICAL,HIGH --ignore-unfixed python:3.8-slim
 ```
 
-**Done looks like (terminal or CI job `Build + Scan auth-service` → Trivy step):**
+**Break CI** — pin an old base in the Dockerfile, push, wait for **`Scan images`**:
 
-```text
-│ setuptools (METADATA) │ CVE-2024-6345  │ HIGH     │ fixed  │ 57.5.0 │ 70.0.0 │ ...
-│                       │ Remote code execution via download functions ...
+```bash
+sed -i.bak 's/FROM python:3.13-slim/FROM python:3.8-slim/' app/auth-service/Dockerfile
+git add app/auth-service/Dockerfile && git commit -m "test: trigger trivy" && git push
 ```
 
-Exit code **1**. Report Summary shows **37** vulnerabilities on `python:3.8-slim`. CI: `Build + Scan auth-service` red ✗; **`update-manifests` does not run** — cluster image tag unchanged.
+**Pass:** **`Scan images`** → **Trivy scan all images** exits 1 with a CVE table (`HIGH` / `CRITICAL`). **`Publish images`** and **`Update Manifests`** are skipped.
 
 **Revert:**
 
 ```bash
 git checkout app/auth-service/Dockerfile
+git commit -am "revert: trivy gate test" && git push
 ```
 
 ---
@@ -3013,12 +3038,12 @@ More detail: [troubleshooting.md — Trivy blocks Python service images](trouble
 
 #### Summary — what “gate broken” looks like in GitHub Actions
 
-| Gate | Failed job name | Pipeline stops? | Key log phrase |
-|---|---|---|---|
-| Gitleaks | `Secrets Scan (Gitleaks)` | Yes — first gate | `leaks found: 1` |
-| Semgrep | `SAST (Semgrep)` | Yes — no builds | `subprocess-shell-true` or `Blocking` |
-| Checkov | `IaC Scan (Checkov)` | Yes — no builds | `CKV_DOCKER_2` or `Failed checks:` |
-| Trivy | `Build + Scan auth-service` | Yes — no manifest update | `CVE-` + `HIGH` / `CRITICAL` |
+| Gate | Failed job | What to look for |
+|---|---|---|
+| Gitleaks | `Secrets Scan (Gitleaks)` | `leaks found: 1` |
+| Semgrep | `SAST (Semgrep)` | `subprocess-shell-true` |
+| Checkov | `IaC Scan (Checkov)` | `CKV_DOCKER_1` (use `EXPOSE 22` inject) |
+| Trivy | `Scan images` | CVE table, exit code 1 |
 
 After each test: **revert, push, confirm all jobs green.**
 
@@ -6643,7 +6668,8 @@ kubectl get nodes
 ```bash
 # 7 ArgoCD
 kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
-kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+kubectl apply -n argocd --server-side --force-conflicts -f \
+  https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
 
 # 8 Kyverno
 helm upgrade --install kyverno kyverno/kyverno -n kyverno --create-namespace --wait

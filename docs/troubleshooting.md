@@ -521,6 +521,28 @@ if: github.ref == 'refs/heads/main' && github.event_name == 'push' && vars.ENABL
 Enable it later by adding a repository variable named `ENABLE_DAST` with value
 `true`.
 
+### Argo CD install fails: `applicationsets.argoproj.io` annotation too long
+
+Symptom (near the end of `kubectl apply`):
+
+```text
+The CustomResourceDefinition "applicationsets.argoproj.io" is invalid:
+metadata.annotations: Too long: must have at most 262144 bytes
+```
+
+Cause: plain `kubectl apply` stores the full CRD in a `last-applied-configuration`
+annotation. The ApplicationSet CRD exceeds Kubernetes' 256 KiB limit.
+
+Fix: server-side apply (required by upstream Argo CD). If plain `apply` already
+created most resources, re-run with these flags — it finishes idempotently:
+
+```bash
+kubectl apply -n argocd --server-side --force-conflicts -f \
+  https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+kubectl wait --for=condition=ready pod \
+  -l app.kubernetes.io/name=argocd-server -n argocd --timeout=180s
+```
+
 ### ArgoCD refresh fails in Stage 1
 
 Symptom: `update-manifests` fails on **Trigger ArgoCD refresh** — errors like
