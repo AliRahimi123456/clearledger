@@ -22,10 +22,10 @@ resources:
 images:
   - name: clearledger/auth-service
     newName: 334091769766.dkr.ecr.eu-west-1.amazonaws.com/clearledger/auth-service
-    newTag: c3261ff245be3a50b6f810a0e343af792865b52e
+    newTag: 65e4b0453e25b83b35f6276b1f4ce1407dda363a
   - name: clearledger/ledger-service
     newName: 334091769766.dkr.ecr.eu-west-1.amazonaws.com/clearledger/ledger-service
-    newTag: c3261ff245be3a50b6f810a0e343af792865b52e
+    newTag: 65e4b0453e25b83b35f6276b1f4ce1407dda363a
   - name: clearledger/notification-service
     newName: 334091769766.dkr.ecr.eu-west-1.amazonaws.com/clearledger/notification-service
-    newTag: c3261ff245be3a50b6f810a0e343af792865b52e
+    newTag: 65e4b0453e25b83b35f6276b1f4ce1407dda363a
