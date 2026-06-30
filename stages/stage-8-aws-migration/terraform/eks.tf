@@ -266,6 +266,26 @@ data "aws_iam_policy_document" "alb_controller" {
       values   = ["elasticloadbalancing.amazonaws.com"]
     }
   }
+
+  statement {
+    sid    = "WAFAndShieldAccess"
+    effect = "Allow"
+    actions = [
+      "wafv2:GetWebACLForResource",
+      "wafv2:GetWebACL",
+      "wafv2:AssociateWebACL",
+      "wafv2:DisassociateWebACL",
+      "waf-regional:GetWebACLForResource",
+      "waf-regional:GetWebACL",
+      "waf-regional:AssociateWebACL",
+      "waf-regional:DisassociateWebACL",
+      "shield:GetSubscriptionState",
+      "shield:DescribeProtection",
+      "shield:CreateProtection",
+      "shield:DeleteProtection",
+    ]
+    resources = ["*"]
+  }
 }
 
 resource "aws_iam_policy" "alb_controller" {
