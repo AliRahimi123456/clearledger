@@ -39,6 +39,11 @@ else
     "${AWS_PROVIDER_ARGS[@]}"
 fi
 
+echo "▶ Patching CSIDriver to enable tokenRequests (required for IRSA)..."
+kubectl patch csidriver secrets-store.csi.k8s.io \
+  --type merge \
+  -p '{"spec":{"tokenRequests":[{"audience":"sts.amazonaws.com"}]}}' 2>&1 || true
+
 echo "▶ Applying SecretProviderClass manifests..."
 kubectl apply -f "${CSI_MANIFESTS}/"
 

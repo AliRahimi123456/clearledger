@@ -131,9 +131,34 @@ resource "aws_iam_role_policy" "falco_permissions" {
 # Boundary: caps blast radius even if a future policy edit adds broad Allow statements.
 # ═══════════════════════════════════════════════════════════════════════════
 
-# Permission boundary (Deny-only): denies ec2/iam/s3/lambda/dynamodb even if a future
-# overly broad Allow is attached to the role. Does not grant permissions by itself.
+# Permission boundary: must have explicit Allow for every action the app pods need,
+# plus Deny for services they must never touch. AWS boundaries require explicit Allows
+# to pass through — a Deny-only boundary blocks everything not explicitly allowed.
 data "aws_iam_policy_document" "clearledger_permission_boundary" {
+  statement {
+    sid    = "AllowSecretsManager"
+    effect = "Allow"
+    # Why: all three IRSA roles need to read their own secret from Secrets Manager.
+    # This Allow is required — without it the boundary blocks secretsmanager even if
+    # the role's inline policy allows it (effective = intersection of both).
+    actions = [
+      "secretsmanager:GetSecretValue",
+      "secretsmanager:DescribeSecret",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    sid    = "AllowKMS"
+    effect = "Allow"
+    # Why: if secrets are KMS-encrypted, pods need Decrypt to read them.
+    actions = [
+      "kms:Decrypt",
+      "kms:GenerateDataKey",
+    ]
+    resources = ["*"]
+  }
+
   statement {
     sid    = "DenyEc2IamS3LambdaDynamo"
     effect = "Deny"
