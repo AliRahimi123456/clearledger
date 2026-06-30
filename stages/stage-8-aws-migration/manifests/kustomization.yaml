@@ -12,7 +12,7 @@ resources:
   - resources/ledger-service-service.yaml
   - resources/notification-service-service.yaml
   - resources/frontend-service.yaml
-  - deployments/auth-service.yaml
+  - deployments/auth-service-csi.yaml
   - deployments/ledger-service.yaml
   - deployments/notification-service.yaml
   - deployments/frontend.yaml
