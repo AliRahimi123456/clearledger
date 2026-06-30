@@ -1,0 +1,6 @@
+# Copy to terraform.tfvars (gitignored) and set your values before terraform apply.
+#
+#   cp terraform.tfvars.example terraform.tfvars
+#   # edit terraform.tfvars — required for GitHub Actions OIDC (ci-aws.yaml)
+
+github_owner = "YOUR_GITHUB_USERNAME"

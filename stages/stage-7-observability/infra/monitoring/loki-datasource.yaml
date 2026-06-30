@@ -20,6 +20,6 @@ data:
         editable: false
         jsonData:
           maxLines: 500
-          timeout: 120
-          maxConcurrent: 2
+          timeout: 60
+          maxConcurrent: 6
           manageAlerts: false

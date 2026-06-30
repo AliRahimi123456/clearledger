@@ -109,3 +109,12 @@ variable "eks_node_count" {
   default     = 3
   # Why 3: minimum for pod anti-affinity across AZs. Reduce to 2 to save cost.
 }
+
+variable "github_owner" {
+  description = "GitHub user or org that owns the clearledger repo — used in the Actions OIDC trust sub claim"
+  type        = string
+  validation {
+    condition     = var.github_owner != "YOUR_GITHUB_USERNAME" && length(var.github_owner) > 0
+    error_message = "Set github_owner in terraform.tfvars before apply (copy terraform.tfvars.example). Required for CI OIDC."
+  }
+}

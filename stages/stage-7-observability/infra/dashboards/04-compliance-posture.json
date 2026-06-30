@@ -124,7 +124,8 @@
               }
             ]
           },
-          "unit": "short"
+          "unit": "short",
+          "noValue": "0"
         }
       },
       "gridPos": {
@@ -178,7 +179,8 @@
               }
             ]
           },
-          "unit": "short"
+          "unit": "short",
+          "noValue": "0"
         }
       },
       "gridPos": {
@@ -337,7 +339,7 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "sum by (priority) (count_over_time({namespace=\"falco\", container=\"falco\"} != \"libbpf\" | json | priority=~\"(?i)Critical|Warning\" [$__interval]))",
+          "expr": "sum by (priority) (count_over_time({namespace=\"falco\", container=\"falco\"} != \"libbpf\" | json | priority=~\"(?i)Critical|Warning\" [5m]))",
           "legendFormat": "priority {{priority}}",
           "refId": "A"
         }
@@ -449,7 +451,7 @@
       }
     }
   ],
-  "refresh": "5m",
+  "refresh": "",
   "schemaVersion": 38,
   "tags": [
     "clearledger",
@@ -457,10 +459,18 @@
     "compliance"
   ],
   "time": {
-    "from": "now-6h",
+    "from": "now-1h",
     "to": "now"
   },
-  "timepicker": {},
+  "timepicker": {
+    "refresh_intervals": [],
+    "time_options": [
+      "5m",
+      "15m",
+      "1h",
+      "3h"
+    ]
+  },
   "timezone": "browser",
   "title": "ClearLedger - Compliance Posture",
   "uid": "clearledger-compliance",

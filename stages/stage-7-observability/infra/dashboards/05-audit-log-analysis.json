@@ -182,7 +182,8 @@
       },
       "targets": [
         {
-          "expr": "sum(count_over_time({job=\"kubernetes-audit\"} | json | response_code >= 401 [$__interval]))",
+          "expr": "sum(count_over_time({job=\"kubernetes-audit\"} | json | response_code >= 401 [1h]))",
+          "queryType": "instant",
           "refId": "A"
         }
       ],
@@ -253,7 +254,7 @@
       "type": "timeseries"
     }
   ],
-  "refresh": "5m",
+  "refresh": "",
   "schemaVersion": 39,
   "style": "dark",
   "tags": [
@@ -262,10 +263,18 @@
     "security"
   ],
   "time": {
-    "from": "now-6h",
+    "from": "now-1h",
     "to": "now"
   },
-  "timepicker": {},
+  "timepicker": {
+    "refresh_intervals": [],
+    "time_options": [
+      "5m",
+      "15m",
+      "1h",
+      "3h"
+    ]
+  },
   "timezone": "",
   "title": "ClearLedger - Kubernetes Audit Log Analysis",
   "uid": "clearledger-audit-logs",

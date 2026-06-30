@@ -396,7 +396,7 @@
       "type": "text"
     }
   ],
-  "refresh": "5m",
+  "refresh": "",
   "schemaVersion": 38,
   "tags": [
     "clearledger",

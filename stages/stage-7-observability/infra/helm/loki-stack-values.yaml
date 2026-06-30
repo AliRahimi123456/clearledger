@@ -15,7 +15,8 @@ promtail:
 loki:
   isDefault: false
   persistence:
-    enabled: false
+    enabled: true
+    size: 5Gi
   resources:
     requests:
       cpu: 200m
@@ -45,15 +46,15 @@ loki:
     jsonData: |
       {
         "maxLines": 500,
-        "timeout": 120,
-        "maxConcurrent": 2
+        "timeout": 60,
+        "maxConcurrent": 6
       }
   config:
     limits_config:
       retention_period: 72h
-      max_query_length: 1h
+      max_query_length: 24h
       max_query_parallelism: 8
-      max_entries_limit_per_query: 3000
+      max_entries_limit_per_query: 5000
       max_query_series: 300
       split_queries_by_interval: 15m
       ingestion_rate_mb: 8

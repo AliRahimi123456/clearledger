@@ -16,6 +16,7 @@ Answer one question, run the commands, fix **before** advancing.
 | `DATABASE_URL is not set` after ArgoCD | Stage 2 | `grep vault.hashicorp clearledger-infra/manifests/auth-service/deployment.yaml` | Infra repo must use `secretKeyRef` until Stage 5 |
 | Scenario 3 does not deny unsigned image | Stage 4 §4.2 | `grep PASTE_YOUR infra/policies/require-signed-images.yaml` | Paste `cosign.pub` into policy by hand |
 | Auth `1/2` not `2/2` after Vault | Stage 5 §5.4 | `kubectl logs deploy/auth-service -c vault-agent-init` | Complete §5.3 seed before GitOps push |
+| ArgoCD OutOfSync on `vault-secret-rotation` | Stage 5 §5.5b | `argocd app get clearledger --grpc-web` | [Rotation CronJob sync](#argocd-sync-failed-on-vault-secret-rotation-stage-5) |
 | `make check-2` fails on health | Stage 2 | `kubectl get pods -n clearledger` + logs | [ArgoCD red pods](#argocd-synced-but-red-pods--health-progressing-stage-2) |
 
 ---
@@ -813,6 +814,16 @@ kubectl describe policyreport -n clearledger
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
+| UI flooded with Critical **Sensitive File Read** on **postgres-0** | Postgres reads `/etc/passwd` on a schedule — not your demo | Ignore; find **Shell Spawned** on **auth-service** ([LAB-GUIDE — plain English](../docs/LAB-GUIDE.md#stage-6-in-plain-english-read-this-if-you-feel-lost)) or `grep 'Shell Spawned'` in Falco logs |
+| Cannot find demo alert in UI | Hundreds of postgres rows bury it | **Cmd+F → `Shell Spawned`** or terminal: `kubectl logs -n falco -l app.kubernetes.io/name=falco -c falco --tail=500 \| grep 'Shell Spawned'` |
+| `make check-6` fails on NetworkPolicy | Netpol not applied yet (§6.4) | `kubectl apply -f infra/deferred-by-stage/stage-6-runtime-security/netpol/network-policies.yaml` then re-run |
+| `make fix-65-prereqs` → ArgoCD ComparisonError | Ran without `GITHUB_OWNER` — reset repoURL to placeholder | `export GITHUB_OWNER=your-user` then `kubectl apply -f stages/stage-2-gitops/argocd/clearledger-app.yaml` |
+| Auth `Init:0/1` Vault `permission denied` after snapshot | VM restart wiped Vault dev config | Re-run `setup.sh` + `seed-vault-secrets.sh`, delete auth/ledger pods — see LAB-GUIDE [Path D](#saving-your-progress) |
+| Auth `Init:0/1` Vault `permission denied` after Mac reboot | Same — K8s auth binding lost | Same Path D steps; `make restore` only if pods stay broken |
+| Scenario 4 `kubectl exec` hangs forever | `head -1` picked a **Terminating** pod | Use the `awk '$2=="2/2"'` pod picker in LAB-GUIDE §6.4 |
+| Scenario 4 `wget: not found` | Ledger image has no wget/curl | Use the **python3** command in LAB-GUIDE §6.4 |
+| Scenario 4 shows timeout / refused / BLOCKED | **Expected** — ledger → notification is blocked | Success; optional demo only |
+| `helm install` times out on Falco DaemonSet | Init container pulling plugins from ghcr.io (slow VM) | Wait; re-run `install-falco.sh`; check `kubectl get pods -n falco` until **2/2 Running** |
 | Falco pod CrashLoopBackOff | Invalid rule field in custom rules | Check `kubectl logs -n falco -l app.kubernetes.io/name=falco -c falco`; use `k8smeta.ns.name = clearledger` (requires `collectors.kubernetes.enabled: true` in Helm values) |
 | `helm install` “cannot re-use a name” | Falco already installed | Re-run `bash stages/stage-6-runtime-security/scripts/install-falco.sh` |
 | No alerts after `kubectl exec` | Rules not loaded or wrong namespace | Confirm `clearledger_rules.yaml \| schema validation: ok` in Falco logs |
@@ -862,12 +873,15 @@ kubectl describe policyreport -n clearledger
 | Loki `connection refused` / all log panels empty | Loki restarting under load or still starting | `kubectl get pods -n monitoring loki-0`; test `http://loki:3100/ready` from Grafana pod (LAB-GUIDE §7.1); `FORCE=1 bash stages/stage-7-observability/scripts/install-observability.sh` |
 | Panels empty but Loki/Prometheus healthy | No events in time range yet | Run hands-on lab LAB-GUIDE §7.4 or `generate-dashboard-data.sh` |
 | Falco dashboard empty, Kyverno/Auth partial | Wrong LogQL labels, stat `$__range`, missing Falco metrics | Re-apply dashboards: `bash stages/stage-7-observability/scripts/install-observability.sh`; set **Last 15 minutes** |
-| Failed Login stat empty, log stream works | Wrong Loki label (`app`) or stale logs | Use `container="auth-service"` + `Failed login attempt` + `[1h]` instant; re-run `make demo-7`; hard-refresh Grafana |
+| Failed Login stat shows count but log stream **No data** after refresh | Grafana time range > Loki `max_query_length` (was 1h) or auto-refresh hammering Loki | Re-run `FORCE=1 bash stages/stage-7-observability/scripts/install-observability.sh` (sets `max_query_length: 24h`, disables dashboard auto-refresh) |
+| Failed Login **stat** empty but log stream shows lines | Loki stat panels used instant query + `$__range` (Grafana does not substitute it for Loki instant) | Re-run `bash stages/stage-7-observability/scripts/install-observability.sh` — stats now use range query + `$__interval` + sum |
+| Failed Login stat empty, log stream works | Wrong Loki label (`app`) or stale logs | Use `container="auth-service"` + `Failed login attempt`; re-run failed-login curl loop; hard-refresh Grafana |
 | Pod Status / Request Rate empty | PromQL used labels metrics do not have | Pod: `sum(kube_pod_status_ready{namespace="clearledger"} == 1)`; HTTP: `rate(http_requests_total[5m])` (no `namespace` on app counter) |
 | Runtime Threat Trend empty (Compliance) | LogQL on Prometheus datasource | Panel must use **Loki** — re-run `install-observability.sh` after pulling dashboard JSON |
 | Falco sidekick pods Error | WebUI enabled on small clusters | `falcosidekick.enabled: false` in stage-6 falco helm-values; `helm upgrade falco …` |
 | Argo CD `503` / `ERR_TOO_MANY_REDIRECTS` on `/api/v1/stream` | Incomplete server params | `kubectl apply -f stages/stage-2-gitops/infra/argocd-cmd-params.yaml` + restart `argocd-server` (LAB-GUIDE §2) |
-| Loki **RESTARTS** keeps climbing | Too many heavy log queries at once | Open one dashboard; use **Last 15 minutes**; wait for Loki stable, then reload |
+| Grafana refresh stuck on **Cancel all queries** | Too many Loki panels + wide time range (24h Falco logs) + query queue | Set **Last 1 hour**; re-run `bash stages/stage-7-observability/scripts/install-observability.sh`; close tab and reopen dashboard |
+| Loki **RESTARTS** keeps climbing | Too many heavy log queries at once | Open one dashboard; use **Last 1 hour**; wait for Loki stable, then reload |
 | Loki `too many outstanding requests` | Loki busy or recovering | Wait 1–2 min; shorten time range; re-run installer if it persists |
 | Helm `stream error` / `INTERNAL_ERROR` | Transient API server disconnect | Wait 30s; `FORCE=1 bash stages/stage-7-observability/scripts/install-observability.sh` (retries 3×) |
 | Installer skips Helm | Already healthy — by design | Use `FORCE=1` only when you need to change Helm values |
@@ -907,6 +921,7 @@ make check-7
 | Kyverno denies new auth pods | Missing container `runAsNonRoot` | Add on app container; Vault agent excluded by name |
 | Login fails after migration | `SEED_*` mismatch with Postgres | Re-run `seed-vault-secrets.sh` with correct `.env` |
 | ArgoCD OutOfSync on deleted secrets | Infra repo still has `secret.yaml` | Remove from `clearledger-infra` and push |
+| ArgoCD sync fails on `vault-secret-rotation` | Kyverno blocks the CronJob | Copy hardened `rotation-cronjob.yaml` from this repo — [details](#argocd-sync-failed-on-vault-secret-rotation-stage-5) |
 
 ### Vault agent not injecting secrets
 
@@ -1018,7 +1033,105 @@ kubectl get pod -n clearledger -l app=auth-service \
 
 ---
 
+## Stage 8 — GitHub Actions OIDC / ECR publish fails
+
+### `Not authorized to perform sts:AssumeRoleWithWebIdentity`
+
+**Symptom:** CI — AWS workflow fails at **Publish images → ECR** on `aws-actions/configure-aws-credentials@v4`.
+
+**Cause:** The IAM role `clearledger-github-actions-ecr` trust policy `:sub` claim does not match your repo. Common when `terraform apply` ran before `github_owner` was set in `terraform.tfvars` — AWS still has `repo:YOUR_GITHUB_USERNAME/clearledger:environment:production`.
+
+**Fix:**
+
+```bash
+# 1. Set github_owner in terraform.tfvars (copy from terraform.tfvars.example)
+grep github_owner stages/stage-8-aws-migration/terraform/terraform.tfvars
+
+# 2. Re-apply
+terraform -chdir=stages/stage-8-aws-migration/terraform apply
+
+# 3. Verify (must show YOUR username, not YOUR_GITHUB_USERNAME)
+aws iam get-role --role-name clearledger-github-actions-ecr \
+  --query 'Role.AssumeRolePolicyDocument.Statement[0].Condition.StringEquals."token.actions.githubusercontent.com:sub"' \
+  --output text
+```
+
+**Expected:** `repo:YOUR_GITHUB_USERNAME/clearledger:environment:production`
+
+**Re-run CI:** GitHub → Actions → failed run → **Re-run failed jobs** (not “Re-run all jobs” unless you need a full rebuild).
+
+**`ecr:InitiateLayerUpload` denied on `clearledger/frontend`:** Stage 8 Terraform creates only three ECR repos. `ci-aws.yaml` must not push `frontend` — update from the repo if your workflow still references it.
+
+Also confirm:
+
+- GitHub **production** environment exists
+- Environment secret **`AWS_ACTIONS_ROLE_ARN`** (not `GITHUB_ACTIONS_ROLE_ARN`) = `terraform output github_actions_ecr_role_arn`
+- `publish-images` job has `environment: production` in `ci-aws.yaml`
+
+---
+
 ## ArgoCD Issues
+
+### ComparisonError: `authentication required` / `Repository not found`
+
+**Symptom:** Argo CD UI → **Application conditions** shows:
+
+```text
+ComparisonError: Failed to load target state: ... failed to list refs:
+authentication required: Repository not found
+```
+
+**This is not fixed by editing YAML in `clearledger` or pushing to `clearledger-infra`.** Argo CD cannot *read* the infra repo at all.
+
+**Cause:** Usually one of two things:
+
+1. **`clearledger-infra` is private** (or the PAT expired/was revoked), and Argo CD has no valid credentials. GitHub returns "Repository not found" for unauthenticated access to private repos — even when the repo exists.
+
+2. **The Application still points at the lab placeholder** `YOUR_GITHUB_USERNAME/clearledger-infra` instead of your real GitHub username. `argocd repo list` can show **Successful** for the correct URL while the Application uses a different URL:
+
+```bash
+argocd app get clearledger --grpc-web | grep -i repo
+# Bad:  YOUR_GITHUB_USERNAME/clearledger-infra
+# Good: Osomudeya/clearledger-infra  (your username)
+
+# Fix: edit repoURL in stages/stage-2-gitops/argocd/clearledger-app.yaml, then:
+kubectl apply -f stages/stage-2-gitops/argocd/clearledger-app.yaml
+argocd app sync clearledger --grpc-web
+```
+
+**Fix (credentials):**
+
+```bash
+# 1. Confirm the repo exists in your browser
+#    https://github.com/YOUR_USERNAME/clearledger-infra
+
+# 2. Log in to Argo CD CLI
+argocd login argocd.local --username admin --password YOUR_PASSWORD --insecure --grpc-web
+
+# 3. Re-register credentials (same PAT as INFRA_REPO_TOKEN from Stage 1 §1.4)
+export INFRA_REPO_TOKEN='ghp_...'
+argocd repo add https://github.com/YOUR_USERNAME/clearledger-infra.git \
+  --username git --password "$INFRA_REPO_TOKEN" --grpc-web
+
+# 4. Verify connection
+argocd repo list --grpc-web
+# REPO STATUS must be Successful for clearledger-infra
+
+# 5. Hard-refresh the app
+argocd app get clearledger --hard-refresh --grpc-web
+argocd app sync clearledger --grpc-web
+```
+
+**Prevention for new learners:** create `clearledger-infra` as **Public** in §1.3, or register the PAT in Stage 2 before expecting a green sync. Credentials live in the cluster — after `make restore` or reinstalling Argo CD, run `argocd repo add` again.
+
+**What repo to edit for what:**
+
+| Problem | Which repo / action |
+|---|---|
+| Argo CD cannot clone infra repo (this error) | Re-run `argocd repo add` — no Git push fixes it |
+| Deployment image tags / manifests wrong | `clearledger-infra` — let CI update it, or `make push-infra-manifests` |
+| Kyverno policies (Stage 4) | `clearledger` → `kubectl apply -f infra/policies/` (never the infra repo) |
+| App repo is private | **OK** — ArgoCD does not read `clearledger`; only CI/runner needs access |
 
 ### CLI warning: "Failed to invoke grpc call. Use flag --grpc-web"
 
@@ -1031,6 +1144,27 @@ see a warning.
 ```bash
 argocd login argocd.local --username admin --password YOUR_PASSWORD --insecure --grpc-web
 ```
+
+<a id="argocd-sync-failed-on-vault-secret-rotation-stage-5"></a>
+
+### ArgoCD sync failed on `vault-secret-rotation` (Stage 5)
+
+After you push Stage 5 manifests, Argo CD may stay **OutOfSync** on `CronJob/vault-secret-rotation`. Kyverno from Stage 4 requires every pod — including CronJobs — to have hardened `securityContext` and resource limits. The rotation CronJob in `clearledger-infra` needs the version from this repo: `infra/manifests/vault/rotation-cronjob.yaml`.
+
+Copy that file into your infra repo, commit, push, then sync:
+
+```bash
+argocd app sync clearledger --grpc-web --prune
+```
+
+If sync says **another operation is already in progress**, Argo CD is already retrying. Wait a minute and check again. If it stays stuck:
+
+```bash
+argocd app terminate-op clearledger --grpc-web
+argocd app sync clearledger --grpc-web --prune
+```
+
+OutOfSync on deleted app secrets *before* you run `kubectl delete secret` in §5.5 is normal. After deletion, only `postgres-secret` should remain.
 
 ### Application stuck in OutOfSync (CI updated infra hours ago)
 

@@ -1,14 +1,18 @@
 # Stage 6 — Runtime Security (Falco + Network Policies)
 
-**Goal:** Trigger a Falco alert from a running pod, read it like an operator, then apply network policies without breaking the app.
+**Goal:** Trigger a Falco alert on purpose, confirm it fired, apply network policies, pass `make check-6`.
+
+**Feeling lost?** In the lab guide, jump to **[Stage 6 in plain English](../../docs/LAB-GUIDE.md#stage-6-in-plain-english-read-this-if-you-feel-lost)** — copy-paste commands and a “what done looks like” checklist. You do not need to read every Falco UI row.
 
 ## Am I ready?
 
-- [ ] `make check-5` passes — Vault injecting secrets, app Secrets removed from Git/cluster
+- [ ] `make check-5` passes — Vault is injecting secrets and app Secrets are gone from Git and the cluster
 - [ ] Login and transactions still work at `http://clearledger.local`
-- [ ] Platform pods stable (low RESTARTS)
+- [ ] Platform pods are stable with low restarts
 
-**Done when:** `make check-6` passes and you have triggered at least one Falco alert (LAB-GUIDE §6.2 or §6.3).
+**Order:** §6.1 install → §6.2 `make demo-6` → §6.4 netpol → §6.5 `make check-6` (§6.3 optional).
+
+**You are done** when you triggered a Falco alert, applied netpol, and `make check-6` passes.
 
 ## Full walkthrough
 
@@ -23,7 +27,7 @@
 
 ## What you can now claim
 
-> **Detection at runtime closes the last gap on the node.** CI and Kyverno guard what gets deployed; Falco watches syscalls inside running pods; network policies block unauthorized pod-to-pod traffic.
+> CI and Kyverno guard what gets deployed. Falco watches syscalls inside running pods. Network policies block traffic that should not happen between services.
 
 ---
 

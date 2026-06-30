@@ -95,12 +95,10 @@ jobs:
           docker build -t clearledger-auth-service:${IMAGE_TAG} ./app/auth-service
           docker build -t clearledger-ledger-service:${IMAGE_TAG} ./app/ledger-service
           docker build -t clearledger-notification-service:${IMAGE_TAG} ./app/notification-service
-          docker build --no-cache -t clearledger-frontend:${IMAGE_TAG} ./app/frontend
           docker save -o images.tar \
             clearledger-auth-service:${IMAGE_TAG} \
             clearledger-ledger-service:${IMAGE_TAG} \
-            clearledger-notification-service:${IMAGE_TAG} \
-            clearledger-frontend:${IMAGE_TAG}
+            clearledger-notification-service:${IMAGE_TAG}
       - name: Upload built images
         uses: actions/upload-artifact@v4
         with:
@@ -124,8 +122,7 @@ jobs:
           for img in \
             clearledger-auth-service:${IMAGE_TAG} \
             clearledger-ledger-service:${IMAGE_TAG} \
-            clearledger-notification-service:${IMAGE_TAG} \
-            clearledger-frontend:${IMAGE_TAG}; do
+            clearledger-notification-service:${IMAGE_TAG}; do
             echo "→ Trivy: ${img}"
             docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
               aquasec/trivy:latest image --exit-code 1 \
@@ -167,10 +164,6 @@ jobs:
           bash scripts/ci-publish-image.sh \
             "clearledger-notification-service:${IMAGE_TAG}" \
             "${ECR_REGISTRY}/clearledger/notification-service:${IMAGE_TAG}" \
-            ""
-          bash scripts/ci-publish-image.sh \
-            "clearledger-frontend:${IMAGE_TAG}" \
-            "${ECR_REGISTRY}/clearledger/frontend:${IMAGE_TAG}" \
             ""
 
   update-manifests:

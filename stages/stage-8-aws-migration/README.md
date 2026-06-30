@@ -7,6 +7,7 @@
 - [ ] Homelab complete through Stage 7 (Stage 7.5 optional)
 - [ ] `make check-7` passes (and `make check-75` if you did traces)
 - [ ] AWS account with billing alerts — `make aws-up` creates billable resources
+- [ ] `terraform.tfvars` created from `terraform.tfvars.example` with **`github_owner` set** (required before first `terraform apply` — see [LAB-GUIDE §8.3](../../docs/LAB-GUIDE.md#83--manual-walkthrough))
 
 **Done when:** app reachable on AWS ALB, ArgoCD syncing `clearledger-aws`, and you run `make aws-down` when finished to stop charges.
 

@@ -264,9 +264,15 @@ push-infra-manifests:
 	echo "✓ clearledger-infra updated"
 
 # Prod GitOps fix: align infra Git, re-apply Application (no kubectl apply to deployments).
+# Requires GITHUB_OWNER (your GitHub username) — same as Stage 2 §2.1 repoURL.
 fix-argocd: push-infra-manifests
+	@test "$(GITHUB_OWNER)" != "YOUR_GITHUB_USERNAME" || { \
+	  echo "$(YELLOW)Set GITHUB_OWNER=your-github-username (Stage 2 repoURL) before make fix-argocd$(NC)"; \
+	  echo "  export GITHUB_OWNER=Osomudeya   # example"; \
+	  exit 1; \
+	}
 	@echo "$(GREEN)Re-applying ArgoCD Application + triggering sync...$(NC)"
-	@kubectl apply -f infra/argocd/clearledger-app.yaml
+	@sed 's|YOUR_GITHUB_USERNAME|$(GITHUB_OWNER)|g' infra/argocd/clearledger-app.yaml | kubectl apply -f -
 	@kubectl annotate application clearledger -n argocd \
 		argocd.argoproj.io/refresh=hard --overwrite
 	@argocd app sync clearledger --grpc-web --prune 2>/dev/null || \

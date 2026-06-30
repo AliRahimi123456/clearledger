@@ -57,6 +57,14 @@ spec:
               value: "http://auth-service.clearledger.svc.cluster.local"
             - name: REDIS_URL
               value: "redis://redis.clearledger.svc.cluster.local:6379"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://otel-collector.monitoring.svc.cluster.local:4317"
+            - name: OTEL_SERVICE_NAME
+              value: "ledger-service"
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: "k8s.namespace=clearledger,k8s.deployment.name=ledger-service"
+            - name: ENV
+              value: "production"
           volumeMounts:
             - name: tmp
               mountPath: /tmp

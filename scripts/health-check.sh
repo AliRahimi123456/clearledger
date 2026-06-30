@@ -416,6 +416,20 @@ check_stage_2() {
   if kubectl get application clearledger -n argocd &>/dev/null; then
     pass "ArgoCD Application 'clearledger' exists"
 
+    local app_repo
+    app_repo=$(kubectl get application clearledger -n argocd \
+      -o jsonpath='{.spec.source.repoURL}' 2>/dev/null || echo "")
+    if echo "$app_repo" | grep -q 'YOUR_GITHUB_USERNAME'; then
+      fail "ArgoCD Application still has placeholder repoURL — edit and apply stages/stage-2-gitops/argocd/clearledger-app.yaml"
+    fi
+
+    local app_conditions
+    app_conditions=$(kubectl get application clearledger -n argocd \
+      -o jsonpath='{.status.conditions[*].message}' 2>/dev/null || echo "")
+    if echo "$app_conditions" | grep -qiE 'authentication required|repository not found'; then
+      fail "ArgoCD cannot read clearledger-infra (ComparisonError) — run: argocd repo add with INFRA_REPO_TOKEN (see troubleshooting.md §ComparisonError)"
+    fi
+
     local sync_status
     sync_status=$(kubectl get application clearledger -n argocd \
       -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "Unknown")
@@ -536,7 +550,7 @@ check_stage_4() {
         warn "Policy $policy exists but is in $action mode (expected: Enforce)"
       fi
     else
-      fail "Policy $policy not found — apply infra/policies/$policy.yaml"
+      fail "Policy $policy not found — apply infra/policies/ (see LAB-GUIDE §4.3)"
     fi
   done
 

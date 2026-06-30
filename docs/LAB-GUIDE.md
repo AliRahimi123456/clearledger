@@ -6867,7 +6867,21 @@ Run these yourself at least once. Paths are from the repo root.
 aws sts get-caller-identity
 terraform --version
 # Edit stages/stage-8-aws-migration/terraform/secrets.tf — no CHANGE_ME_BEFORE_APPLY
+
+# REQUIRED before first terraform apply — GitHub Actions OIDC (ci-aws.yaml) reads this at apply time:
+cp stages/stage-8-aws-migration/terraform/terraform.tfvars.example \
+   stages/stage-8-aws-migration/terraform/terraform.tfvars
+# Edit terraform.tfvars: github_owner = "YOUR_GITHUB_USERNAME"   # your GitHub user or org, not a placeholder
+
+terraform -chdir=stages/stage-8-aws-migration/terraform validate
+# Fails with "Set github_owner in terraform.tfvars" until you replace YOUR_GITHUB_USERNAME
 ```
+
+> **Do not run `terraform apply` until `github_owner` is set.** If you apply with the placeholder,
+> AWS creates IAM role `clearledger-github-actions-ecr` with trust `repo:YOUR_GITHUB_USERNAME/...`.
+> CI then fails at **Publish images → ECR** with `Not authorized to perform sts:AssumeRoleWithWebIdentity`.
+> Fix: edit `terraform.tfvars` → `terraform apply` again → verify with `aws iam get-role` below →
+> **Re-run failed jobs** on the failed Actions run (not the full pipeline).
 
 **Steps 1–2 — Terraform**
 
@@ -6883,6 +6897,20 @@ terraform output -raw auth_service_irsa_role_arn
 terraform output -raw kubeconfig_command
 cd ../../..
 ```
+
+**Verify GitHub OIDC trust (do this before enabling CI)** — the IAM role must list your real GitHub user, not the placeholder:
+
+```bash
+aws iam get-role --role-name clearledger-github-actions-ecr \
+  --query 'Role.AssumeRolePolicyDocument.Statement[0].Condition.StringEquals."token.actions.githubusercontent.com:sub"' \
+  --output text
+```
+
+**Expected:** `repo:YOUR_GITHUB_USERNAME/clearledger:environment:production`
+
+**If you see `repo:YOUR_GITHUB_USERNAME/...`:** you applied Terraform before setting `github_owner` in `terraform.tfvars`. Fix `terraform.tfvars`, then `terraform apply` again. CI will fail at **Publish images → ECR** with `Not authorized to perform sts:AssumeRoleWithWebIdentity` until this matches.
+
+**After fixing trust policy:** GitHub → Actions → failed **CI — AWS (ECR + OIDC)** run → **Re-run failed jobs** (keeps passed build/scan artifacts; only re-runs ECR publish and downstream). Use **Re-run all jobs** only if you changed app code or need a fresh scan.
 
 > **When did ECR get created?** During `terraform apply` (step 2), not when you `docker push`.
 > Terraform provisions empty ECR repositories (`clearledger/auth-service`, `ledger-service`,
@@ -7196,6 +7224,8 @@ GitHub production environment (create first — Settings → Environments → Ne
 
 With `CLEARLEDGER_CI_TARGET=aws`, every push to `main` runs **CI — AWS (ECR + OIDC)** on `ubuntu-latest` (Gitleaks → Semgrep → Checkov → build → scan → ECR push → kustomization update). Homelab `ci.yaml` (self-hosted) is skipped.
 
+Stage 8 pushes **three** images to ECR (`auth-service`, `ledger-service`, `notification-service`) — not `frontend`. The AWS manifests under `stages/stage-8-aws-migration/manifests/` deploy the backend only; frontend stays on the homelab ingress path in earlier stages.
+
 Homelab `ci.yaml` also **ignores** `stages/stage-8-aws-migration/**` on push — so Stage 8 manifest-only commits never queue on the self-hosted runner even if you forgot to set the variable yet.
 
 Set the variables once (replace `YOUR_USERNAME` with your GitHub user or org):
@@ -7206,7 +7236,7 @@ gh variable set AWS_ACCOUNT_ID --body "$(aws sts get-caller-identity --query Acc
 gh variable set AWS_REGION --body eu-west-1 --repo YOUR_USERNAME/clearledger
 ```
 
-Also apply the OIDC trust policy (`iam.tf` — `repo:YOUR_USERNAME/clearledger:environment:production`) and re-run `terraform apply` if you have not since that edit.
+Also apply the OIDC trust policy — set `github_owner` in `terraform.tfvars` (from `terraform.tfvars.example`) **before** `terraform apply`, then verify with the `aws iam get-role` command in §8.3.
 
 Create the `production` environment and set the OIDC role secret:
 
@@ -7219,6 +7249,23 @@ gh secret set AWS_ACTIONS_ROLE_ARN \
   --body "$(terraform -chdir=stages/stage-8-aws-migration/terraform output -raw github_actions_ecr_role_arn)" \
   --repo YOUR_USERNAME/clearledger
 ```
+
+**If CI fails at Publish images → ECR (`AssumeRoleWithWebIdentity`)**
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `Not authorized to perform sts:AssumeRoleWithWebIdentity` | IAM role trust still has `YOUR_GITHUB_USERNAME` in the `:sub` claim | Set `github_owner` in `terraform.tfvars` → `terraform apply` → verify with `aws iam get-role` (§8.3) |
+| `ecr:InitiateLayerUpload` denied on `clearledger/frontend` | Stage 8 ECR only provisions **three** backend repos (no frontend) | Use current `ci-aws.yaml` (pushes auth, ledger, notification only). Homelab `ci.yaml` still builds frontend for Docker Hub. |
+| `404` on `gh secret set` | `production` environment does not exist | `gh api --method PUT repos/.../environments/production` |
+| `Secret names must not start with GITHUB_` | Wrong secret name | Use `AWS_ACTIONS_ROLE_ARN`, not `GITHUB_ACTIONS_ROLE_ARN` |
+
+**Re-run after fixing OIDC — failed jobs only, not the full pipeline.** Earlier gates (Gitleaks, build, scan) already passed; their artifacts are still in the workflow run.
+
+```text
+GitHub → Actions → failed "CI — AWS (ECR + OIDC)" run → Re-run failed jobs
+```
+
+That re-runs **Publish images → ECR** and downstream (**Update GitOps manifests**, optional DAST) only. Use **Re-run all jobs** only if you changed app code or want a clean scan from scratch.
 
 ### Production Hardening Checklist
 

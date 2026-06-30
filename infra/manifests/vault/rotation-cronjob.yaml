@@ -32,9 +32,26 @@ spec:
         spec:
           serviceAccountName: vault-rotation
           restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 100
+            runAsGroup: 1000
+            fsGroup: 1000
           containers:
             - name: rotation
               image: hashicorp/vault:1.16
+              securityContext:
+                runAsNonRoot: true
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: [ALL]
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 200m
+                  memory: 128Mi
               env:
                 - name: VAULT_ADDR
                   value: "http://vault.vault.svc.cluster.local:8200"

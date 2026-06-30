@@ -95,6 +95,32 @@ purge_stale_grafana_dashboards() {
   ' || true
   kubectl rollout restart deployment/kube-prometheus-stack-grafana -n monitoring >/dev/null 2>&1 || true
   kubectl rollout status deployment/kube-prometheus-stack-grafana -n monitoring --timeout=300s
+
+  echo "▶ Waiting for sidecar to reload all ClearLedger dashboards..."
+  local expected_uids=(
+    clearledger-security-events
+    clearledger-kyverno-violations
+    clearledger-service-health
+    clearledger-compliance
+    clearledger-audit-logs
+    clearledger-dora-metrics
+  )
+  sleep 45
+  local found=0 uid http_code
+  for uid in "${expected_uids[@]}"; do
+    http_code="$(kubectl exec -n monitoring deploy/kube-prometheus-stack-grafana -c grafana -- sh -c \
+      "wget -S -O /dev/null --http-user=admin --http-password=admin123 \
+       \"http://127.0.0.1:3000/api/dashboards/uid/${uid}\" 2>&1" \
+      | awk '/HTTP\// {print \$2; exit}' 2>/dev/null || true)"
+    if [ "${http_code:-}" = "200" ]; then
+      found=$((found + 1))
+    fi
+  done
+  if [ "${found}" -eq "${#expected_uids[@]}" ]; then
+    echo "  ✓ All ${#expected_uids[@]} dashboards present"
+  else
+    echo "  ⚠ ${found}/${#expected_uids[@]} dashboards reachable — wait 30s and hard-refresh Grafana"
+  fi
 }
 
 apply_clearledger_dashboards() {

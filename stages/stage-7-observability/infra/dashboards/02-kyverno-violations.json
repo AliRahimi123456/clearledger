@@ -326,7 +326,7 @@
       "type": "timeseries"
     }
   ],
-  "refresh": "5m",
+  "refresh": "",
   "schemaVersion": 38,
   "tags": [
     "clearledger",
@@ -334,7 +334,7 @@
     "kyverno"
   ],
   "time": {
-    "from": "now-24h",
+    "from": "now-1h",
     "to": "now"
   },
   "timepicker": {},

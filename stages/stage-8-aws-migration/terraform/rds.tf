@@ -49,7 +49,7 @@ resource "aws_db_instance" "postgres" {
   identifier = "${var.project_name}-postgres"
 
   engine         = "postgres"
-  engine_version = "16.4"
+  engine_version = "16"
 
   # db.t3.micro is free tier eligible (750 hours/month for 12 months).
   # Upgrade to db.t3.small or db.t3.medium for higher connection counts.

@@ -23,7 +23,7 @@
 
 ## What you can now claim
 
-> **Secrets belong in a vault, not in YAML.** You migrated app credentials out of Git and etcd into Vault KV with agent injection — and proved the app still runs after deleting Kubernetes Secrets.
+> You moved app credentials out of Git and etcd into Vault. The app still runs after you deleted the Kubernetes Secrets — that is the proof.
 
 ---
 

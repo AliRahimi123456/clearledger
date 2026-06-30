@@ -43,7 +43,7 @@ resource "aws_security_group" "eks_cluster" {
   vpc_id      = aws_vpc.main.id
 
   ingress {
-    description = "HTTPS from VPC only — no public API server access"
+    description = "HTTPS from VPC only - no public API server access"
     from_port   = 443
     to_port     = 443
     protocol    = "tcp"

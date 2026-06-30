@@ -41,4 +41,7 @@ spec:
               entries:
                 - keys:
                     publicKeys: |-
-                      PASTE_YOUR_COSIGN_PUBLIC_KEY_HERE
+                      -----BEGIN PUBLIC KEY-----
+                      MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEwImhy6k0hehBv4EtucuV9fWxniEb
+                      0EadtpBilEMbtjecHRhVsNHwewM39B5nkPrJ+M0w818EKNYYbb6VL1+tQg==
+                      -----END PUBLIC KEY-----
