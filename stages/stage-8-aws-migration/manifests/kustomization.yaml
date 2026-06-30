@@ -21,11 +21,11 @@ resources:
 
 images:
   - name: clearledger/auth-service
-    newName: REPLACE_ECR_REGISTRY/clearledger/auth-service
-    newTag: REPLACE_IMAGE_TAG
+    newName: 334091769766.dkr.ecr.eu-west-1.amazonaws.com/clearledger/auth-service
+    newTag: 92987af
   - name: clearledger/ledger-service
-    newName: REPLACE_ECR_REGISTRY/clearledger/ledger-service
-    newTag: REPLACE_IMAGE_TAG
+    newName: 334091769766.dkr.ecr.eu-west-1.amazonaws.com/clearledger/ledger-service
+    newTag: 92987af
   - name: clearledger/notification-service
-    newName: REPLACE_ECR_REGISTRY/clearledger/notification-service
-    newTag: REPLACE_IMAGE_TAG
+    newName: 334091769766.dkr.ecr.eu-west-1.amazonaws.com/clearledger/notification-service
+    newTag: 92987af
