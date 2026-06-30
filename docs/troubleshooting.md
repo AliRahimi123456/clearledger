@@ -864,6 +864,7 @@ kubectl describe policyreport -n clearledger
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `http://grafana.local` doesn’t load | Hostname not in `/etc/hosts` or ingress not ready | Re-run `bash scripts/setup-hosts.sh`; check `kubectl get ingress -n monitoring` |
+| Helm: `vingress.elbv2.k8s.aws` denied — `IngressClass "nginx" not found` | Stage 7 values enable Grafana **nginx** ingress; EKS only has **alb** | Re-run `bash stages/stage-7-observability/scripts/install-observability.sh` — auto-disables ingress on AWS; use `kubectl port-forward -n monitoring svc/kube-prometheus-stack-grafana 3000:80` |
 | Health check: “Grafana not reachable” | NGINX ingress controller down | `kubectl get pods -n ingress`; re-run cluster setup if needed |
 | Grafana sidecar CrashLoopBackOff | MicroK8s API CA fails SSL verify in k8s-sidecar | Re-run installer — it sets `grafana.sidecar.skipTlsVerify=true` |
 | Grafana pod not 3/3 Ready | Sidecar TLS or datasource conflict | Confirm Loki helm uses `loki.isDefault=false`; check `kubectl logs -n monitoring POD -c grafana-sc-dashboard` |

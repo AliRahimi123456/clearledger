@@ -215,6 +215,7 @@ helm upgrade --install external-secrets external-secrets/external-secrets \
   --set "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn=${ESO_ROLE_ARN}" \
   --wait --timeout=180s
 
+kubectl apply -f "${STAGE_DIR}/manifests/resources/namespace.yaml"
 export REPLACE_AUTH_IRSA_ROLE_ARN="${AUTH_IRSA}"
 export REPLACE_LEDGER_IRSA_ROLE_ARN="${LEDGER_IRSA}"
 export REPLACE_NOTIFICATION_IRSA_ROLE_ARN="${NOTIFY_IRSA}"

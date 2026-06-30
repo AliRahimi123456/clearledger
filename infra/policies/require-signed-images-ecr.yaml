@@ -9,7 +9,10 @@ metadata:
     policies.kyverno.io/description: >
       ECR variant of require-signed-images.yaml for Stage 8 AWS deployments.
 spec:
-  validationFailureAction: Enforce
+  validationFailureAction: Audit
+  # Audit until CI has COSIGN_PRIVATE_KEY + COSIGN_PASSWORD (ci-aws.yaml signs on publish).
+  # Switch to Enforce after images in ECR are cosign-signed. Real key required either way
+  # (placeholder text is misread as a file path by Kyverno).
   background: false
   webhookTimeoutSeconds: 30
   failurePolicy: Fail
@@ -25,10 +28,13 @@ spec:
             - "*.dkr.ecr.*.amazonaws.com/clearledger/auth-service*"
             - "*.dkr.ecr.*.amazonaws.com/clearledger/ledger-service*"
             - "*.dkr.ecr.*.amazonaws.com/clearledger/notification-service*"
-            - "*.dkr.ecr.*.amazonaws.com/clearledger/frontend*"
+          mutateDigest: false
           attestors:
             - count: 1
               entries:
                 - keys:
                     publicKeys: |-
-                      PASTE_YOUR_COSIGN_PUBLIC_KEY_HERE
+                      -----BEGIN PUBLIC KEY-----
+                      MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEwImhy6k0hehBv4EtucuV9fWxniEb
+                      0EadtpBilEMbtjecHRhVsNHwewM39B5nkPrJ+M0w818EKNYYbb6VL1+tQg==
+                      -----END PUBLIC KEY-----

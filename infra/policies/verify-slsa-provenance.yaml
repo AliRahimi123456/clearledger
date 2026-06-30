@@ -46,6 +46,8 @@ spec:
             - "index.docker.io/*/clearledger-auth-service*"
             - "index.docker.io/*/clearledger-ledger-service*"
             - "index.docker.io/*/clearledger-notification-service*"
+          mutateDigest: false
+          # Required when validationFailureAction is Audit (Kyverno 1.18+)
           attestations:
             - predicateType: https://slsa.dev/provenance/v0.2
               attestors:
@@ -53,7 +55,10 @@ spec:
                   entries:
                     - keys:
                         publicKeys: |-
-                          PASTE_YOUR_COSIGN_PUBLIC_KEY_HERE
+                          -----BEGIN PUBLIC KEY-----
+                          MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEwImhy6k0hehBv4EtucuV9fWxniEb
+                          0EadtpBilEMbtjecHRhVsNHwewM39B5nkPrJ+M0w818EKNYYbb6VL1+tQg==
+                          -----END PUBLIC KEY-----
               conditions:
                 - all:
                     - key: "{{ predicate.builder.id }}"

@@ -141,12 +141,19 @@ install_loki_helm() {
   helm repo add grafana https://grafana.github.io/helm-charts >/dev/null 2>&1 || true
   helm repo update >/dev/null 2>&1 || true
 
-  local default_sc loki_values=(-f "${HELM_DIR}/loki-stack-values.yaml")
+  local default_sc gp2_sc loki_values=(-f "${HELM_DIR}/loki-stack-values.yaml")
   default_sc="$(kubectl get storageclass 2>/dev/null | awk '$2=="(default)" {print $1; exit}' || true)"
+  gp2_sc="$(kubectl get storageclass gp2 -o jsonpath='{.metadata.name}' 2>/dev/null || true)"
   if [ -n "${default_sc:-}" ]; then
-    loki_values+=(--set loki.persistence.enabled=true --set loki.persistence.size=5Gi)
+    loki_values+=(--set loki.persistence.storageClassName="${default_sc}")
+  elif [ -n "${gp2_sc:-}" ] && kubectl get csidriver ebs.csi.aws.com >/dev/null 2>&1 \
+    && kubectl get pods -n kube-system -l 'app.kubernetes.io/name=aws-ebs-csi-driver' --no-headers 2>/dev/null \
+      | grep -q Running; then
+    echo "  → EKS: using StorageClass gp2 for Loki persistence"
+    loki_values+=(--set loki.persistence.storageClassName=gp2)
   else
-    echo "  ⚠ No default StorageClass — Loki runs without persistence (lab)"
+    echo "  ⚠ No volume provisioner for gp2 — Loki runs without persistence (use port-forward; logs lost on restart)"
+    loki_values+=(--set loki.persistence.enabled=false)
   fi
 
   if helm_retry helm upgrade --install loki grafana/loki-stack \
@@ -171,6 +178,13 @@ grafana_ready() {
 require kubectl
 require helm
 
+# Homelab (MicroK8s) has ingressClass nginx; EKS Stage 8 has alb only.
+PROM_VALUES=(-f "${HELM_DIR}/kube-prometheus-stack-values.yaml")
+if ! kubectl get ingressclass nginx >/dev/null 2>&1; then
+  echo "  → No IngressClass 'nginx' — disabling Grafana ingress (use port-forward on AWS)"
+  PROM_VALUES+=(-f "${HELM_DIR}/kube-prometheus-stack-values-aws.yaml")
+fi
+
 if [ "${FORCE}" != "1" ] && monitoring_ready; then
   echo "▶ Observability stack already healthy — skipping Helm."
   echo "  Applying manifests + dashboards only. (FORCE=1 to re-run all Helm upgrades)"
@@ -185,7 +199,7 @@ else
   if helm_retry helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
     --namespace monitoring \
     --create-namespace \
-    -f "${HELM_DIR}/kube-prometheus-stack-values.yaml" \
+    "${PROM_VALUES[@]}" \
     --timeout 15m \
     --wait; then
     :
@@ -237,8 +251,14 @@ fi
 
 echo ""
 echo "✓ Stage 7 installed."
-echo "  Grafana: http://grafana.local (admin / admin123)"
-echo "  Dashboards: http://grafana.local/dashboards?tag=clearledger"
+if kubectl get ingressclass nginx >/dev/null 2>&1; then
+  echo "  Grafana: http://grafana.local (admin / admin123)"
+  echo "  Dashboards: http://grafana.local/dashboards?tag=clearledger"
+else
+  echo "  Grafana (port-forward): kubectl port-forward -n monitoring svc/kube-prometheus-stack-grafana 3000:80"
+  echo "  Then: http://localhost:3000 (admin / admin123)"
+  echo "  Dashboards: http://localhost:3000/dashboards?tag=clearledger"
+fi
 echo "  Metrics images (optional): bash ${STAGE_DIR}/scripts/build-metrics-images.sh"
 echo "  Generate data: bash ${STAGE_DIR}/scripts/generate-dashboard-data.sh"
 echo "  Health check: bash ${ROOT_DIR}/scripts/health-check.sh 7"

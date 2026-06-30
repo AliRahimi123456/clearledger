@@ -1,0 +1,7 @@
+# Stage 8 AWS / EKS overlay — merge with kube-prometheus-stack-values.yaml
+# EKS uses ALB (ingressClass alb), not nginx. Enabling nginx ingress makes the
+# AWS Load Balancer Controller admission webhook reject the Helm release.
+# Access Grafana via: kubectl port-forward -n monitoring svc/kube-prometheus-stack-grafana 3000:80
+grafana:
+  ingress:
+    enabled: false

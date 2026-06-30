@@ -54,10 +54,11 @@ resource "aws_secretsmanager_secret" "auth_service" {
 
 resource "aws_secretsmanager_secret_version" "auth_service" {
   secret_id = aws_secretsmanager_secret.auth_service.id
-  # Change CHANGE_ME_BEFORE_APPLY to a random base64 string before terraform apply
-  # Generate one with: openssl rand -base64 64
+  # Change CHANGE_ME_BEFORE_APPLY values before terraform apply
+  # Generate jwt_secret with: openssl rand -base64 64
   secret_string = jsonencode({
-    jwt_secret = "CHANGE_ME_BEFORE_APPLY"
+    jwt_secret   = "CHANGE_ME_BEFORE_APPLY"
+    database_url = "postgresql://clearledger:CHANGE_ME_BEFORE_APPLY@PLACEHOLDER_RDS:5432/clearledger"
   })
 
   lifecycle {

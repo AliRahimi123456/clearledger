@@ -6851,6 +6851,8 @@ The spinup script runs 15 steps in order:
 
 **Deploy (13–15)** — ArgoCD app `clearledger-aws` syncs `stages/stage-8-aws-migration/manifests/`; wait for ALB hostname; print URL and tear-down reminder.
 
+After the script finishes, open the printed **`http://<alb-dns>/auth/health`** in your browser, or follow [§8.3 — When to open what](#when-to-open-what-checkpoint-map) for Argo CD and Grafana port-forwards.
+
 Default app deploy uses **ESO** for secrets. CSI is also installed so you can try file mounts in §8.5 without extra setup.
 
 **Terraform layout** — there is no `terraform.tf` file. The `terraform {}` block (version, providers, optional S3 backend) is at the top of `main.tf`. Resources are split by topic: `vpc.tf`, `eks.tf`, `rds.tf`, `ecr.tf`, `alb.tf`, `iam.tf`, `secrets.tf`, `security.tf`. Run all commands from `stages/stage-8-aws-migration/terraform/`.
@@ -6860,6 +6862,24 @@ Default app deploy uses **ESO** for secrets. CSI is also installed so you can tr
 ### 8.3 — Manual walkthrough
 
 Run these yourself at least once. Paths are from the repo root.
+
+**Commands install things; UIs prove they work.** Homelab Stages 2 and 7 already taught you to open Argo CD and Grafana in a browser. Stage 8 is the same idea — but on AWS there is no `clearledger.local` or `grafana.local` in `/etc/hosts`. You use **port-forward** for control-plane UIs and the **public ALB hostname** for the app.
+
+#### When to open what (checkpoint map)
+
+| When (after…) | Where to look | How to open | What “good” looks like |
+|---|---|---|---|
+| Step 2 — `terraform apply` | **AWS Console** | [EKS](https://eu-west-1.console.aws.amazon.com/eks/home?region=eu-west-1) → cluster `clearledger` **Active**; [ECR](https://eu-west-1.console.aws.amazon.com/ecr/private-registry/repositories?region=eu-west-1) → three empty repos; [RDS](https://eu-west-1.console.aws.amazon.com/rds/home?region=eu-west-1) → `clearledger-postgres` **Available** | Infra exists before any pods run |
+| Step 4 or CI green | **ECR** + **GitHub Actions** | ECR → each repo has your git SHA tag; Actions → **CI — AWS (ECR + OIDC)** all green | Images are in the registry ArgoCD will pull |
+| Step 7 — ArgoCD install | **Argo CD UI** | See [👀 Argo CD UI](#-argo-cd-ui-after-step-7) below | Login page loads; later you see app `clearledger-aws` |
+| Step 12 — observability | **Grafana** | See [👀 Grafana on AWS](#-grafana-after-step-12) below | Login works; six ClearLedger dashboards listed (panels may be empty until events) |
+| Step 13 — ArgoCD app applied | **Argo CD UI** again | Same port-forward → Applications → `clearledger-aws` | **Synced** + **Healthy**; pod tree shows auth/ledger/notification |
+| Step 14 — ingress ready | **ALB / app** | See [👀 ALB — first time the app is public](#-alb--first-time-the-app-is-public) below | Browser or `curl` returns JSON `200` on `/auth/health` |
+| Optional | **AWS EC2 → Load balancers** | Console → Load Balancers → name `clearledger` | **Active**; targets **healthy** (matches ingress backend pods) |
+
+> **No login SPA on AWS Stage 8.** The AWS manifests deploy **three backend APIs** only (`/auth`, `/ledger`, `/notifications`). There is no frontend Ingress like homelab `clearledger.local`. You prove the stack with **health URLs** and API `curl` — not a browser login screen.
+
+Keep **one terminal** dedicated to each `kubectl port-forward` while you use the UI. `Ctrl+C` in that terminal closes the tunnel.
 
 **Before you start**
 
@@ -6897,6 +6917,12 @@ terraform output -raw auth_service_irsa_role_arn
 terraform output -raw kubeconfig_command
 cd ../../..
 ```
+
+**👀 AWS Console (after step 2)** — confirm Terraform created resources before you touch the cluster:
+
+1. **EKS** → Clusters → `clearledger` → **Status: Active**, **3 nodes**
+2. **ECR** → Repositories → `clearledger/auth-service`, `ledger-service`, `notification-service` (0 images until step 4 or CI)
+3. **RDS** → Databases → `clearledger-postgres` → **Available**
 
 **Verify GitHub OIDC trust (do this before enabling CI)** — the IAM role must list your real GitHub user, not the placeholder:
 
@@ -6958,6 +6984,10 @@ aws ecr describe-images --repository-name clearledger/auth-service --region "${A
   --query 'imageDetails[*].imageTags' --output table
 ```
 
+**👀 ECR console (after step 4 or green CI)** — open each repository → **Images** tab. You should see tags matching your git commit SHA. If repos are empty, ArgoCD will show `ImagePullBackOff` later.
+
+**👀 GitHub Actions (if using CI instead of manual push)** — repo → **Actions** → workflow **CI — AWS (ECR + OIDC)**. All jobs green; **Publish images → ECR** succeeded. This is the supply-chain proof before deploy.
+
 **Step 5 — GitOps source of truth**
 
 Patch placeholders in `kustomization.yaml` (same `sed` as `aws-spinup.sh` step 5):
@@ -7002,50 +7032,289 @@ sed -i.bak 's|YOUR_GITHUB_USERNAME|YOUR_ACTUAL_GITHUB_USER|g' \
 rm -f stages/stage-8-aws-migration/argocd/clearledger-aws-app.yaml.bak
 ```
 
-**Step 6 — Cluster access**
+**Step 6 — Cluster access + Terraform outputs**
+
+Run from the **repo root**. Set the CLI region first (EKS and IAM outputs are regional), then kubeconfig, then export IRSA role ARNs — steps 9–10 need them.
 
 ```bash
+aws configure set region eu-west-1
+
 eval "$(terraform -chdir=stages/stage-8-aws-migration/terraform output -raw kubeconfig_command)"
 kubectl get nodes
+
+export AWS_REGION=eu-west-1
+export ESO_ROLE_ARN=$(terraform -chdir=stages/stage-8-aws-migration/terraform output -raw eso_role_arn)
+export FALCO_ROLE_ARN=$(terraform -chdir=stages/stage-8-aws-migration/terraform output -raw falco_role_arn)
+export REPLACE_AUTH_IRSA_ROLE_ARN=$(terraform -chdir=stages/stage-8-aws-migration/terraform output -raw auth_service_irsa_role_arn)
+export REPLACE_LEDGER_IRSA_ROLE_ARN=$(terraform -chdir=stages/stage-8-aws-migration/terraform output -raw ledger_service_irsa_role_arn)
+export REPLACE_NOTIFICATION_IRSA_ROLE_ARN=$(terraform -chdir=stages/stage-8-aws-migration/terraform output -raw notification_service_irsa_role_arn)
+
+# Sanity check (all should print ARNs, not empty)
+echo "ESO:      ${ESO_ROLE_ARN}"
+echo "Falco:    ${FALCO_ROLE_ARN}"
+echo "Auth IRSA: ${REPLACE_AUTH_IRSA_ROLE_ARN}"
 ```
 
-**Steps 7–12 — Platform stack** (same order as spinup)
+**Steps 7–12 — Platform stack** (same order as `aws-spinup.sh`)
+
+Run **install → verify** for each step before moving on. After every block you should see Running pods (or a ClusterPolicy list) — not just “command finished with no output.”
+
+| Step | Namespace | What you are installing | Rough pod count |
+|------|-----------|---------------------------|-----------------|
+| 7 | `argocd` | GitOps controller | ~7 pods |
+| 8 | `kyverno` | Admission policies | ~4 pods + ClusterPolicies |
+| 9 | `falco` | Runtime detection | 1 DaemonSet pod **per node** (3 on this cluster) |
+| 10 | `external-secrets` + `clearledger` | ESO + IRSA ServiceAccounts | ~3 ESO pods + 3 ServiceAccounts |
+| 11 | `kube-system` + `clearledger` | CSI driver + AWS provider | 3 driver + 3 provider (one per node) |
+| 12 | `monitoring` | Prometheus, Grafana, Loki | ~10+ pods |
+
+---
+
+#### Step 7 — ArgoCD
 
 ```bash
-# 7 ArgoCD
 kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
-kubectl apply -n argocd --server-side --force-conflicts -f \
-  https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+kubectl apply -n argocd --server-side --force-conflicts \
+  -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+kubectl rollout status deployment/argocd-server -n argocd --timeout=180s
+```
 
-# 8 Kyverno
-helm upgrade --install kyverno kyverno/kyverno -n kyverno --create-namespace --wait
+**Verify — what got created:**
+
+```bash
+kubectl get pods -n argocd
+kubectl get svc -n argocd
+kubectl get deploy -n argocd
+```
+
+**Expected:** `argocd-server`, `argocd-repo-server`, `argocd-application-controller`, etc. — most pods **Running** / **1/1** or **2/2**. `argocd-server` Service exposes port 443.
+
+**👀 UI (optional now, required after step 13):** new terminal, leave running — use any free local port (`8081` if `8080` is in use):
+
+```bash
+kubectl port-forward svc/argocd-server -n argocd 8080:443
+# Or if 8080 is taken:
+# kubectl port-forward svc/argocd-server -n argocd 8081:443
+# https://localhost:8080 (or 8081)  user: admin
+kubectl get secret argocd-initial-admin-secret -n argocd -o jsonpath='{.data.password}' | base64 -d; echo
+```
+
+Applications list is empty until step 13 — that is normal.
+
+---
+
+#### Step 8 — Kyverno + policies
+
+`cosign.pub` / `infra/cosign.pub` are **gitignored** (private key must never commit; public key is learner-specific). The repo ships **example** keys in `require-signed-images.yaml` / `require-signed-images-ecr.yaml`. If you regenerated keys in Stage 3, sync your local public key into policies **before** apply:
+
+```bash
+# infra/cosign.pub exists locally but is gitignored — safe to copy into committed policy YAMLs
+bash scripts/embed-cosign-pub-in-policies.sh
+diff infra/cosign.pub <(grep -A3 'BEGIN PUBLIC KEY' infra/policies/require-signed-images-ecr.yaml | grep -v publicKeys)
+```
+
+```bash
+helm repo add kyverno https://kyverno.github.io/kyverno/ --force-update
+helm upgrade --install kyverno kyverno/kyverno \
+  --namespace kyverno --create-namespace \
+  -f stages/stage-4-admission-control/infra/kyverno/values.yaml \
+  --set admissionController.replicas=1 \
+  --wait --timeout=180s
 kubectl apply -f infra/policies/
+```
 
-# 9 Falco (use falco_role_arn from terraform output)
-helm upgrade --install falco falcosecurity/falco -n falco --create-namespace \
+**Verify:**
+
+```bash
+kubectl get pods -n kyverno
+kubectl get clusterpolicy
+kubectl get clusterpolicy require-signed-images-ecr -o jsonpath='{.spec.rules[0].verifyImages[0].attestors[0].entries[0].keys.publicKeys}' | head -3
+```
+
+**Expected:** admission-controller, background-controller, cleanup-controller, reports-controller pods **Running**. `kubectl get clusterpolicy` lists **6+** policies including `require-signed-images-ecr`, `disallow-root-containers`, etc. The `publicKeys` output must show `-----BEGIN PUBLIC KEY-----`, **not** `PASTE_YOUR_COSIGN_PUBLIC_KEY_HERE` (Kyverno treats a placeholder as a file path and blocks all deploys).
+
+`require-signed-images-ecr` defaults to **Audit** until CI Cosign-signs ECR images (`COSIGN_PRIVATE_KEY` + `COSIGN_PASSWORD` in GitHub). Unsigned images still deploy; signed-image enforcement is optional later.
+
+If `verify-slsa-provenance` fails to apply (Audit + `mutateDigest`), set `mutateDigest: false` in that file or skip it — it is optional for Stage 8.
+
+---
+
+#### Step 9 — Falco
+
+```bash
+helm repo add falcosecurity https://falcosecurity.github.io/charts --force-update
+helm upgrade --install falco falcosecurity/falco \
+  --namespace falco --create-namespace \
   -f stages/stage-6-runtime-security/infra/falco/helm-values.yaml \
-  --set "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn=FALCO_ROLE_ARN"
+  --set driver.kind=modern_ebpf \
+  --set "serviceAccount.annotations.eks\.amazonaws\.com/role-arn=${FALCO_ROLE_ARN}" \
+  --wait --timeout=300s
+```
 
-# 10 ESO + app ServiceAccounts (eso_role_arn + auth/ledger/notify IRSA from terraform)
-helm upgrade --install external-secrets external-secrets/external-secrets -n external-secrets --create-namespace \
-  --set "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn=ESO_ROLE_ARN" --wait
-export REPLACE_AUTH_IRSA_ROLE_ARN=...  # from terraform output
+**Verify:**
+
+```bash
+kubectl get pods -n falco -o wide
+kubectl get daemonset -n falco
+kubectl get sa falco -n falco -o jsonpath='{.metadata.annotations.eks\.amazonaws\.com/role-arn}'; echo
+```
+
+**Expected:** Falco **DaemonSet** with **DESIRED = number of nodes** (3); each pod **Running**. ServiceAccount annotation shows your `FALCO_ROLE_ARN`.
+
+---
+
+#### Step 10 — External Secrets Operator + IRSA ServiceAccounts
+
+```bash
+helm repo add external-secrets https://charts.external-secrets.io --force-update
+helm upgrade --install external-secrets external-secrets/external-secrets \
+  --namespace external-secrets --create-namespace \
+  --set "serviceAccount.annotations.eks\.amazonaws\.com/role-arn=${ESO_ROLE_ARN}" \
+  --wait --timeout=180s
+kubectl apply -f stages/stage-8-aws-migration/manifests/resources/namespace.yaml
 envsubst < stages/stage-8-aws-migration/manifests/clearledger-serviceaccounts.yaml | kubectl apply -f -
+```
 
-# 11 CSI driver + SecretProviderClasses
+**Verify:**
+
+```bash
+kubectl get pods -n external-secrets
+kubectl get sa -n external-secrets external-secrets -o jsonpath='{.metadata.annotations.eks\.amazonaws\.com/role-arn}'; echo
+kubectl get sa -n clearledger
+```
+
+**Expected:** `external-secrets` deployment **Running** (often 3 containers / 1 pod). Three ServiceAccounts in `clearledger`: `auth-service`, `ledger-service`, `notification-service` — each with an `eks.amazonaws.com/role-arn` annotation. No app pods yet (ArgoCD deploys those in step 13).
+
+---
+
+#### Step 11 — CSI driver + SecretProviderClasses
+
+```bash
 bash stages/stage-8-aws-migration/scripts/install-csi-secrets.sh
+```
 
-# 12 Observability
+**Verify:**
+
+```bash
+kubectl get pods -n kube-system | grep -E 'secrets-store|provider-aws'
+kubectl get secretproviderclass -n clearledger
+helm list -n kube-system | grep -E 'csi-secrets|secrets-provider'
+```
+
+**Expected:** CSI driver pods **3/3 Running** (one per node); AWS provider pods **1/1 Running** per node. Two `SecretProviderClass` objects in `clearledger`. Helm shows `csi-secrets-store` and/or `secrets-provider-aws` **deployed**.
+
+If Helm reports `meta.helm.sh/release-name` conflicts, re-run the script — it installs the AWS provider without duplicating the driver chart.
+
+---
+
+#### Step 12 — Observability
+
+```bash
 bash stages/stage-7-observability/scripts/install-observability.sh
 ```
 
-**Steps 13–14 — Deploy via ArgoCD (not raw kubectl on Deployments)**
+**Verify:**
+
+```bash
+kubectl get pods -n monitoring
+kubectl get svc -n monitoring | grep -E 'grafana|prometheus|loki'
+kubectl get configmap -n monitoring -l grafana_dashboard=1 --no-headers | wc -l
+```
+
+**Expected:** Grafana **3/3 Running**, Prometheus and Loki pods **Running**. ConfigMap count for dashboards is **6** (ClearLedger dashboards). Script prints `http://grafana.local` — on EKS use port-forward instead:
+
+```bash
+# New terminal — keep running
+kubectl port-forward -n monitoring svc/kube-prometheus-stack-grafana 3000:80
+# http://localhost:3000  admin / admin123
+# http://localhost:3000/dashboards?tag=clearledger
+```
+
+Panels may show **No data** until you trigger events (§7.4 exercises work on this cluster too).
+
+---
+
+**Platform stack summary** — quick sanity check before step 13:
+
+```bash
+for ns in argocd kyverno falco external-secrets monitoring clearledger; do
+  echo "=== ${ns} ==="
+  kubectl get pods -n "${ns}" --no-headers 2>/dev/null | awk '{print $3}' | sort | uniq -c || echo "(no pods yet)"
+done
+kubectl get clusterpolicy --no-headers | wc -l | xargs echo "ClusterPolicies:"
+kubectl get secretproviderclass -n clearledger --no-headers | wc -l | xargs echo "SecretProviderClasses:"
+```
+
+**Expected:** every namespace shows only `Running` (or `Completed` for jobs); `clearledger` may be empty until ArgoCD syncs. ClusterPolicies ≥ 6. SecretProviderClasses = 2.
+
+> **EKS API timeout on namespace create?** You may see
+> `Unexpected error when reading response body` / `context deadline exceeded`
+> and still get `namespace/argocd created`. That is a **transient client timeout** talking to the EKS API (first request, slow network, or control plane catching up) — not a failed create. Confirm with `kubectl get namespace argocd` and continue. If commands keep timing out, retry once or run `kubectl cluster-info` to verify connectivity.
+
+**Steps 13–14 — Deploy via ArgoCD + see the ALB**
+
+**ArgoCD repo access:** private repos need a PAT in Argo CD → Settings → Repositories. After making the repo **public**, refresh the app — `ComparisonError: authentication required` should disappear.
+
+**Common sync blockers after repo access works:**
+
+| Symptom | Fix |
+|---|---|
+| `external-secrets.io/v1beta1` not found | Push `external-secrets.yaml` with `apiVersion: external-secrets.io/v1` |
+| Kyverno `PASTE_YOUR_COSIGN_PUBLIC_KEY_HERE: no such file` | `bash scripts/embed-cosign-pub-in-policies.sh` then `kubectl apply -f infra/policies/` |
+| `SecretSyncedError` auth `database_url does not exist` | Auth SM secret holds `jwt_secret` only; ESO pulls `database_url` from `clearledger/ledger-service` (same RDS URL) |
+| Pods `Pending` / Too many pods | EKS lab nodes are small — scale node group or reduce replicas in manifests |
 
 ```bash
 kubectl apply -f stages/stage-8-aws-migration/argocd/clearledger-aws-app.yaml
-argocd app sync clearledger-aws   # or wait for auto-sync
-kubectl get ingress clearledger-ingress -n clearledger
 ```
+
+**👀 Argo CD UI (now)** — refresh the browser (https://localhost:8080 or 8081, whichever port you forwarded). Open application **`clearledger-aws`**. Wait until **Synced** and **Healthy** (often 2–5 minutes on first sync).
+
+```bash
+# CLI equivalent while you watch the UI
+kubectl get application clearledger-aws -n argocd -w
+kubectl get pods -n clearledger -w
+```
+
+**Step 14 — wait for the ALB hostname** (AWS provisions the load balancer after the Ingress exists; first time can take **2–5 minutes**):
+
+```bash
+kubectl get ingress clearledger-ingress -n clearledger -w
+# Wait until ADDRESS/HOSTNAME column shows something like:
+# k8s-clearledg-clearled-xxxxxxxxxx-yyyyyyyyyy.eu-west-1.elb.amazonaws.com
+```
+
+When the hostname appears, export it:
+
+```bash
+export ALB_DNS=$(kubectl get ingress clearledger-ingress -n clearledger \
+  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+echo "App URL: http://${ALB_DNS}"
+```
+
+#### 👀 ALB — first time the app is public
+
+**In the browser** (paste the `http://` URL — no `/etc/hosts` entry needed):
+
+| URL | Expected |
+|---|---|
+| `http://${ALB_DNS}/auth/health` | JSON, HTTP **200**, healthy status |
+| `http://${ALB_DNS}/ledger/health` | JSON, HTTP **200** |
+| `http://${ALB_DNS}/notifications/health` | JSON, HTTP **200** |
+
+**Or in the terminal:**
+
+```bash
+curl -fsS "http://${ALB_DNS}/auth/health" && echo
+curl -fsS "http://${ALB_DNS}/ledger/health" && echo
+curl -fsS "http://${ALB_DNS}/notifications/health" && echo
+```
+
+**👀 AWS Console (optional)** — EC2 → **Load balancers** → `clearledger` → **Target groups** → targets **healthy**. Unhealthy targets usually mean pods not Ready or wrong health check path.
+
+**If the hostname stays empty** for more than ~10 minutes: `kubectl describe ingress clearledger-ingress -n clearledger` and check `kube-system` for the AWS Load Balancer Controller pod.
+
+**If health URLs return 502/503:** pods may still be starting, ESO secrets not synced yet (§8.4), or RDS not reachable — check Argo CD pod health and `kubectl get pods -n clearledger`.
 
 ArgoCD watches **`stages/stage-8-aws-migration/manifests/` in this repo** (app `clearledger-aws`). Homelab Stages 1–7 still use `clearledger-infra`; AWS Stage 8 uses the in-repo kustomize path so ESO/CSI manifests stay colocated.
 
