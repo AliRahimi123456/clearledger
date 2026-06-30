@@ -7436,77 +7436,94 @@ If you skip this, §8.5 (CSI driver) builds on working secret access, and a sile
 
 ### 8.5 — Hands-on: CSI driver (file mounts)
 
-CSI is **installed** at spinup step 11. Default pods still use ESO. This exercise switches **auth-service** to the same file-mount code path as Vault homelab (`DATABASE_URL_FILE` / `JWT_SECRET_FILE`).
+The default pods already use ESO — secrets arrive as environment variables from a Kubernetes Secret object. This exercise switches `auth-service` to the CSI path instead: secrets are mounted as plain files under `/mnt/secrets/`, and the app reads them from disk. It is the same code path the homelab uses with Vault (`DATABASE_URL_FILE` / `JWT_SECRET_FILE`).
 
-**1. Confirm CSI is running**
+CSI was already installed at spinup step 11, so there is nothing extra to install.
+
+**Step 1 — confirm CSI is running**
 
 ```bash
 kubectl get pods -n kube-system -l app=secrets-store-csi-driver
 kubectl get secretproviderclass -n clearledger
 ```
 
-**2. Swap deployment in Git (GitOps)**
+You should see one CSI driver pod per node, and two `SecretProviderClass` objects — one for auth-service and one for ledger-service.
 
-Edit `stages/stage-8-aws-migration/manifests/kustomization.yaml`:
+**Step 2 — swap the deployment in Git**
+
+Open `stages/stage-8-aws-migration/manifests/kustomization.yaml` and change one line:
 
 ```yaml
-# Change:
+# Before
   - deployments/auth-service.yaml
-# To:
+
+# After
   - deployments/auth-service-csi.yaml
 ```
 
-Commit, push, then:
+Commit and push, then sync:
 
 ```bash
 argocd app sync clearledger-aws
 kubectl rollout status deployment/auth-service -n clearledger
 ```
 
-**3. Verify files inside the pod**
+ArgoCD will roll out a new auth-service pod with the CSI volume attached.
+
+**Step 3 — confirm the files are there**
 
 ```bash
+# Find the new pod
 kubectl get pod -n clearledger -l secrets=csi
-kubectl exec -n clearledger deploy/auth-service -c auth-service -- ls -la /mnt/secrets
-kubectl exec -n clearledger deploy/auth-service -c auth-service -- sh -c 'wc -c /mnt/secrets/database_url'
-curl -s "http://$(kubectl get ingress clearledger-ingress -n clearledger -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')/auth/health"
+
+# List the mounted secret files
+kubectl exec -n clearledger deploy/auth-service -- ls /mnt/secrets
+
+# Check the database URL was written correctly
+kubectl exec -n clearledger deploy/auth-service -- cat /mnt/secrets/database_url
+
+# Confirm the service is still healthy
+curl -s "http://$(kubectl get ingress clearledger-ingress -n clearledger \
+  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')/auth/health"
 ```
 
-**4. Compare ESO vs CSI**
+You should see `database_url` and `jwt_secret` listed as files, and the health check should return `{"status":"ok"}`.
 
-| | ESO (default) | CSI (this exercise) |
-|---|---|---|
-| Secret in etcd? | Yes — K8s Secret object | No — volume mount only |
-| Pod env | `DATABASE_URL` from `secretKeyRef` | `DATABASE_URL_FILE=/mnt/secrets/database_url` |
-| IAM identity | IRSA on ESO SA (reads SM) | IRSA on **auth-service** SA (mounts SM) |
-| App code | Same — `_read_secret()` in `app/auth-service/main.py` | Same |
+**What changed — ESO vs CSI**
 
-Revert by switching kustomization back to `auth-service.yaml` and syncing.
+With ESO (the default), the External Secrets Operator reads from Secrets Manager using its own IAM role and writes a Kubernetes Secret object into etcd. The pod reads it as an environment variable.
+
+With CSI, the pod itself holds the IAM role. When the pod starts, the kubelet calls the CSI driver, which calls Secrets Manager directly, and mounts the result as files. Nothing is written to etcd.
+
+The application code handles both paths via `_read_secret()` in `app/auth-service/main.py` — it checks for a `_FILE` env var first (file path) and falls back to a direct env var. No code change is needed.
+
+To go back to ESO, switch `kustomization.yaml` back to `auth-service.yaml` and sync again.
 
 ---
 
-**Terraform** provisions the AWS resources — VPC, EKS, RDS, ECR, Secrets Manager, IAM roles — from `.tf` files in `stages/stage-8-aws-migration/terraform/`.
+**Terraform** provisions all the AWS resources — VPC, EKS, RDS, ECR, Secrets Manager, and IAM roles — from `.tf` files in `stages/stage-8-aws-migration/terraform/`.
 
-### Two OIDC Ideas in Stage 8
+### Two OIDC ideas in Stage 8
 
-Stage 8 uses OIDC in two places. They sound similar, but they solve different problems:
+Stage 8 uses OIDC in two different places. They sound similar, but they solve different problems.
 
-- **GitHub Actions OIDC:** lets the pipeline push images to Amazon ECR without storing AWS access keys in GitHub.
-- **IRSA:** lets pods inside EKS read AWS services, like Secrets Manager, without storing AWS access keys in Kubernetes.
+**GitHub Actions OIDC** lets the CI pipeline push images to ECR without storing long-lived AWS keys in GitHub. When a job runs, GitHub mints a short-lived token that proves the job's identity. AWS trusts that token and hands back temporary credentials — enough to push images and nothing else.
 
-Think of it this way:
+**IRSA** does the same thing, but for pods running inside EKS. Instead of a GitHub token, the pod presents its Kubernetes ServiceAccount token. AWS trusts the EKS cluster's OIDC provider, verifies the token, and returns temporary credentials scoped to exactly what that pod needs.
+
+It helps to see what each one says:
 
 ```text
-GitHub Actions OIDC
-  GitHub job proves: "I am an approved job in the production environment of YOUR_GITHUB_USERNAME/clearledger"
-  AWS replies: "Here are short-lived credentials to push images to ECR"
+GitHub Actions OIDC:
+  Pipeline says → "I am a job in the production environment of YOUR_USERNAME/clearledger"
+  AWS replies   → "Here are credentials to push to ECR, valid for one hour"
 
-IRSA
-  Kubernetes pod proves: "I am the auth-service ServiceAccount"
-  AWS replies: "Here are short-lived credentials to read only the auth secret"
+IRSA:
+  Pod says   → "I am the auth-service ServiceAccount in the clearledger namespace"
+  AWS replies → "Here are credentials to read only the auth-service secret, valid for one hour"
 ```
 
-The important part is what is **not** stored anymore:
+The key is what is *not* stored anywhere:
 
 ```text
 No AWS_ACCESS_KEY_ID in GitHub Secrets
@@ -7514,60 +7531,27 @@ No AWS_SECRET_ACCESS_KEY in GitHub Secrets
 No AWS keys inside Kubernetes Secrets
 ```
 
-When Terraform runs, it creates a role called `clearledger-github-actions-ecr`. The Stage 8 pipeline in `.github/workflows/ci-aws.yaml` assumes that role using OIDC, logs in to ECR, pushes images, then updates `stages/stage-8-aws-migration/manifests/kustomization.yaml` — ArgoCD app `clearledger-aws` syncs the cluster.
+Terraform creates the role `clearledger-github-actions-ecr` and wires up the trust policies for both. The pipeline in `.github/workflows/ci-aws.yaml` assumes that role, pushes images to ECR, and updates `kustomization.yaml`. ArgoCD picks up the change and deploys the new images.
 
 ### CI routing: Stages 1–7 vs Stage 8 {#ci-routing-stages-17-vs-stage-8}
 
-The repo ships **two** workflow files. Only one should be active for push/PR on your fork at a time:
+The repo ships two workflow files. You do not need both running at the same time.
 
-| | Homelab (Stages 1–7) | AWS (Stage 8) |
-|---|---|---|
-| **Workflow** | `.github/workflows/ci.yaml` | `.github/workflows/ci-aws.yaml` |
-| **Runner** | Self-hosted `clearledger` (Multipass VM) | GitHub-hosted `ubuntu-latest` |
-| **Registry** | Docker Hub | ECR |
-| **GitOps target** | `clearledger-infra` repo | `stages/stage-8-aws-migration/manifests/` in this repo |
-| **Opt-in** | **Default** — nothing to configure | Set repo variable `CLEARLEDGER_CI_TARGET=aws` after `terraform apply` |
+`ci.yaml` is the homelab pipeline from Stages 1–7. It runs on your self-hosted Multipass VM, pushes images to Docker Hub, and updates your `clearledger-infra` GitOps repo. This is the default — nothing to configure.
 
-**Fresh starters (Stages 1–7) — no change.** When you fork or clone this repo and follow the lab from Stage 0, you do **not** set `CLEARLEDGER_CI_TARGET`. The variable is unset by default, so:
+`ci-aws.yaml` is the AWS pipeline for Stage 8. It runs on GitHub-hosted `ubuntu-latest` runners, pushes images to ECR, and updates `kustomization.yaml` directly in this repo. It only activates when you set the repo variable `CLEARLEDGER_CI_TARGET=aws`.
 
-- Every push to `main` runs **`ci.yaml`** on your self-hosted runner (same as before).
-- **`ci-aws.yaml` jobs are skipped** on push (they only run when `CLEARLEDGER_CI_TARGET=aws` or you trigger the workflow manually).
-- Repository variables are **per-repo** — they are not in git and are **not** copied when someone forks your repo. Each learner configures their own fork.
+**If you are on Stages 1–7, do nothing.** The `CLEARLEDGER_CI_TARGET` variable is unset by default, so every push runs `ci.yaml` on your self-hosted runner as normal. The AWS workflow file exists in the repo but its jobs are skipped.
 
-**Stage 8 only — enable AWS CI after Terraform.** Set the variables below **after** `terraform apply` succeeds (§8.3 step 2), not while you are still on Stages 1–7.
-
-> **⚠ Caution — do not set `CLEARLEDGER_CI_TARGET=aws` early**
+> **Do not set `CLEARLEDGER_CI_TARGET=aws` until your EKS cluster is running.**
 >
-> If you set `CLEARLEDGER_CI_TARGET=aws` before Stage 8:
->
-> - Homelab **`ci.yaml` stops running** on push (no Docker Hub builds, no `clearledger-infra` updates).
-> - **`ci-aws.yaml` runs instead** and will fail at the ECR/OIDC steps until AWS infrastructure, `AWS_ACTIONS_ROLE_ARN`, and `AWS_ACCOUNT_ID` / `AWS_REGION` are configured.
->
-> Symptoms: pushes queue forever on a missing self-hosted runner, or AWS CI fails with OIDC/ECR errors while you are still on MicroK8s. **Fix:** delete the variable (or set it back to empty) until you start §8, or finish §8 setup first.
->
-> To remove if you set it by mistake: GitHub → repo **Settings** → **Secrets and variables** → **Actions** → **Variables** → delete `CLEARLEDGER_CI_TARGET`.
+> If you set it early, `ci.yaml` stops running on push (no more Docker Hub builds), and `ci-aws.yaml` will fail immediately because there is no ECR, no OIDC role, and no AWS infrastructure yet. If you accidentally set it, delete the variable: GitHub → repo **Settings** → **Secrets and variables** → **Actions** → **Variables** → delete `CLEARLEDGER_CI_TARGET`.
 
-**After the stack is up** (§8.3 or `make aws-up`), configure GitHub for AWS CI on **GitHub-hosted runners** (same security gates as homelab CI — no self-hosted runner):
+**Enabling AWS CI (do this after `terraform apply` completes)**
 
-```text
-GitHub repository Variables (Settings → Secrets and variables → Actions → Variables):
-  CLEARLEDGER_CI_TARGET = aws          # routes push/PR to ci-aws.yaml, skips homelab ci.yaml
-  AWS_ACCOUNT_ID        = your 12-digit AWS account ID
-  AWS_REGION            = eu-west-1
+You need three repository variables and one secret in a `production` environment.
 
-GitHub production environment (create first — Settings → Environments → New environment → name: production):
-  AWS_ACTIONS_ROLE_ARN = terraform output github_actions_ecr_role_arn
-```
-
-> GitHub rejects secret names starting with `GITHUB_` — use `AWS_ACTIONS_ROLE_ARN`, not `GITHUB_ACTIONS_ROLE_ARN`.
-
-With `CLEARLEDGER_CI_TARGET=aws`, every push to `main` runs **CI — AWS (ECR + OIDC)** on `ubuntu-latest` (Gitleaks → Semgrep → Checkov → build → scan → ECR push → kustomization update). Homelab `ci.yaml` (self-hosted) is skipped.
-
-Stage 8 pushes **three** images to ECR (`auth-service`, `ledger-service`, `notification-service`) — not `frontend`. The AWS manifests under `stages/stage-8-aws-migration/manifests/` deploy the backend only; frontend stays on the homelab ingress path in earlier stages.
-
-Homelab `ci.yaml` also **ignores** `stages/stage-8-aws-migration/**` on push — so Stage 8 manifest-only commits never queue on the self-hosted runner even if you forgot to set the variable yet.
-
-Set the variables once (replace `YOUR_USERNAME` with your GitHub user or org):
+First, set the variables — replace `YOUR_USERNAME` with your GitHub username:
 
 ```bash
 gh variable set CLEARLEDGER_CI_TARGET --body aws --repo YOUR_USERNAME/clearledger
@@ -7575,12 +7559,10 @@ gh variable set AWS_ACCOUNT_ID --body "$(aws sts get-caller-identity --query Acc
 gh variable set AWS_REGION --body eu-west-1 --repo YOUR_USERNAME/clearledger
 ```
 
-Also apply the OIDC trust policy — set `github_owner` in `terraform.tfvars` (from `terraform.tfvars.example`) **before** `terraform apply`, then verify with the `aws iam get-role` command in §8.3.
-
-Create the `production` environment and set the OIDC role secret:
+Then create the `production` environment and add the OIDC role ARN as a secret:
 
 ```bash
-# One-time: create the environment (404 on gh secret set means this step was skipped)
+# Create the environment first — gh secret set returns 404 if it does not exist
 gh api --method PUT "repos/YOUR_USERNAME/clearledger/environments/production"
 
 gh secret set AWS_ACTIONS_ROLE_ARN \
@@ -7589,22 +7571,23 @@ gh secret set AWS_ACTIONS_ROLE_ARN \
   --repo YOUR_USERNAME/clearledger
 ```
 
-**If CI fails at Publish images → ECR (`AssumeRoleWithWebIdentity`)**
+> Note: GitHub blocks secret names that start with `GITHUB_`. Use `AWS_ACTIONS_ROLE_ARN`, not `GITHUB_ACTIONS_ROLE_ARN`.
 
-| Symptom | Cause | Fix |
-|---|---|---|
-| `Not authorized to perform sts:AssumeRoleWithWebIdentity` | IAM role trust still has `YOUR_GITHUB_USERNAME` in the `:sub` claim | Set `github_owner` in `terraform.tfvars` → `terraform apply` → verify with `aws iam get-role` (§8.3) |
-| `ecr:InitiateLayerUpload` denied on `clearledger/frontend` | Stage 8 ECR only provisions **three** backend repos (no frontend) | Use current `ci-aws.yaml` (pushes auth, ledger, notification only). Homelab `ci.yaml` still builds frontend for Docker Hub. |
-| `404` on `gh secret set` | `production` environment does not exist | `gh api --method PUT repos/.../environments/production` |
-| `Secret names must not start with GITHUB_` | Wrong secret name | Use `AWS_ACTIONS_ROLE_ARN`, not `GITHUB_ACTIONS_ROLE_ARN` |
+Also make sure `github_owner` is set correctly in `terraform.tfvars` (see `terraform.tfvars.example`) before running `terraform apply`. This wires up the OIDC trust policy so AWS will accept tokens from your specific GitHub account.
 
-**Re-run after fixing OIDC — failed jobs only, not the full pipeline.** Earlier gates (Gitleaks, build, scan) already passed; their artifacts are still in the workflow run.
+Once `CLEARLEDGER_CI_TARGET=aws` is set, every push to `main` runs the AWS pipeline: Gitleaks → Semgrep → Checkov → build → Trivy scan → ECR push → kustomization update. The homelab `ci.yaml` is skipped.
+
+**If CI fails at the ECR push step**
+
+The most common failure is `Not authorized to perform sts:AssumeRoleWithWebIdentity`. This means the IAM role trust policy still has a placeholder `YOUR_GITHUB_USERNAME` in the `:sub` condition. Fix it by setting `github_owner` in `terraform.tfvars` and running `terraform apply` again, then re-run only the failed job (not the whole pipeline — the earlier scan steps already passed).
 
 ```text
-GitHub → Actions → failed "CI — AWS (ECR + OIDC)" run → Re-run failed jobs
+GitHub → Actions → failed run → Re-run failed jobs
 ```
 
-That re-runs **Publish images → ECR** and downstream (**Update GitOps manifests**, optional DAST) only. Use **Re-run all jobs** only if you changed app code or want a clean scan from scratch.
+If you see `404` when running `gh secret set`, the `production` environment does not exist yet — run the `gh api --method PUT` command above first.
+
+**Re-run after fixing OIDC — failed jobs only, not the full pipeline.** Earlier gates (Gitleaks, build, scan) already passed; their artifacts are still in the workflow run. Use **Re-run all jobs** only if you changed app code or want a clean scan from scratch.
 
 ### Production Hardening Checklist
 
