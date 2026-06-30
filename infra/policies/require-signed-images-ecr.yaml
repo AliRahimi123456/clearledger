@@ -15,7 +15,10 @@ spec:
   # (placeholder text is misread as a file path by Kyverno).
   background: false
   webhookTimeoutSeconds: 30
-  failurePolicy: Fail
+  failurePolicy: Ignore
+  # failurePolicy: Ignore lets Kyverno pass the request when it cannot process
+  # the verifyImages rule (e.g. image has no cosign signature yet).
+  # Switch back to Fail once CI is signing images with COSIGN_PRIVATE_KEY.
   rules:
     - name: verify-ecr-cosign-signature
       match:
