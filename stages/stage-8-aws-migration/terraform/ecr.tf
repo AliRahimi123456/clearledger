@@ -7,6 +7,7 @@ locals {
     "${var.project_name}/auth-service",
     "${var.project_name}/ledger-service",
     "${var.project_name}/notification-service",
+    "${var.project_name}/frontend",
   ]
 }
 

@@ -11,9 +11,11 @@ resources:
   - resources/auth-service-service.yaml
   - resources/ledger-service-service.yaml
   - resources/notification-service-service.yaml
+  - resources/frontend-service.yaml
   - deployments/auth-service.yaml
   - deployments/ledger-service.yaml
   - deployments/notification-service.yaml
+  - deployments/frontend.yaml
   - external-secrets.yaml
   - csi/auth-service-spc.yaml
   - csi/ledger-service-spc.yaml
@@ -28,4 +30,7 @@ images:
     newTag: 1e63c25fa1f6ce3d941450e023ee6e9fa55163b0
   - name: clearledger/notification-service
     newName: 334091769766.dkr.ecr.eu-west-1.amazonaws.com/clearledger/notification-service
+    newTag: 1e63c25fa1f6ce3d941450e023ee6e9fa55163b0
+  - name: clearledger/frontend
+    newName: 334091769766.dkr.ecr.eu-west-1.amazonaws.com/clearledger/frontend
     newTag: 1e63c25fa1f6ce3d941450e023ee6e9fa55163b0
