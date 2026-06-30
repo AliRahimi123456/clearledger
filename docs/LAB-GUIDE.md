@@ -130,6 +130,43 @@ make reclaim          # if WARN/FAIL — see [Disk health](#disk-health-long-run
 
 If reclaim does not help → Path A or Path B.
 
+**Path D — Mac reboot or sleep; cluster responds but app pods are sick** (try this **before** `make restore` if you passed Stage 5+):
+
+Common after closing the laptop or a Multipass hang: `auth-service` / `ledger-service` show **Unknown** or stay **Init:0/1**; `vault-agent-init` logs show `permission denied` on `auth/kubernetes/login`. Postgres and frontend may still be **Running**. Vault’s in-memory dev config lost its Kubernetes auth binding — the fix is re-run Stage 5 setup, not a full VM restore.
+
+**Multipass won’t respond** (`cannot connect to the multipass socket`, `multipass start` spins forever): reboot the Mac, open **Multipass** from Applications, wait 60s, then `multipass list`.
+
+**App pods sick but `kubectl` works:**
+
+```bash
+export KUBECONFIG=~/.kube/clearledger-config
+kubectl get pods -n clearledger
+
+# Stale pods from the crash — delete Unknown auth/ledger pods (skip if already recreated)
+kubectl delete pod -n clearledger -l app=auth-service
+kubectl delete pod -n clearledger -l app=ledger-service
+
+# Confirm Vault init is the blocker (expect permission denied if this is the issue)
+kubectl logs -n clearledger -l app=auth-service -c vault-agent-init --tail=10
+
+# Re-bind Vault K8s auth + re-seed secrets (requires stages/stage-5-secrets-management/.env)
+bash stages/stage-5-secrets-management/infra/vault/setup.sh
+bash stages/stage-5-secrets-management/infra/vault/seed-vault-secrets.sh
+
+# Restart app pods so vault-agent-init runs again
+kubectl delete pod -n clearledger -l app=auth-service
+kubectl delete pod -n clearledger -l app=ledger-service
+
+# Wait ~1 minute, then verify
+kubectl get pods -n clearledger          # auth + ledger should be 2/2 Running
+curl -s -o /dev/null -w "%{http_code}\n" http://clearledger.local/auth/health   # want 200
+SKIP_CHAOS_CHECK=1 make check-7
+```
+
+**Pass:** auth and ledger **2/2 Running**, `/auth/health` returns **200**, `make check-7` passes. Grafana panels may be empty until you re-run §7.4 exercises (Loki may have lost recent logs) — that is normal.
+
+**Still broken after Path D?** Use Path A: `make snapshots` then `make restore STAGE=7` (or the newest good `clearledger.stageN` you have).
+
 ---
 
 ## Choose your path
@@ -1250,6 +1287,8 @@ GitHub — clearledger-infra (infra repo)
 
 Both repos live on GitHub. The runner is the only piece that runs locally — and it only needs outbound internet access to GitHub and Docker Hub.
 
+> **Stages 1–7 vs Stage 8 — two pipelines, one repo.** This chapter uses `.github/workflows/ci.yaml` on your **self-hosted** runner (Docker Hub → `clearledger-infra`). Stage 8 adds a second workflow, `.github/workflows/ci-aws.yaml`, that runs on **GitHub-hosted** `ubuntu-latest` runners (ECR → in-repo kustomization). Fresh starters **do not** set anything extra — homelab CI is the default until you opt into AWS in §8. See [§8 — CI routing and `CLEARLEDGER_CI_TARGET`](#ci-routing-stages-17-vs-stage-8).
+
 This stage intentionally stops before automatic deployment. After the pipeline runs, the infra repo has changed, but the cluster has not — CI does not run `kubectl` in Stage 1 (the ArgoCD refresh step is **off** until you set repository variable `ENABLE_ARGOCD_SYNC=true` in Stage 2). That unfinished handoff is the lesson: **CI automates building; GitOps automates applying.** Stage 1 gives you CI. Stage 2 adds GitOps.
 
 ---
@@ -1265,7 +1304,7 @@ First, put the application repo somewhere GitHub Actions can see it.
 Go to GitHub → **New Repository**:
 
 - Repository name: **`clearledger`** (exact name — not `clearledger-infra`)
-- Visibility: **Public**
+- Visibility: **Public or Private** — both work with the self-hosted runner and GitHub Actions. ArgoCD never reads this repo (see [Private repos — what syncs where](#private-repos--what-syncs-where) in §1.3).
 - Do **not** initialize with a README or `.gitignore`
 
 The repo already has those files locally. If GitHub creates its own, your first push may fail because the histories do not match.
@@ -1568,9 +1607,53 @@ The pipeline updates image tags in clearledger-infra
 Stage 2: ArgoCD reads clearledger-infra and deploys to the cluster
 ```
 
+#### Private repos — what syncs where
+
+Learners often make **`clearledger` private** (good practice). That does **not** break the lab — but it confuses people because there are two repos with different jobs.
+
+| Repo | Typical visibility | Who needs access | What it is for |
+|---|---|---|---|
+| **`clearledger`** | Private OK | You, GitHub Actions (self-hosted runner) | App code, CI, Kyverno policies (`infra/policies/`), lab docs |
+| **`clearledger-infra`** | **Public recommended** | ArgoCD, CI (`INFRA_REPO_TOKEN`) | Kubernetes manifests only — ArgoCD's source of truth |
+
+**ArgoCD never clones `clearledger`.** It only watches **`clearledger-infra`**. Making the app repo private does not cause `ComparisonError` — that error means ArgoCD cannot read **`clearledger-infra`** (usually private infra repo without `argocd repo add`, or an expired PAT).
+
+**How `clearledger` becomes `clearledger-infra` (the sync chain):**
+
+```text
+clearledger/infra/manifests/          ← canonical YAML in the app repo
+        ↓  (every green CI run on main, or make push-infra-manifests)
+clearledger-infra/manifests/ on GitHub ← desired cluster state
+        ↓  (ArgoCD poll ~3 min, or argocd app sync)
+Kubernetes cluster                    ← what is actually running
+```
+
+**Automatic sync:** push to `clearledger` `main` → CI job **Update Manifests → GitHub** rsyncs `infra/manifests/` into `clearledger-infra` and pushes (uses `INFRA_REPO_TOKEN` secret).
+
+**Manual sync** (same thing CI does — useful after editing manifests locally without a full pipeline run):
+
+```bash
+export GITHUB_OWNER=YOUR_USERNAME          # e.g. Osomudeya
+export INFRA_REPO_TOKEN='ghp_...'          # same PAT as Stage 1 §1.4 — required if clearledger-infra is private
+make push-infra-manifests GITHUB_OWNER="$GITHUB_OWNER"
+argocd app sync clearledger --grpc-web     # optional nudge; ArgoCD polls on its own
+```
+
+**What does *not* sync to `clearledger-infra`:** Kyverno policies (`infra/policies/`), Cosign keys, Helm values for platform tools. Those live in `clearledger` and you apply them with `kubectl` / `helm` when each stage tells you to. Stage 4 §4.3 is `kubectl apply -f infra/policies/...` — not a Git push to the infra repo.
+
+**Checklist if ArgoCD shows `ComparisonError` or stays OutOfSync:**
+
+1. `argocd repo list --grpc-web` → `clearledger-infra` must be **Successful** (re-run `argocd repo add` with PAT if private).
+2. Open `https://github.com/YOUR_USERNAME/clearledger-infra/tree/main/manifests` — files must exist.
+3. `argocd app sync clearledger --grpc-web` — or wait ~3 minutes for auto-poll.
+
+See [troubleshooting.md — ComparisonError](troubleshooting.md#comparisonerror-authentication-required--repository-not-found).
+
 The pipeline never runs `kubectl apply` on your app in Stage 1. It updates Git; GitOps (Stage 2) applies Git to the cluster.
 
 **Create the infra repo on GitHub:** go to github.com → **New Repository** → name **`clearledger-infra`** → **Public** → **Create** (do not add a README — you will push manifests from your laptop).
+
+> **Why Public?** ArgoCD must clone this repo on every sync. A **private** repo works too, but only if you register your GitHub PAT with ArgoCD in Stage 2 (`argocd repo add`). If you skip that step, the Argo CD UI shows **`ComparisonError: authentication required: Repository not found`** — GitHub hides private repos from anonymous access. Most learners should use **Public** for the infra repo and keep secrets out of it (app secrets live in `secret.yaml` until Stage 5 removes them from Git).
 
 **Before pushing:** set your Docker Hub username in Kustomize (image tags are resolved here, not in deployment YAML):
 
@@ -2185,6 +2268,14 @@ export INFRA_REPO_TOKEN='ghp_...'   # paste here; GitHub only shows it once at c
 argocd repo add https://github.com/YOUR_USERNAME/clearledger-infra.git \
   --username git --password "$INFRA_REPO_TOKEN" --grpc-web
 ```
+
+**Verify Argo CD can reach the repo** (do this before applying the Application):
+
+```bash
+argocd repo list --grpc-web
+```
+
+Look for your `clearledger-infra` URL with **TYPE** `git` and connection **Successful**. If it shows **Failed** or the repo is missing, Argo CD cannot sync — fix credentials before §4 or any stage that depends on GitOps. After a VM restore or Argo CD reinstall, you may need to run `argocd repo add` again (credentials are stored in the cluster, not in Git).
 
 **3. Apply and sync:**
 
@@ -3012,25 +3103,47 @@ make snapshot STAGE=3 && make snapshots
 
 ## Stage 4 — Admission Control (Kyverno)
 
-CI scans code before it ships. Stage 4 adds a **cluster bouncer**: bad pods get rejected even if someone uses `kubectl` and skips the pipeline.
+> Even if CI passes, the cluster can still refuse.
 
-**Goal:** install Kyverno, apply policies from `infra/policies/`, prove bad pods are denied (§4.4).
+CI scans your code and images before they reach GitOps, but it cannot watch everything that happens inside the cluster. Someone with `kubectl` access could apply a manifest directly. A Helm chart you install might create pods that violate your security standards. Those paths never hit the pipeline — which is why Stage 4 adds **admission control**: a checkpoint built into Kubernetes itself. Every time something tries to create or update a resource, the request passes through admission webhooks before it takes effect. If a webhook rejects the request, the resource is never created.
 
-**Ready?** `make check-3` passes · `infra/cosign.pub` exists · app still works at `http://clearledger.local`
+**Kyverno** is a Kubernetes-native policy engine that uses those webhooks. You write policies as YAML files (not application code), and Kyverno enforces them on every matching resource in the cluster — for example, rejecting any pod that runs as root or requiring CPU and memory limits on every container. The difference from CI is timing: CI scans *before* code ships; Kyverno enforces at the *cluster gate*. Together they give you two layers of defense.
 
-**Done when:** §4.4 break-it tests are denied · `make check-4` passes · `make snapshot STAGE=4 && make snapshots`
+**Your goal in this stage** is to install Kyverno, apply the policies in `infra/policies/`, and prove in §4.4 that non-compliant pods are denied before the container runtime ever sees them.
 
-**What changes from Stage 3:** Checkov *warned* in CI — Kyverno now *blocks*. Cosign *signed* images — Kyverno now *requires* a signature to deploy.
+**Before you start**, make sure the foundation from earlier stages is still solid: `make check-3` should pass (pre-commit hooks and CI security gates are active), `infra/cosign.pub` should exist from Stage 3, and ArgoCD should still be syncing so the app responds at `http://clearledger.local`. If any of those are red, fix them first — Kyverno sits on top of a healthy cluster, not a broken one.
 
-**Start at §4.1** (install Kyverno). Stuck? [troubleshooting.md — Stage 4](troubleshooting.md#stage-4-admission-control-troubleshooting) before editing policy YAML.
+**You are done with Stage 4** when all three break-it scenarios in §4.4 are denied, `make check-4` passes, and you have saved your progress with `make snapshot STAGE=4` followed by `make snapshots` (confirm `clearledger.stage4` appears in the list).
 
-### What Kyverno enforces (reference)
+**What changes from Stage 3 is enforcement, not scanning.** In CI, Checkov reported Kubernetes misconfigurations but did not block the pipeline; Kyverno now stops those same classes of problems at the cluster gate. Cosign has been signing your images since Stage 1; Kyverno now *requires* that signature before a ClearLedger image can deploy. This is where [Stage 1 evidence becomes enforcement](#stage-1-security-posture--what-blocks-vs-what-waits) — see that section if you want the full map of what blocked in Stage 1 versus what waited for Stage 4.
 
-Policies live in `infra/policies/`. In plain terms they require: non-root containers, CPU/memory limits, no privilege escalation, dropped capabilities, and Cosign-signed ClearLedger images. Kyverno installs from `stages/stage-4-admission-control/infra/kyverno/values.yaml`.
+Start at **§4.1** to install Kyverno. If install, policies, break-it scenarios, or `make check-4` fail, read [troubleshooting.md — Stage 4](troubleshooting.md#stage-4-admission-control-troubleshooting) before changing Helm charts or policy YAML.
 
-### After each stage (4 onward)
+### What Kyverno enforces
 
-When a stage settles (~10 minutes), run `make check-N` (same as `health-check.sh N`). If restart counts look high, run:
+All policy files live in `infra/policies/`. Kyverno itself is installed via Helm using `stages/stage-4-admission-control/infra/kyverno/values.yaml`.
+
+| Policy | What it enforces | Framework |
+|---|---|---|
+| `disallow-root-containers` | `runAsNonRoot: true` | CIS K8s 5.2.6 |
+| `require-resource-limits` | CPU/memory requests and limits | CIS K8s 5.2.4 |
+| `disallow-privilege-escalation` | `allowPrivilegeEscalation: false` | CIS K8s 5.2.5 |
+| `drop-all-capabilities` | `capabilities.drop: [ALL]` | CIS K8s 5.2.7 |
+| `require-signed-images` | Cosign signature on ClearLedger images | SLSA Level 2 |
+
+### Platform stability — from Stage 4 onward
+
+From Stage 4 on you are running more controllers on a single-node VM — Kyverno, storage provisioners, and later Prometheus and Loki. A pod can show `Running` while it is actually crash-looping in the background. When **platform** pods (Kyverno controllers, `hostpath-provisioner`, the Prometheus operator, and similar) accumulate high `RESTARTS`, the API server starts timing out, `kubectl` feels flaky, and you can waste days debugging the wrong component because the app pods look fine.
+
+**After every stage from here on**, give the cluster about ten minutes to settle, then run the stage health check:
+
+```bash
+bash scripts/health-check.sh <stage>    # e.g. 4, 7, 7.5
+# or the Makefile shortcut:
+make check-4
+```
+
+The script ends with a **Platform stability** section that flags pods with suspicious restart counts. You can also scan the worst offenders yourself — this lists the fifteen pods with the highest restart counts cluster-wide, which is useful when something feels slow but you are not sure which namespace is struggling:
 
 ```bash
 kubectl get pods -A --sort-by='.status.containerStatuses[0].restartCount' \
@@ -3038,7 +3151,7 @@ kubectl get pods -A --sort-by='.status.containerStatuses[0].restartCount' \
   | tail -15
 ```
 
-Platform pods (Kyverno, storage, monitoring) should stay under ~5 restarts. If something is past 10 and climbing, fix the platform before moving on — see troubleshooting, not random `kubectl patch`.
+**The gate:** Kyverno controllers and other platform pods should show **RESTARTS under 5** after the stage settles. If any platform pod is climbing past 10, stop and fix it with the documented Helm values or [troubleshooting.md](troubleshooting.md) — do not `kubectl patch` around it and move on. A stable platform layer is a prerequisite for every stage that follows.
 
 ---
 
@@ -3089,26 +3202,46 @@ kyverno-reports-controller-5cdd6f4c48-qf5wc      1/1     Running   0          2m
 
 If pods stay in `ContainerCreating` for a long time, the node is still pulling images from `ghcr.io/kyverno`. Wait — do not start a second Helm install on top of a partial one.
 
-**Stability gate — run before §4.2:**
+**Stability gate — Kyverno install only (before §4.2):**
+
+Do **not** run `make check-4` or `bash scripts/health-check.sh 4` here — that script also checks that all five policies are applied and enforcing (§4.3), so it will fail until you have done that work. Use it at the end of the stage in **§4.8**.
+
+Right after Helm finishes, confirm only that the Kyverno controllers are healthy:
 
 ```bash
-bash scripts/health-check.sh 4
+kubectl get pods -n kyverno
 ```
 
-All four Kyverno controllers should be `1/1 Running` with **RESTARTS 0–2** (not climbing). If restarts keep increasing, the node is likely under CPU pressure and Kyverno’s health probes are killing pods — confirm you installed with `stages/stage-4-admission-control/infra/kyverno/values.yaml` (extended probe timeouts). See `docs/troubleshooting.md` §Stage 4.
+All four controllers should be `1/1 Running` with **RESTARTS 0–2** (not climbing). If restarts keep increasing, the node is likely under CPU pressure and Kyverno’s health probes are killing pods — confirm you installed with `stages/stage-4-admission-control/infra/kyverno/values.yaml` (extended probe timeouts). See `docs/troubleshooting.md` §Stage 4.
+
+If you want the cluster-wide restart picture at this point (optional), use the command in [Platform stability — from Stage 4 onward](#platform-stability--from-stage-4-onward) above — Kyverno and `hostpath-provisioner` should not be climbing past single digits while you continue to §4.2.
 
 ---
 
 ### 4.2 — Confirm your Cosign public key is in the policy
 
-Stage 3 created `infra/cosign.pub`. Kyverno uses that key to verify image signatures at admission time.
+Stage 3 created `infra/cosign.pub`. Kyverno uses that same key to verify image signatures when a pod is created. The policy file ships with a placeholder — you must replace it with **your** key before applying policies in §4.3.
+
+**Step 1 — Show your key (run from the repo root on the VM)**
 
 ```bash
+cd ~/clearledger    # or wherever you cloned the repo
 cat infra/cosign.pub
-grep -A5 "publicKeys" infra/policies/require-signed-images.yaml
 ```
 
-The policy ships with a placeholder — you **must** paste your key before applying. Open `infra/policies/require-signed-images.yaml`, replace `PASTE_YOUR_COSIGN_PUBLIC_KEY_HERE` with the full contents of `infra/cosign.pub` (including the `-----BEGIN PUBLIC KEY-----` lines):
+You should see three lines: `-----BEGIN PUBLIC KEY-----`, a long base64 line, and `-----END PUBLIC KEY-----`. Copy that whole block (you will paste it in the next step).
+
+**Step 2 — Paste the key into the policy**
+
+Open `infra/policies/require-signed-images.yaml` in your editor (`nano`, `vim`, or VS Code).
+
+Find this line:
+
+```yaml
+                      PASTE_YOUR_COSIGN_PUBLIC_KEY_HERE
+```
+
+Delete **only** that placeholder line and paste the three lines from `cosign.pub` in its place. The result should look like this (your base64 line will differ):
 
 ```yaml
                 - keys:
@@ -3118,22 +3251,38 @@ The policy ships with a placeholder — you **must** paste your key before apply
                       -----END PUBLIC KEY-----
 ```
 
-Your key will differ from the example above — it must match the key your CI uses to sign images in Stage 3.
+Save the file. The `BEGIN` / `END` lines must keep the spaces in front of them — that is normal YAML indentation.
 
-**✋ Hands-on checkpoint — Cosign key really in the policy**
+**Step 3 — Verify (three quick checks)**
 
-After you save the file, run:
+Run these one at a time from the repo root:
 
 ```bash
-grep -c PASTE_YOUR_COSIGN_PUBLIC_KEY_HERE infra/policies/require-signed-images.yaml || echo "OK: placeholder removed"
-grep -c "BEGIN PUBLIC KEY" infra/policies/require-signed-images.yaml
-diff <(grep -v '^#' infra/cosign.pub | grep -v '^$') \
-     <(grep -A20 'publicKeys' infra/policies/require-signed-images.yaml | grep -E 'BEGIN|END|^[A-Za-z0-9+/=]')
+# Check A — placeholder must be gone
+grep PASTE_YOUR_COSIGN_PUBLIC_KEY_HERE infra/policies/require-signed-images.yaml \
+  && echo "❌ FAIL: placeholder still in file — edit and save again" \
+  || echo "✓ OK: placeholder removed"
 ```
 
-Expected: `OK: placeholder removed`; count `1` for BEGIN line; `diff` prints **nothing** (key in policy matches `cosign.pub`).
+```bash
+# Check B — key block must be present exactly once
+grep -c "BEGIN PUBLIC KEY" infra/policies/require-signed-images.yaml
+```
 
-If you skip this, Scenario 3 in §4.4 will fail in a confusing way (pods admitted, then ImagePullBackOff, or silent pass).
+Expected output for Check B: `1` (if you see `0`, the key was not pasted; if `2`, you pasted it twice).
+
+```bash
+# Check C — policy key must match cosign.pub byte-for-byte
+diff infra/cosign.pub \
+  <(sed -n '/-----BEGIN PUBLIC KEY-----/,/-----END PUBLIC KEY-----/p' \
+      infra/policies/require-signed-images.yaml | sed 's/^[[:space:]]*//')
+```
+
+Expected output for Check C: **nothing** — no diff lines means the keys match. If `diff` prints differences, open the policy file and fix the paste.
+
+**All three passed?** Continue to §4.3.
+
+**If you skip this**, Scenario 3 in §4.4 fails in a confusing way — unsigned images may slip through, or signed pods may be rejected because Kyverno is checking against the wrong key.
 
 ---
 
@@ -3511,13 +3660,56 @@ EOF
 
 ### 4.7 — CIS benchmark evidence (kube-bench)
 
-Kyverno enforces *what workloads* are allowed to run. **kube-bench** audits *how the cluster itself is configured* against the CIS Kubernetes Benchmark. These are two different layers — both matter for compliance evidence.
+**Where you are:** §4.1–4.4 installed Kyverno and proved it blocks bad pods. §4.7 is optional **compliance evidence** — it does not change what runs in the cluster. After this, run **`make check-4`** in §4.8.
+
+#### Two different security layers (do not mix them up)
+
+| Layer | Tool | What it checks | Stage 4 question it answers |
+|---|---|---|---|
+| **Workloads** | Kyverno | Pods you deploy — root, limits, signed images | "Can this pod run?" |
+| **Cluster config** | kube-bench | Kubelet, control plane, node settings (CIS benchmark) | "Is the Kubernetes node itself hardened?" |
+
+Kyverno can be perfect while kube-bench still reports FAIL — and vice versa. Both matter for compliance narratives; only Kyverno blocks your app in this lab.
+
+#### Run it
 
 ```bash
 bash stages/stage-4-admission-control/scripts/run-kube-bench.sh
 ```
 
-This applies a Job, waits for completion, saves JSON to `stages/stage-4-admission-control/scripts/kube-bench-report.json`, and compares against the committed baseline. On MicroK8s you will see WARN/FAIL items for flags under `/var/snap/microk8s/current/args/` — see [§4.7 — CIS benchmark evidence](#47--cis-benchmark-evidence-kube-bench) below for fixes.
+The script applies a Job in `kube-system`, waits for completion, saves JSON to `stages/stage-4-admission-control/scripts/kube-bench-report.json`, and compares your cluster against a **committed baseline** (`kube-bench-baseline.json`).
+
+#### What “pass” looks like (your output is correct)
+
+On MicroK8s you will see a long list of **FAIL** and **WARN** lines — **that is normal**. MicroK8s manages kubelet flags under `/var/snap/microk8s/current/args/`; kube-bench expects a different layout than a managed cloud EKS/GKE node. The lab does **not** ask you to fix every CIS FAIL on a single-node VM.
+
+**Scroll to the last two lines.** You pass §4.7 when you see:
+
+```text
+kube-bench: 1 FAIL control(s) present (documented in baseline — no regressions).
+kube-bench: no regressions vs baseline.
+```
+
+That means: known MicroK8s gaps are documented; you did not make the cluster **worse** than the baseline. Your terminal output matches this — **good sign.**
+
+| Last lines | Meaning | Action |
+|---|---|---|
+| `no regressions vs baseline` | ✓ Pass for the lab | Continue to §4.8 |
+| `REGRESSION: … now=FAIL` | ✗ Something newly failed vs baseline | Read the control ID; fix or document before Stage 5 |
+| Script exits non-zero | Regression or Job failed | Re-run; check `kubectl get pods -n kube-system -l job-name=kube-bench` |
+
+**Do not panic about:** kubelet permission FAILs (`4.1.x`), anonymous-auth FAILs (`4.2.x`), or the long WARN list (`5.x` workload checks kube-bench cannot fully verify on MicroK8s) — they are expected on this platform.
+
+**Do panic about:** `REGRESSION:` lines or `make check-4` failing on kube-bench — that means a control that used to pass now fails.
+
+#### Optional — inspect the report
+
+```bash
+# Full JSON (for portfolio / audit evidence)
+ls -la stages/stage-4-admission-control/scripts/kube-bench-report.json
+```
+
+Fixing every CIS FAIL on MicroK8s is out of scope for this lab. In production you would remediate node config or accept documented exceptions; here the baseline captures “known state on lab hardware.”
 
 ---
 
@@ -3612,88 +3804,94 @@ If the VM corrupts later: `make snapshots` → `make restore STAGE=4`. See [Savi
 
 ## Stage 5 — Secrets Management (Vault)
 
-> No credentials in Git. No credentials in etcd. Vault injects them at runtime.
+> By the end of this stage, sensitive values no longer live in Git or in etcd-backed Kubernetes Secrets — Vault holds them centrally and injects them into pods only when they start.
 
-**Goal:** delete the Kubernetes app Secrets. The app keeps working. That is when secrets management clicks.
+Until now, database passwords and JWT keys lived in Kubernetes Secrets — and those Secret manifests were committed to `clearledger-infra` on GitHub. Anyone with repo access could decode them (base64 is not encryption), and etcd stores them unencrypted by default. **Stage 5 moves the source of truth into HashiCorp Vault** and proves the app still works after you delete the Kubernetes Secrets.
 
-> **Am I ready for Stage 5?**
->
-> - [ ] `make check-4` passes — Kyverno policies enforcing, break-it scenarios worked
-> - [ ] Kyverno pods `1/1 Running` with **RESTARTS under 5** (see [platform stability](#platform-stability--from-stage-4-onward))
-> - [ ] App still works at `http://clearledger.local` after Stage 4 policies applied
->
-> **Done when:** `make check-5` passes, K8s app Secrets deleted, login still works via Vault-injected files.
-> **Then save:** `make snapshot STAGE=5` → `make snapshots` (confirm `clearledger.stage5`).
+**Your goal:** remove `auth-service-secret` and `ledger-service-secret` from the cluster. Login and API calls must still work because Vault injects credentials at pod startup — that is the moment secrets management clicks.
 
-### What you need to know first
+**Before you start**, confirm Stage 4 is solid: `make check-4` passes, all five Kyverno policies are enforcing, the §4.4 break-it tests denied bad pods, and the app still responds at `http://clearledger.local`. Kyverno controllers should be `1/1 Running` with restarts under five (see [Platform stability — from Stage 4 onward](#platform-stability--from-stage-4-onward)). If auth or ledger pods are already crash-looping, fix that before installing Vault.
 
-In Stage 0, you saw database passwords stored as base64-encoded strings in YAML files committed to Git. That is the default Kubernetes approach, and it has two problems:
+**You are done with Stage 5** when `make check-5` passes, the Kubernetes app Secrets are deleted, and you can still log in — credentials are coming from Vault-injected files under `/vault/secrets/`, not from `secretKeyRef`. Save your progress with `make snapshot STAGE=5` followed by `make snapshots` and confirm `clearledger.stage5` appears in the list.
 
-1. **Anyone with repo access can read them.** base64 is encoding, not encryption.
-2. **Kubernetes stores Secrets in etcd unencrypted by default.**
+### What changes in this stage
 
-**HashiCorp Vault** holds credentials centrally. A **Vault agent** sidecar authenticates with Vault using the pod’s Kubernetes service account, reads KV secrets, and writes files under `/vault/secrets/`. The app reads those files — nothing is in Git or in `secretKeyRef` after migration.
+Right now, database passwords and JWT keys sit in `secret.yaml` files on GitHub and in Kubernetes Secrets inside the cluster. In Stage 5 you move those values into **HashiCorp Vault** and teach the app to read them a different way.
 
-**Where secrets live after Stage 5:**
+When an auth or ledger pod starts, the **Vault agent injector** adds a small sidecar container. That sidecar logs into Vault using the pod’s own service account, fetches the password and JWT, and writes them as files under `/vault/secrets/`. Your app already knows how to read those paths — it is the same data that used to arrive via `secretKeyRef`, just delivered at runtime instead of pulled from a Kubernetes Secret object.
 
-| Location | App DB URL / JWT |
-|---|---|
-| Git / `clearledger-infra` | **No** |
-| Kubernetes `auth-service-secret` | **No** (deleted after migration) |
-| Vault KV `clearledger/data/auth-service` | **Yes** (source of truth) |
-| Pod filesystem `/vault/secrets/*` | **Yes** (injected at runtime, ephemeral) |
+Once migration is complete, sensitive values live in **Vault** (the long-term store) and briefly on the **pod filesystem** while the container runs. They are **not** in Git anymore — you remove `secret.yaml` from `clearledger-infra` and ArgoCD syncs deployments that point at Vault instead.
 
-Bootstrap values for the lab go in a **gitignored `.env`** file once — then into Vault with `seed-vault-secrets.sh`. They are **not** hardcoded in `setup.sh` or any committed file.
+To load Vault the first time, you copy a template to a local **`.env` file** (§5.1). That file is gitignored. You run `seed-vault-secrets.sh` once to copy those values into Vault. Nothing secret is hardcoded in scripts that get committed.
 
-**Order matters — do not skip steps:**
+### Do the steps in this order
 
-```text
-.env → install Vault → setup.sh → seed-vault-secrets.sh → push clearledger-infra → wait for 2/2 pods → delete K8s app Secrets
-```
+Each step depends on the one before it. Skipping ahead is the most common way to get red auth/ledger pods that look like a broken app but really mean “Vault is not ready yet.”
 
-If you GitOps-sync Vault deployments **before** Vault is installed and seeded, auth/ledger pods will fail until Vault is ready and KV paths exist.
+1. **§5.1** — copy `stages/stage-5-secrets-management/.env.example` to `.env`, then fill it with your cluster passwords
+2. **§5.2** — install Vault and the agent injector with Helm
+3. **§5.3** — run `setup.sh`, then `seed-vault-secrets.sh` (passwords now live in Vault)
+4. **§5.4** — push Vault-enabled deployments to `clearledger-infra`; let ArgoCD sync
+5. **§5.5** — wait for **2/2** pods (app + Vault sidecar), then delete the old Kubernetes Secrets
+6. **§5.5b** — ArgoCD **Synced / Healthy** (after secret delete — OutOfSync before delete is normal)
+7. **§5.6** — confirm login works and credentials appear under `/vault/secrets/` inside the pod
+
+If pods fail after step 4 but Vault is not installed or seeded yet, go back — do not patch deployment YAML until you have completed steps 2 and 3.
+
+Start at **§5.1**. If anything fails, read [troubleshooting.md — Stage 5](troubleshooting.md#stage-5--common-issues) before changing manifests.
 
 ---
 
 ### 5.1 — Create `.env` (local only, never commit)
+
+This file holds two things: a **dev Vault root token** for Helm (§5.2), and the **passwords you will load into Vault** in §5.3. It stays on your machine only — never commit it. The `SEED_*` values must match what the app uses today so login still works after you delete Kubernetes Secrets later.
+
+**Two different files — do not mix them up:**
+
+| File | What it is |
+|---|---|
+| **`stages/stage-5-secrets-management/.env.example`** | Blank template in the repo (empty fields). **Copy this** in step 1. |
+| **`stages/stage-5-secrets-management/.env`** | Your real file (gitignored). You create it and fill it in steps 2–3. |
+
+The sample block at the bottom of this section is **only a picture** of what a completed `.env` looks like — do **not** copy those placeholder passwords unless they happen to match your cluster.
+
+**Step 1 — copy the template to `.env`**
 
 ```bash
 cp stages/stage-5-secrets-management/.env.example \
    stages/stage-5-secrets-management/.env
 ```
 
-Edit `.env`:
+That gives you a file with empty `VAULT_TOKEN=` and `SEED_*=` lines. Open it in your editor for steps 2–3.
 
-1. **`VAULT_TOKEN`** — choose a dev root token (same value you pass to Helm in §5.2).
-2. **`SEED_*`** — one-time values loaded **into Vault** (must match Postgres password + JWT so login still works after you delete K8s Secrets).
+**Step 2 — read the current passwords from the cluster**
 
-**Copy from existing K8s Secrets** (after Stages 0–4):
+Run these from the repo root. Each command prints one value — copy the output into `.env` in step 3.
 
 ```bash
+# → paste as SEED_AUTH_DATABASE_URL
 kubectl get secret auth-service-secret -n clearledger \
   -o jsonpath='{.data.database_url}' | base64 -d; echo
+
+# → paste as SEED_AUTH_JWT_SECRET
 kubectl get secret auth-service-secret -n clearledger \
   -o jsonpath='{.data.jwt_secret}' | base64 -d; echo
+
+# → paste as SEED_LEDGER_DATABASE_URL
 kubectl get secret ledger-service-secret -n clearledger \
   -o jsonpath='{.data.database_url}' | base64 -d; echo
 ```
 
-Paste into `.env` as `SEED_AUTH_DATABASE_URL`, `SEED_AUTH_JWT_SECRET`, `SEED_LEDGER_DATABASE_URL`.
+**Step 3 — fill in `.env`**
 
-**If `auth-service-secret` is already gone** (you deleted too early):
+| Variable | What to put |
+|---|---|
+| `VAULT_TOKEN` | Any dev-only string you choose (e.g. `my-dev-root-token`) — same value in §5.2 Helm install |
+| `SEED_AUTH_DATABASE_URL` | Output of first command above |
+| `SEED_AUTH_JWT_SECRET` | Output of second command |
+| `SEED_LEDGER_DATABASE_URL` | Output of third command |
 
-```bash
-# Build database URL from Postgres bootstrap secret (default lab password: changeme-stage0)
-PG_PASS=$(kubectl get secret postgres-secret -n clearledger \
-  -o jsonpath='{.data.password}' | base64 -d)
-echo "postgresql://clearledger:${PG_PASS}@postgres:5432/clearledger"
-
-# JWT: use the same value you used at Stage 0, or read from Vault if already seeded:
-kubectl exec -n vault vault-0 -- vault kv get -field=jwt_secret clearledger/auth-service 2>/dev/null \
-  || echo "(set SEED_AUTH_JWT_SECRET manually — must match tokens already issued)"
-```
-
-**Example `.env` shape** (values are yours — never commit this file):
+**Sample only — shape of a completed `.env`** (use **your** kubectl output from step 2, not these example strings unless they match):
 
 ```text
 VAULT_TOKEN=my-dev-root-token
@@ -3701,6 +3899,22 @@ SEED_AUTH_DATABASE_URL=postgresql://clearledger:changeme-stage0@postgres:5432/cl
 SEED_AUTH_JWT_SECRET=stage0-jwt-secret-change-in-production
 SEED_LEDGER_DATABASE_URL=postgresql://clearledger:changeme-stage0@postgres:5432/clearledger
 ```
+
+**If `auth-service-secret` is already deleted** (you skipped ahead — recover like this):
+
+```bash
+# Database URL from Postgres bootstrap secret (lab default password is often changeme-stage0)
+PG_PASS=$(kubectl get secret postgres-secret -n clearledger \
+  -o jsonpath='{.data.password}' | base64 -d)
+echo "postgresql://clearledger:${PG_PASS}@postgres:5432/clearledger"
+# Use that line for both SEED_AUTH_DATABASE_URL and SEED_LEDGER_DATABASE_URL
+
+# JWT — same value you used at Stage 0, or read from Vault if you already seeded:
+kubectl exec -n vault vault-0 -- vault kv get -field=jwt_secret clearledger/auth-service 2>/dev/null \
+  || echo "(set SEED_AUTH_JWT_SECRET manually — must match tokens already issued)"
+```
+
+Continue to **§5.2** once `.env` has all four variables set.
 
 ---
 
@@ -3737,6 +3951,12 @@ kubectl apply -f stages/stage-5-secrets-management/infra/vault-ingress.yaml
 
 Open `http://vault.local` and sign in with **`VAULT_TOKEN` from your `.env`**.
 
+**Verify — list Vault pods:**
+
+```bash
+kubectl get pods -n vault
+```
+
 **Expected — Vault pods:**
 
 ```text
@@ -3751,17 +3971,18 @@ vault-agent-injector-8d6b668b4-xxxxx   1/1     Running   0          1m
 
 ### 5.3 — Configure Vault (platform + seed KV)
 
+Run both scripts in order. Each reads **`VAULT_TOKEN` from your `.env`**.
+
 ```bash
 bash stages/stage-5-secrets-management/infra/vault/setup.sh
 bash stages/stage-5-secrets-management/infra/vault/seed-vault-secrets.sh
 ```
 
-| Script | Does | Does **not** |
-|---|---|---|
-| `setup.sh` | K8s auth, KV mount, policies, roles | Store app passwords in Git |
-| `seed-vault-secrets.sh` | `vault kv put` from `.env` `SEED_*` | Print secret values |
+**`setup.sh`** — prepares Vault for the cluster: Kubernetes auth, the KV secret store, policies, and roles so auth/ledger pods *can* fetch secrets later. It does not write your database passwords yet and nothing goes to Git.
 
-Both scripts read **`VAULT_TOKEN` from `.env` only**.
+**`seed-vault-secrets.sh`** — takes the `SEED_*` lines from `.env` and stores them in Vault at `clearledger/data/auth-service` and `clearledger/data/ledger-service`. It does not echo those values to the terminal.
+
+Re-running either script is safe for the lab.
 
 **Expected — `setup.sh` (tail):**
 
@@ -3792,8 +4013,6 @@ version            1
 ✓ Secrets stored at clearledger/data/auth-service and clearledger/data/ledger-service
 ```
 
-Re-running `setup.sh` / `seed-vault-secrets.sh` is safe (idempotent for the lab).
-
 **Verify metadata only** (no secret values printed):
 
 ```bash
@@ -3816,7 +4035,7 @@ updated_time            2026-06-01T15:31:53.538991153Z
 
 ### 5.4 — GitOps: update `clearledger-infra` (fixes ArgoCD OutOfSync)
 
-ArgoCD watches **`clearledger-infra`**, not this app repo. Stage 5 is a **manual Git surgery** — work slowly, verify after each step.
+ArgoCD deploys from your **`clearledger-infra`** GitHub repo — not from the main **`clearledger`** app repo where you are working now. You edit manifests here first, then copy the same changes to `clearledger-infra` so ArgoCD can sync them. Work slowly and verify after each sub-step.
 
 **5.4a — Update manifests in the app repo (`clearledger`)**
 
@@ -3835,7 +4054,7 @@ rm -f infra/manifests/auth-service/secret.yaml infra/manifests/ledger-service/se
 
 Open the file in your editor. In the `resources:` list:
 
-- **Delete** these two lines:
+- **Remove** the app secret entries — delete these two lines, or comment them out with `#` (both work; Kustomize ignores `#` lines):
   ```yaml
   - auth-service/secret.yaml
   - ledger-service/secret.yaml
@@ -3845,15 +4064,21 @@ Open the file in your editor. In the `resources:` list:
   - vault/rotation-cronjob.yaml
   ```
 
+Leave **`postgres/postgres-secret.yaml`** — that is Postgres bootstrap only, not app credentials.
+
 Save. Verify:
 
 ```bash
-grep secret.yaml infra/manifests/kustomization.yaml && echo "STOP: secrets still listed" || echo "OK"
+# Active (uncommented) app secret lines must be gone — postgres-secret is OK
+grep -E '^[[:space:]]*-[[:space:]]+(auth-service|ledger-service)/secret\.yaml' \
+  infra/manifests/kustomization.yaml && echo "STOP: app secrets still active" || echo "OK"
+
 grep vault/rotation-cronjob.yaml infra/manifests/kustomization.yaml
 grep vault.hashicorp infra/manifests/auth-service/deployment.yaml | head -1
+kustomize build infra/manifests >/dev/null && echo "OK: kustomize build"
 ```
 
-Expected: `OK`; rotation cronjob listed; first line shows `vault.hashicorp.com/agent-inject`.
+Expected: `OK`; rotation cronjob listed; first line shows `vault.hashicorp.com/agent-inject`; kustomize build succeeds.
 
 Commit in the **app** repo when ready: `git add infra/manifests && git commit -m "feat(stage-5): Vault deployments in canonical manifests"`.
 
@@ -3861,6 +4086,21 @@ Commit in the **app** repo when ready: `git add infra/manifests && git commit -m
 
 ```bash
 git clone https://github.com/YOUR_USERNAME/clearledger-infra.git /tmp/clearledger-infra
+```
+
+If clone fails with **`destination path '/tmp/clearledger-infra' already exists`** (you cloned in §1.3 or an earlier step), reuse that folder — do not clone again:
+
+```bash
+cd /tmp/clearledger-infra && git pull && cd -
+```
+
+Or start fresh: `rm -rf /tmp/clearledger-infra` then run `git clone` again.
+
+**Run the `cp` commands from the main `clearledger` app repo** — not from `/tmp/clearledger-infra`. Your shell prompt should say `clearledger`, not `clearledger-infra`. The source path `infra/manifests/...` only exists in the app repo.
+
+```bash
+cd ~/clearledger    # main app repo — adjust path if yours differs
+
 cp infra/manifests/auth-service/deployment.yaml /tmp/clearledger-infra/manifests/auth-service/
 cp infra/manifests/ledger-service/deployment.yaml /tmp/clearledger-infra/manifests/ledger-service/
 mkdir -p /tmp/clearledger-infra/manifests/vault
@@ -3900,30 +4140,7 @@ deleted:    manifests/auth-service/secret.yaml
 deleted:    manifests/ledger-service/secret.yaml
 ```
 
-**If your infra repo already has Stage 5** (nothing to commit), verify ArgoCD only:
-
-```bash
-kubectl get application clearledger -n argocd \
-  -o jsonpath='sync={.status.sync.status} health={.status.health.status}{"\n"}'
-# sync=Synced health=Healthy
-```
-
-If **OutOfSync**, hard-refresh and sync:
-
-```bash
-kubectl annotate application clearledger -n argocd argocd.argoproj.io/refresh=hard --overwrite
-argocd app sync clearledger --grpc-web --prune
-```
-
-Wait until:
-
-```bash
-kubectl get application clearledger -n argocd \
-  -o jsonpath='{.status.sync.status} {.status.health.status}{"\n"}'
-# Synced Healthy
-```
-
-**Do not `kubectl apply` deployments** if ArgoCD manages the cluster — `selfHeal` reverts manual changes. Git is the contract (Stage 2).
+After `git push`, ArgoCD will roll out Vault-enabled deployments automatically. **Continue to §5.5** — do not expect **Synced** yet; app secrets still in the cluster until you delete them there.
 
 **Common rollout failures:**
 
@@ -3934,6 +4151,7 @@ kubectl get application clearledger -n argocd \
 | Kyverno `containers/0` `runAsNonRoot` | Add `runAsNonRoot: true` on the **app** container `securityContext`, not only on `spec.securityContext` |
 | Pods stuck `1/1` (no sidecar) | Confirm `injector.enabled=true` and deployment has `vault.hashicorp.com/agent-inject: "true"` |
 | `permission denied` in vault-agent-init | Run `setup.sh` — K8s auth role not bound to service account |
+| ArgoCD **Sync failed** on `CronJob/vault-secret-rotation` | Kyverno blocked the job — `infra/manifests/vault/rotation-cronjob.yaml` must include `runAsNonRoot`, `allowPrivilegeEscalation: false`, `capabilities.drop: [ALL]`, and CPU/memory limits; push fix to `clearledger-infra` |
 
 ---
 
@@ -3983,6 +4201,36 @@ postgres-secret   Opaque   2      6d
 `postgres-secret` is **Postgres bootstrap only** — not app credentials. That stays until you harden Postgres separately.
 
 **If delete says `NotFound`** — secrets were already removed. Continue to §5.6.
+
+### 5.5b — ArgoCD should be Synced (after secret delete)
+
+**Run this after §5.5**, not right after §5.4. Before you delete app Secrets, **OutOfSync is normal** — Git no longer lists `auth-service-secret` / `ledger-service-secret`, but they still exist in the cluster until you delete them in the step above.
+
+```bash
+kubectl get application clearledger -n argocd \
+  -o jsonpath='sync={.status.sync.status} health={.status.health.status}{"\n"}'
+```
+
+**Before secret delete:** expect `sync=OutOfSync health=Healthy` or `Progressing` while Vault pods roll out — that is fine if auth/ledger are **2/2**.
+
+**After secret delete**, hard-refresh and sync if still OutOfSync:
+
+```bash
+kubectl annotate application clearledger -n argocd argocd.argoproj.io/refresh=hard --overwrite
+argocd app sync clearledger --grpc-web --prune
+```
+
+If sync says **another operation is already in progress**, wait a minute — ArgoCD auto-sync is already running.
+
+Wait until:
+
+```bash
+kubectl get application clearledger -n argocd \
+  -o jsonpath='{.status.sync.status} {.status.health.status}{"\n"}'
+# Synced Healthy
+```
+
+**Do not `kubectl apply` deployments** if ArgoCD manages the cluster — `selfHeal` reverts manual changes. Git is the contract (Stage 2).
 
 ---
 
@@ -4089,7 +4337,11 @@ If Vault injection or ArgoCD sync fails, see [troubleshooting.md — Vault Issue
 
 ### DevSecOps lesson — Stage 5
 
-**Secrets belong in a vault, not in YAML.** Stage 4 hardened *what runs*; Stage 5 removes *what attackers find in Git and etcd*. The migration pattern is: configure Vault → seed KV from a local `.env` once → deploy via GitOps without `secret.yaml` → delete K8s app Secrets → prove the app still works. Operational scripts configure the platform; they do not embed credentials. Rotation becomes updating Vault and letting the agent refresh files — not editing manifests in Git.
+**Secrets belong in a vault, not in YAML.** In Stage 4 you hardened what runs in the cluster. In Stage 5 you stop keeping credentials where attackers look first — in Git and in etcd-backed Kubernetes Secrets.
+
+Install Vault, load passwords into it once from a local `.env` file (never committed), then deploy through GitOps without `secret.yaml`. When pods are healthy, delete the old Kubernetes Secrets and confirm login still works. That proves the app reads from Vault, not from the cluster.
+
+Lab scripts only configure Vault — they do not contain real passwords. To rotate a secret, update Vault and let the agent refresh files on the pod. You do not change manifests in Git.
 
 **Save your VM before Stage 6.** After `make check-5` passes:
 
@@ -4104,69 +4356,88 @@ If the VM corrupts later: `make snapshots` → `make restore STAGE=5`. See [Savi
 
 ## Stage 6 — Runtime Security (Falco)
 
-> The pipeline secured what enters the cluster. Falco watches what happens inside.
+> Stages 1–5 secured what gets deployed and how secrets are stored. Stage 6 watches what happens inside running containers after they start.
 
-**Goal:** Understand what runtime security *detects* and *why* — then prove it by triggering an alert and reading it like an operator would.
+**Your goal** is to learn what runtime security catches and why it matters, then prove it by triggering a Falco alert and reading it the way an on-call engineer would.
 
-This stage is not “install Falco and move on.” You are learning a **gap in the stack**: everything before Stage 6 secures **what gets deployed**; Falco secures **what running software actually does**. That is the same problem space as incident response, forensics, and zero-trust — not just another Helm chart.
+CI, Kyverno, and Vault all act before or at pod startup. Falco fills the gap they leave open — it watches what running software actually does inside the container. That is the layer incident response and forensics care about, not just another chart to install.
 
 > **Am I ready for Stage 6?**
 >
-> - [ ] `make check-5` passes — Vault injecting secrets, app Secrets removed from Git/cluster
+> - [ ] `make check-5` passes — Vault is injecting secrets and app Secrets are gone from Git and the cluster
 > - [ ] Login and transactions still work at `http://clearledger.local`
-> - [ ] Platform pods stable (low RESTARTS — [platform stability](#platform-stability--from-stage-4-onward))
+> - [ ] Platform pods are stable with low restarts ([platform stability](#platform-stability--from-stage-4-onward))
 >
-> **Done when:** `make check-6` passes and you have triggered at least one Falco alert (§6.2 or §6.3).
-> **Then save:** `make snapshot STAGE=6` → `make snapshots` (confirm `clearledger.stage6`).
+> **You are done** when you have triggered at least one Falco alert (§6.2 or §6.3), applied network policies (§6.4), and `make check-6` passes (§6.5).
+>
+> **Then save your VM:** `make snapshot STAGE=6`, then `make snapshots` — confirm `clearledger.stage6` is in the list.
 
-### What you need to know first
+### Do the steps in this order
 
-Everything up to this point catches problems *before* they reach a running container — CI scans code, Kyverno blocks bad manifests, Vault removes credentials from Git. But what happens when a container is compromised at runtime? An attacker who exploits a vulnerability in your app might:
+Each step depends on the one before it. **Do not run `make check-6` until §6.4** — it checks network policies you have not applied yet.
 
-- Open a shell inside the container
-- Read sensitive files like `/etc/passwd` or `/etc/shadow`
-- Download tools or malware
-- Make unexpected network connections
+1. **§6.1** — install Falco, open `http://falco.local`, confirm custom rules loaded
+2. **§6.2** — run `make demo-6` and read a **Critical** shell alert in the UI (portfolio screenshot)
+3. **§6.3** — optional manual break-it scenarios if you want step-by-step control
+4. **§6.4** — apply network policies and confirm the app still works
+5. **§6.5** — run `make check-6`
 
-None of those actions involve creating new Kubernetes resources, so Kyverno will not see them. They are not code changes, so CI will not see them. You need something that watches what happens *inside running containers*.
+Start at **§6.1**. If anything fails, see [troubleshooting.md — Stage 6](troubleshooting.md#stage-6--runtime-security-falco).
 
-**Falco** is a runtime security tool that monitors system calls (syscalls) — the low-level operations every process uses to interact with the Linux kernel (opening files, spawning processes, making network connections). Falco uses **eBPF**, a Linux kernel technology that lets it observe syscalls with near-zero performance overhead, without modifying your containers.
+**Optional reading (skip if you want to install now):** [How Stage 6 fits the full stack](#how-stage-6-fits-the-full-stack-stages-16) — why Falco and netpol exist and how they differ from Stages 3–5.
 
-**Network policies** complement Falco: Falco *detects* suspicious activity; network policies *block* unauthorized pod-to-pod traffic. Apply them **only in Stage 6** — before Vault and GitOps are stable they break DNS and legitimate traffic. Manifests: `infra/deferred-by-stage/stage-6-runtime-security/netpol/` (not in `clearledger-infra` until you choose).
+### Stage 6 (read this if you feel lost)
 
-**Order matters:**
+**What you are doing:** Install a watcher (Falco) that alerts when something suspicious happens *inside* a running pod — like someone opening a shell. Then prove it works by triggering an alert on purpose. Then lock down pod-to-pod traffic (network policies). Then run a health check.
 
-```text
-Install Falco → custom rules → ingress → break-it scenarios → network policies → verify app still works
+**You do not need to understand every row in the Falco UI.** Most rows are background noise. You only need to find **one** alert you caused, or confirm it in the terminal.
+
+**Copy-paste path (minimum — about 30 minutes):**
+
+```bash
+# 1. Install
+bash stages/stage-6-runtime-security/scripts/install-falco.sh
+kubectl get pods -n falco    # falco-* should be 2/2 Running
+
+# 2. Confirm rules loaded
+kubectl logs -n falco -l app.kubernetes.io/name=falco -c falco --tail=200 \
+  | grep 'rules.d/clearledger_rules'
+# expect: schema validation: ok
+
+# 3. Trigger demo + read terminal confirmation
+make demo-6
+# expect: ✓ Runtime detection confirmed
+
+# 4. Prove the alert exists (UI optional)
+kubectl logs -n falco -l app.kubernetes.io/name=falco -c falco --tail=500 \
+  | grep 'Shell Spawned'
+# expect: pod=auth-service-... cmd=sh -c id && exit
+
+# 5. Network policies + checkpoint + health check
+kubectl apply -f infra/deferred-by-stage/stage-6-runtime-security/netpol/network-policies.yaml
+curl -s -o /dev/null -w "HTTP %{http_code}\n" http://clearledger.local/   # expect 200
+make check-6
 ```
 
-### How Stage 6 fits the full stack (Stages 1–6)
+Open **`http://falco.local`** (login `admin` / `admin`) when you want a screenshot for your portfolio — not because the lab requires you to decode the UI.
 
-Each earlier stage guards a **different moment**. Stage 6 is the first that watches **inside a running pod**:
+**“I feel lost” — common moments**
 
-| Stage | Layer | When it acts | Example threat it catches |
-|---|---|---|---|
-| **3 — CI gates** | Before merge / build | `git push` | Secret in code, CVE in image, bad Dockerfile |
-| **4 — Kyverno** | Pod creation (admission) | `kubectl apply` / ArgoCD sync | Root container, unsigned image, no limits |
-| **5 — Vault** | Secret storage & injection | Pod startup | Password in Git or etcd; credentials only in Vault KV |
-| **6 — Falco** | **Inside the running container** | After pod is Running | Shell spawn, read `/etc/passwd`, wget at runtime |
-| **6 — NetworkPolicy** | Pod-to-pod traffic | Every connection | ledger → notification direct call **blocked** |
+| You think… | What is actually true |
+|---|---|
+| “The UI shows 200+ Critical alerts — I broke something” | No. **`postgres-0`** reads `/etc/passwd` on a loop and Falco flags it. Ignore those rows. |
+| “I cannot find my demo alert” | Search the UI with **Cmd+F → `Shell Spawned`**, or use the **terminal grep** in step 4 above. If grep shows `auth-service` + `id && exit`, you passed. |
+| “`make check-6` failed on NetworkPolicy” | You ran the check **before §6.4**. Apply netpol first, then re-run. |
+| “§6.3 vs §6.2 — which do I run?” | Run **`make demo-6` (§6.2)** only. §6.3 is the same attacks as manual commands — skip it if demo-6 already worked. |
+| “What is Shell Spawned?” | Falco saw a **`sh` process start** inside `auth-service`. That is suspicious in production; in the lab, **you** caused it on purpose. |
+| “Scenario 4 hangs or exit 137” | Old **`wget`** command + **Terminating** pod. Skip Scenario 4 or use the **python3** command in §6.4. Checkpoint + `make check-6` is enough. |
 
-```text
-git push
-  → [Stage 3: Gitleaks, Trivy, Cosign …]     ← code & image
-  → [Stage 1–2: CI updates infra → ArgoCD]     ← desired state
-  → [Stage 4: Kyverno admission]               ← bad manifest never runs
-  → Pod starts
-  → [Stage 5: Vault agent injects secrets]     ← no creds in YAML
-  → App running
-  → [Stage 6: Falco eBPF] watches syscalls     ← NEW: in-container behavior
-  → [Stage 6: NetworkPolicy] filters traffic   ← NEW: east-west firewall
-```
+**What “done” looks like**
 
-**Beginner takeaway:** Kyverno asked “Is this pod *allowed to be created*?” Falco asks “What is this pod *doing right now*?” Network policies ask “Who is this pod *allowed to talk to*?” All three are needed.
-
-**What Stage 6 does *not* replace:** Falco does not scan source code (Stage 3) or block bad manifests at create time (Stage 4). If you skip Stages 3–5, Falco still alerts — but you already shipped vulnerable code, unsigned images, and secrets in Git.
+- Terminal after `make demo-6`: **`✓ Runtime detection confirmed`**
+- Terminal grep: **`Shell Spawned`** + **`auth-service`** + **`id && exit`**
+- After netpol: **`make check-6`** → **All checks passed**
+- Optional portfolio: screenshot of that shell alert (or the grep output)
 
 ---
 
@@ -4180,7 +4451,13 @@ This runs `helm upgrade --install` with `modern_ebpf`, enables Falcosidekick + W
 
 **If Falco is already installed**, the script is safe to re-run (upgrade).
 
-**Expected — Falco pods:**
+**Verify Falco pods:**
+
+```bash
+kubectl get pods -n falco
+```
+
+**Expected output:**
 
 ```text
 NAME                                      READY   STATUS    RESTARTS   AGE
@@ -4189,6 +4466,8 @@ falco-falcosidekick-...                   1/1     Running   0          2m
 falco-falcosidekick-ui-...                1/1     Running   0          2m
 falco-falcosidekick-ui-redis-0            1/1     Running   0          2m
 ```
+
+The Falco DaemonSet should show **2/2 Running**. Sidekick, UI, and Redis pods should each show **1/1 Running**. Pod name suffixes on your cluster will differ from the example.
 
 Open **`http://falco.local`** — Falcosidekick UI. Log in with the chart defaults:
 
@@ -4205,115 +4484,37 @@ kubectl get secret falco-falcosidekick-ui -n falco \
 # admin:admin
 ```
 
-#### Reading the Falcosidekick UI (first login)
+#### Falcosidekick UI — quick orientation
 
-After login you land on the **Events** tab — a table of Falco detections from the last 24 hours. The UI can look busy even before you run any break-it scenario. Use this guide so you know what matters.
+After login you land on the **Events** tab. The table can look busy before you run any demo — that is normal.
 
-**1. Know the columns**
+- **Rule** — detection name (what fired)
+- **Priority** — **Critical** / **Warning** / **Notice** (focus on Critical and Warning for this lab)
+- **Output** — pod name, file, or command details
+- **Tags** — look for `clearledger` on lab alerts
 
-| Column | What to read |
-|---|---|
-| **Time** | When it happened — newest at top after refresh |
-| **Priority** | How serious Falco rated it (see below) |
-| **Rule** | The detection name — this is the headline |
-| **Output** | One-line detail: process, file, connection, pod name |
-| **Tags** (right) | Extra context — look for `clearledger` on lab alerts |
+**Background noise you can ignore:** **Notice** rows from ArgoCD; **Critical** **Sensitive File Read** rows from **`postgres-0`** reading `/etc/passwd` (repeats every few seconds). Your demo alert is different — see §6.2.
 
-**2. Priority levels (focus top-down)**
-
-| Priority | Meaning in this lab |
-|---|---|
-| **Critical** | Act on these first — shell spawn, sensitive file read, vault secrets tampering |
-| **Warning** | Suspicious but not always malicious — outbound connections, package managers |
-| **Notice** / **Info** | Often **background noise** — not what the break-it scenarios target |
-
-**3. Background noise vs alerts you caused**
-
-Right after install you may already see events such as **Contact K8S API Server From Container** with process `argocd-application-controller` and priority **Notice**. That is **normal**: ArgoCD pods talk to the Kubernetes API continuously. You did not break anything.
-
-**Ignore for Stage 6 demos:**
-
-- Rules whose **Output** mentions `argocd`, `kube-system`, or `falco` namespace pods
-- **Notice**-level stock Falco rules you did not trigger on purpose
-
-**Look for after you run §6.2 (demo) or §6.3 (manual scenarios)** (custom ClearLedger rules):
-
-| Rule name | Priority | You triggered it by… |
-|---|---|---|
-| **Shell Spawned in ClearLedger Container** | Critical | `kubectl exec … /bin/sh` (Scenario 1) |
-| **Sensitive File Read in ClearLedger** | Critical | `kubectl exec … cat /etc/passwd` (Scenario 2) |
-| **Package Manager Executed in ClearLedger Container** | Warning | `wget` / `curl` in exec (Scenario 3) |
-| **Unexpected Outbound Connection from ClearLedger** | Warning | Outbound call from app container (Scenario 3) |
-| **Unauthorized Write to Vault Secrets Directory** | Critical | Writing to `/vault/secrets` (advanced) |
-
-Custom rules include the tag **`clearledger`** in the Tags column. If you filter or scan for that tag, lab alerts stand out from cluster baseline noise.
-
-**4. Simple workflow (do this once)**
-
-1. Open **`http://falco.local`** and log in (`admin` / `admin`).
-2. Note any existing **Notice** events — baseline only; do not chase them yet.
-3. Run **`make demo-6`** (§6.2) or **Scenario 1** from §6.3 in your terminal.
-4. Wait **5–10 seconds**, then **refresh** the Events page.
-5. Find a new row: **Priority = Critical**, **Rule = Shell Spawned in ClearLedger Container**, **Output** contains `auth-service` and your pod name.
-6. Expand or read **Output** — it should show `cmd=sh -c id && exit` (proof Falco saw the exec).
-
-**5. If you only see Notice / ArgoCD events**
-
-- Confirm you ran the exec with **`-c auth-service`** (not the vault-agent sidecar).
-- Confirm custom rules loaded: `schema validation: ok` in Falco logs (command below).
-- Try Falco pod logs if the UI is slow: `kubectl logs -n falco -l app.kubernetes.io/name=falco -c falco --tail=50`
-
-**6. What “good” looks like for the portfolio**
-
-Screenshot a **Critical** row for **Shell Spawned in ClearLedger Container** or **Sensitive File Read in ClearLedger** — not the ArgoCD **Notice** rows. That shows runtime detection on *your app*, not generic cluster chatter.
-
-**Where alerts appear (read this before the break-it scenarios):**
-
-| Where | What you use it for |
-|---|---|
-| **`http://falco.local`** | Browse recent alerts (easiest for beginners) — open after each scenario |
-| **Falco pod logs** | Raw engine output if UI is empty: `kubectl logs -n falco -l app.kubernetes.io/name=falco -c falco --tail=50` |
-| **`make check-6`** | Confirms Falco + netpol installed — does not prove alerts fired |
-
-In the UI, use the workflow in §6.1 (“Reading the Falcosidekick UI”). After each scenario, refresh and look for **Critical** / **Warning** rows whose rule names contain **ClearLedger** — not **Notice** rows from ArgoCD or other cluster components.
-
-**Verify custom rules loaded:**
+**Verify custom rules loaded** (do this before §6.2):
 
 ```bash
+kubectl get pods -n falco                                    # Falco pod 2/2 Running
 kubectl get configmap clearledger-falco-rules -n falco
-# NAME                      DATA   AGE
-# clearledger-falco-rules   1      2m
-
-kubectl logs -n falco -l app.kubernetes.io/name=falco -c falco --tail=30 | grep clearledger_rules
+kubectl logs -n falco -l app.kubernetes.io/name=falco -c falco --tail=200 \
+  | grep 'rules.d/clearledger_rules'
 ```
 
-**Expected:**
+**Expected:** `clearledger_rules.yaml | schema validation: ok`
 
-```text
-/etc/falco/rules.d/clearledger_rules.yaml | schema validation: ok
-```
+An empty grep with `--tail=30` alone is **not** a failure — use `--tail=200`. If you see `LOAD_ERR_COMPILE_CONDITION`, see [troubleshooting.md — Stage 6](../docs/troubleshooting.md#stage-6--runtime-security-falco).
 
-If you see `LOAD_ERR_COMPILE_CONDITION` instead, the custom rule YAML uses an invalid field — see [troubleshooting.md — Stage 6](../docs/troubleshooting.md#stage-6--runtime-security-falco).
-
-**✋ Hands-on checkpoint — Falco is running AND your custom rules loaded**
-
-The classic silent failure: Falco pods run, but `clearledger_rules.yaml` never loaded via Helm — so your custom detections never fire.
-
-```bash
-kubectl get pods -n falco
-kubectl get configmap clearledger-falco-rules -n falco
-kubectl logs -n falco -l app.kubernetes.io/name=falco -c falco --tail=200 | grep clearledger_rules | head
-```
-
-Expected: the Falco DaemonSet pod shows `2/2 Running`; ConfigMap `clearledger-falco-rules` exists; logs include `clearledger_rules.yaml | schema validation: ok`. An empty grep means your custom rules did **not** load.
-
-If you skip this, every break-it scenario in §6.3 looks like it passed (no alert) when really Falco never had your rules.
+If rules did not load, §6.2 and §6.3 will look like they passed when nothing fired.
 
 ---
 
-### 6.2 — Guided demo (see alerts appear — start here)
+### 6.2 — Guided demo (`make demo-6`)
 
-**Recommended for first-time users.** Run this **after** §6.1 (Falco installed and UI reachable). The script simulates post-exploit behavior, triggers a real detection, and tells you how to read the alert in the UI.
+Run this **after** §6.1 (Falco installed, rules verified, UI opens at `http://falco.local`).
 
 ```bash
 make demo-6
@@ -4350,76 +4551,85 @@ The script picks the pod name automatically (`-c auth-service` targets the app c
 
 **Tip:** Split screen — terminal on the left, Events tab on the right. After step 9, **refresh the browser**; a new **Critical** row should appear at the top.
 
-#### After the demo — read your first alert (do not skip this)
+#### After the demo — find YOUR alert in a noisy UI
 
-When the terminal prints `✓ Runtime detection confirmed`, **refresh the Events tab** and find the new row at the top. You are not checking a checkbox — you are practicing **incident triage** on a real detection.
+When the terminal prints `✓ Runtime detection confirmed`, refresh the Events tab. The UI may show **hundreds** of Critical rows — most are **postgres-0** reading `/etc/passwd` every few seconds. That is normal baseline noise, not your demo.
 
-**What you just simulated (the attack story):**
+**What does “Shell Spawned” mean?**
 
-An attacker exploited a bug in `auth-service` (SQL injection, RCE, etc.). They did not change Git or create new pods — Kyverno and CI would never see it. They ran a shell inside the already-running container to see who they are (`id`) before going further. **Falco saw the syscall**, matched your custom rule, and recorded an event.
+A **shell** is a command interpreter — programs like `sh`, `bash`, or `dash` that run commands you type (or that a script passes in). **Spawned** means a **new process started** inside the container.
 
-**What Falco actually observed (the system layer):**
+Your app container (`auth-service`) is meant to run the API — not open an interactive shell. When `make demo-6` runs `kubectl exec … /bin/sh -c 'id && exit'`, Falco sees a new `sh` process start inside that pod. The rule **Shell Spawned in ClearLedger Container** fires because:
 
-| Layer | What happened |
+- a shell binary (`sh`, `bash`, etc.) started (`spawned_process`)
+- it happened inside a container in the `clearledger` namespace
+
+In production, that often means someone got code execution — command injection, a compromised dependency, or an unauthorized `kubectl exec`. That is why the alert is **Critical**.
+
+**What you want (memorize this):**
+
+| Column | Your demo value |
 |---|---|
-| **Linux kernel** | A new process (`sh`) was created inside a container cgroup |
-| **eBPF probe** | Falco’s driver saw `spawned_process` without a container restart |
-| **Rule engine** | Condition matched: namespace `clearledger` + shell binary |
-| **Enrichment** | k8s-metacollector attached pod name `auth-service-…` |
-| **Falcosidekick** | Event stored and shown in the UI |
+| **Rule** | **Shell Spawned in ClearLedger Container** |
+| **Pod** (in Output) | **auth-service-…** (not `postgres-0`) |
+| **Command** (in Output) | **`cmd=sh -c id && exit`** |
 
-**What the alert row looks like (Critical vs Notice):**
+**Not** `Sensitive File Read` + `postgres-0` — that is postgres background noise.
 
-Before the demo you may see rows like this — **Notice**, rule **Contact K8S API Server From Container**, process `argocd-applicat`:
+**Method 1 — Browser search (fastest)**
 
-```text
-Priority: Notice          ← lower severity, often baseline cluster activity
-Rule:     Contact K8S API Server From Container
-Output:   … process=argocd-applicat … k8smeta_ns_name=argocd
-Tags:     mitre_discovery, k8s, network
+1. Open **`http://falco.local`** → **Events** tab.
+2. Press **Cmd+F** (Mac) or **Ctrl+F** (Windows/Linux).
+3. Search **`Shell Spawned`**. If nothing matches, try **`auth-service`** or **`sh -c id`**.
+
+The browser jumps to the matching row.
+
+**Method 2 — Filter by tag**
+
+Your demo row has tag **`shell`**. Postgres noise rows have tag **`file-access`**. If the UI shows tag filters, pick **`shell`**.
+
+**Method 3 — Terminal (always works)**
+
+Skip the UI and pull the exact alert:
+
+```bash
+kubectl logs -n falco -l app.kubernetes.io/name=falco -c falco --tail=500 \
+  | grep 'Shell Spawned'
 ```
 
-After `make demo-6` you should see a **different** row — **Critical**, rule **Shell Spawned in ClearLedger Container**:
+Look for `pod=auth-service-…` and `cmd=sh -c id && exit`. That proves the demo worked even when the UI is flooded.
 
-```text
-Priority: Critical        ← act on this first
-Rule:     Shell Spawned in ClearLedger Container
-Output:   … pod=auth-service-5756d9fcb9-bmdlr cmd=sh -c id && exit
-          k8smeta_ns_name=clearledger
-Tags:     clearledger, shell, attack
-```
+**Method 4 — Re-run demo, then narrow time**
 
-**Field-by-field — what to look at on YOUR alert:**
+1. Note the current time.
+2. Run **`make demo-6`** again.
+3. In the UI, set the time range to **Last 15 minutes** (or **Last 1 hour**).
+4. Search **`Shell Spawned`** or **`auth-service`**.
 
-| Field | What to verify | Why it matters |
-|---|---|---|
-| **Priority** | `Critical` (red badge) | Triage order — shells in prod apps are high risk |
-| **Rule** | Contains `ClearLedger` | Your custom policy fired, not generic stock noise |
-| **Time** | Within last minute | Confirms this event is from *your* demo, not old ArgoCD rows |
-| **Output → `pod=`** | `auth-service-…` | Which workload is compromised or being investigated |
-| **Output → `cmd=`** | `sh -c id && exit` | Exact command — matches what you ran; proof of detection |
-| **Output → `k8smeta_ns_name=`** | `clearledger` | Scoped to your app namespace |
-| **Tags** | `clearledger`, `shell`, `attack` | Filtering and routing in Stage 7 (Grafana/Loki) |
+**Cheat sheet**
 
-**Questions an operator asks (practice saying these out loud):**
+| You see this | Meaning |
+|---|---|
+| `Sensitive File Read` + `postgres-0` + `/etc/passwd` | Ignore — postgres baseline |
+| `Shell Spawned` + `auth-service` + `sh -c id && exit` | **Your demo — screenshot this** |
 
-1. **Is this expected?** — No. Production app containers should not spawn interactive shells unless someone is debugging with approval.
-2. **Who did it?** — In the lab, *you* via `kubectl exec`. In a real incident, trace `user=` / audit logs / who has `exec` RBAC.
-3. **What stage failed?** — Not Kyverno (pod was compliant). Runtime behavior escaped pre-deploy controls.
-4. **What next?** — Snapshot the event, check other alerts on the same pod, review recent deploys, consider isolating the pod (netpol / scale-down) — Stage 6.4 adds *prevention* after you have seen *detection*.
+**What the story means:** You ran a shell inside `auth-service` — the same thing an attacker would do after exploiting the app. Kyverno and CI never saw it because nothing changed in Git or in the pod spec. Falco saw the `sh` process start inside the running container and fired your custom rule.
 
-**What you should *not* chase in this lab:**
-
-- **Notice** rows from `argocd`, `kube-system`, or `falco` — normal GitOps/API traffic
-- Event count going up from ArgoCD alone — only your **Critical ClearLedger** row proves the demo worked
-
-**Portfolio screenshot:** Capture the **Critical** shell alert row with `cmd=sh -c id && exit` visible — not the ArgoCD Notice rows.
+**Portfolio screenshot:** the **Shell Spawned** row on **auth-service** with `cmd=sh -c id && exit` visible — not the postgres Sensitive File Read rows.
 
 ---
 
-### 6.3 — Break-it scenarios (manual)
+### 6.3 — Break-it scenarios (manual, optional)
 
-Each simulates attacker behavior. After each command, check **`http://falco.local`** or Falco pod logs. Use these if you prefer step-by-step control instead of `make demo-6`.
+Same detections as §6.2, but you run each command yourself. Skip this section if you already completed `make demo-6`.
+
+| Rule name | You trigger it by… |
+|---|---|
+| **Shell Spawned in ClearLedger Container** | Scenario 1 — `kubectl exec … /bin/sh` |
+| **Sensitive File Read in ClearLedger** | Scenario 2 — `cat /etc/passwd` |
+| **Package Manager / Outbound connection** | Scenario 3 — `wget` or `curl` |
+
+After each command, refresh **`http://falco.local`** or use the find methods in §6.2.
 
 **Scenario 1 — Shell in a running pod (command injection simulation):**
 
@@ -4471,24 +4681,20 @@ May fire **Package manager executed** and/or **Unexpected outbound connection** 
 
 ### 6.4 — Apply network policies (zero-trust segmentation)
 
-Network policies run **after** Falco demos so Stages 1–5 stay debuggable first (netpol too early breaks DNS and breaks the app — you saw that in Stage 2 if `netpol/` was in `clearledger-infra`).
+Network policies run **after** Falco demos (§6.2 / §6.3). **`make check-6` includes netpol checks — run it only after this section.**
+
+Network policies are a **firewall between pods**. `default-deny-all` blocks everything; each `allow-*` policy opens specific paths (auth → postgres, ledger → auth, etc.). Falco **detects** bad behavior; netpol **blocks** traffic that should not happen.
+
+**Apply:**
 
 ```bash
 kubectl apply -f infra/deferred-by-stage/stage-6-runtime-security/netpol/network-policies.yaml
 kubectl get networkpolicy -n clearledger
 ```
 
-**Expected:**
+**Expected:** seven policies — `default-deny-all` plus six `allow-*` (`auth-service`, `ledger-service`, `notification-service`, `postgres`, `redis`, `frontend`).
 
-```text
-NAME                         POD-SELECTOR               AGE
-default-deny-all             <none>                     10s
-allow-auth-service           app=auth-service           10s
-allow-ledger-service         app=ledger-service         10s
-allow-notification-service   app=notification-service   10s
-```
-
-**Verify the app still works** (ingress + allowed east-west paths only):
+**Verify the app still works:**
 
 ```bash
 curl -s http://clearledger.local/auth/health | jq .
@@ -4498,23 +4704,7 @@ curl -s http://clearledger.local/notifications/health | jq .
 # {"status":"ok",...}
 ```
 
-**Scenario 4 — blocked cross-service traffic (optional):**
-
-```bash
-kubectl exec -n clearledger \
-  $(kubectl get pod -n clearledger -l app=ledger-service -o name | head -1) \
-  -c ledger-service -- sh -c "wget -q http://notification-service/ -O - --timeout=5" 2>&1
-# Expected: wget: download timed out  OR  Connection refused
-# NetworkPolicy default-deny-all + no allow rule for ledger → notification
-```
-
-**How this connects:** Falco **detected** the shell in §6.2/§6.3; netpol **prevents** ledger from reaching notification without going through allowed paths. Detection + prevention together.
-
-If notification health fails after netpol, see [troubleshooting.md — Stage 6](../docs/troubleshooting.md#stage-6--runtime-security-falco).
-
-**✋ Hands-on checkpoint — network policy locked down traffic without breaking the app**
-
-Applying a NetworkPolicy is the #1 way to silently break auth→Postgres.
+**Checkpoint (required)** — proves netpol did not break the real app:
 
 ```bash
 kubectl get networkpolicy -n clearledger
@@ -4522,13 +4712,49 @@ curl -s -o /dev/null -w "%{http_code}\n" http://clearledger.local/
 kubectl get pods -n clearledger --field-selector=status.phase!=Running
 ```
 
-Expected: policies listed (`default-deny-all`, `allow-auth-service`, `allow-postgres`, and the other Stage 6 allows); HTTP `200`; the last command prints **nothing**. If auth/ledger start restarting after the policy, your egress rule is too strict — fix it before continuing.
+| Result | Meaning |
+|---|---|
+| Seven policies listed | Netpol applied |
+| `200` from curl | Users can still reach the app through ingress |
+| Third command prints **nothing** | No crashed pods |
 
-If you skip this, auth-service silently loses Postgres, pods restart-loop, and you will blame Falco or Vault when the cause is the policy.
+If auth or ledger start restarting after netpol, egress rules are too strict — see [troubleshooting.md — Stage 6](../docs/troubleshooting.md#stage-6--runtime-security-falco).
+
+**Scenario 4 — blocked cross-service traffic (optional)**
+
+Skip if the checkpoint passed and you plan to run `make check-6`. This proves ledger **cannot** call notification directly (no allow rule for that path). **Failure to connect is success.**
+
+**Do not use the old `wget` one-liner** — the ledger image has no `wget`/`curl`, and `head -1` can pick a **Terminating** pod (exec hangs or exit **137**).
+
+```bash
+LEDGER_POD=$(kubectl get pods -n clearledger -l app=ledger-service --no-headers \
+  | awk '$2=="2/2" && $3=="Running" {print $1; exit}')
+
+echo "Using pod: $LEDGER_POD"
+
+kubectl exec -n clearledger "$LEDGER_POD" -c ledger-service -- python3 -c "
+import urllib.request
+try:
+    urllib.request.urlopen('http://notification-service/', timeout=5)
+    print('UNEXPECTED: connection succeeded')
+except Exception as e:
+    print('BLOCKED (expected):', e)
+"
+```
+
+**Expected:**
+
+```text
+BLOCKED (expected): <urlopen error timed out>
+```
+
+or `Connection refused` — **not** `UNEXPECTED: connection succeeded`.
 
 ---
 
-### 6.6 — Health check
+### 6.5 — Health check
+
+Run this **after §6.4** (network policies). It confirms Falco, custom rules, and netpol are installed — it does **not** prove an alert fired (that is §6.2).
 
 ```bash
 make check-6
@@ -4552,16 +4778,28 @@ All checks passed. Ready for the next stage.
 
 ---
 
+<a id="how-stage-6-fits-the-full-stack-stages-16"></a>
+
+### How Stage 6 fits the full stack (optional reading)
+
+Each stage guards a different point in the lifecycle. Stages 1 through 5 work before or during pod startup. Stage 6 watches what happens **inside** a container that is already running.
+
+**Stage 3 — CI** catches bad code and images on `git push`. **Stage 4 — Kyverno** blocks bad pods at admission. **Stage 5 — Vault** injects secrets at startup. **Stage 6 — Falco** watches syscalls after the pod is running (shell spawns, sensitive file reads). **Stage 6 — Network policies** filter pod-to-pod traffic.
+
+Three different questions: Kyverno asks whether this pod may be created. Falco asks what the pod is doing right now. Network policies ask who the pod may talk to. Falco does not replace CI or Kyverno — if you skip Stages 3–5, Falco can still alert, but you already shipped vulnerable code and secrets in Git.
+
+---
+
 ### Stage 6 complete — done checklist (move to Stage 6.5 / 7)
 
 | # | Check | How to verify |
 |---|---|---|
 | 1 | Falco running | `kubectl get pods -n falco` — DaemonSet `2/2` |
-| 2 | Custom rules loaded | `kubectl get configmap clearledger-falco-rules -n falco` |
-| 3 | Shell alert fired **and you read it** | `make demo-6` → Critical row with `cmd=sh -c id && exit`, pod `auth-service-…`, tags `clearledger` — see §6.2 “After the demo” |
-| 4 | Network policies applied | `kubectl get networkpolicy -n clearledger` — four policies |
+| 2 | Custom rules loaded | `kubectl logs -n falco -l app.kubernetes.io/name=falco -c falco --tail=200 \| grep rules.d/clearledger` |
+| 3 | Shell alert fired **and you read it** | `make demo-6` → Critical row with `cmd=sh -c id && exit`, pod `auth-service-…` — §6.2 |
+| 4 | Network policies applied | `kubectl get networkpolicy -n clearledger` — §6.4 |
 | 5 | App still healthy | `curl` auth + notification health return 200 |
-| 6 | Health check | `make check-6` green |
+| 6 | Health check | `make check-6` green — §6.5 |
 
 **Recommended for portfolio:** screenshots of shell + sensitive-file alerts in Falco UI.
 
@@ -4583,12 +4821,21 @@ All checks passed. Ready for the next stage.
 
 **Detection at runtime closes the last gap on the node.** CI and Kyverno guard the path in; Vault guards credentials at rest in Git/etcd; Falco watches what processes *do* after a pod is running. Network policies add **prevention** while Falco adds **detection** — both are normal in regulated environments. The break-it scenarios produce audit evidence: named rules, pod, container, and command — exactly what you need when triaging a real incident.
 
-**Save your VM before Stage 6.5 or Stage 7.** After `make check-6` passes:
+**Save your VM before optional Stage 6.5 (Chaos) or Stage 7.** After §6.5 (`make check-6`) passes:
 
 ```bash
 make snapshot STAGE=6
 make snapshots    # must show clearledger.stage6 — do not skip
 ```
+
+**What next?**
+
+```bash
+make snapshot STAGE=6
+make snapshots
+```
+
+Then go to **[Stage 7 — Observability](#stage-7--security-observability)**. Stage 6.5 (Litmus chaos) is optional — skip it unless you want resilience portfolio depth.
 
 If the VM corrupts later: `make snapshots` → `make restore STAGE=6`. See [Saving your progress](#saving-your-progress).
 
@@ -4596,258 +4843,153 @@ If the VM corrupts later: `make snapshots` → `make restore STAGE=6`. See [Savi
 
 ## Stage 6.5 — Chaos Engineering (Optional)
 
-> Falco detects threats. Chaos engineering proves you **survive** failure.
+> **Most learners skip this.** Go straight to [Stage 7](#stage-7--security-observability) after `make snapshot STAGE=6`. Nothing in Stages 7–8 requires Litmus.
 
-**Goal:** Understand the difference between **detection** and **resilience**, then prove auth-service stays available when a pod is killed.
+### Skip to Stage 7
 
-> **Optional — you can skip to Stage 7.** Stage 6.5 is portfolio/interview depth, not required for Stages 7–8. If you are time-limited or your laptop is under memory pressure, skip this entire stage and continue at [Stage 7](#stage-7--security-observability).
->
-> **Fast path:** `make check-6` passes → jump to Stage 7.
->
-> **Full path — Am I ready for Stage 6.5?**
->
-> - [ ] `make check-6` passes — Falco installed and alerting
-> - [ ] `auth-service` pods stable (run `make fix-65-prereqs` if restarts are high — §6.5.0)
-> - [ ] ~1 hour for Litmus install + one chaos experiment
->
-> **Done when:** `make check-65` passes (or you deliberately skip and note it in your portfolio).
-> **Then save:** `make snapshot STAGE=65` → `make snapshots` (confirm `clearledger.stage65`).
-
-**Why the Litmus UI looked empty:** ChaosCenter is a **control plane**. It does not know about your cluster until an **agent** (subscriber pod) registers. Install now connects the agent automatically; you then **run chaos from the UI** while watching the terminal.
-
-**Path:**
+You are done with the required lab path when Stage 6 passes:
 
 ```bash
-make fix-65-prereqs
-export LITMUS_PASSWORD='your-password'   # only if you changed it from default litmus
-bash stages/stage-6.5-chaos-engineering/scripts/install-litmus.sh
-# macOS:        open http://litmus.local
-# Linux/WSL2:   xdg-open http://litmus.local
-# → follow §6.5.1c (navigate) + §6.5.2 (ChaosHub → Launch Experiment)
-# → optional §6.5.3 (make demo-65 — same test from terminal)
+make check-6
+make snapshot STAGE=6
+make snapshots
 ```
 
-| Section | Content |
-|---------|---------|
-| [§6.5.0](#650--before-you-start-fix-auth-service-restarts) | `make fix-65-prereqs` — auth 2/2 Ready |
-| [§6.5.1](#651--install-litmuschaos-operator-ui-cluster-connection) | One install script + expected pods |
-| [§6.5.1c](#651c--how-to-navigate-the-litmus-ui-read-before-you-click) | Sidebar, status badges, click order |
-| [§6.5.1d](#651d--why-infrastructure-shows-pending) | Fix **PENDING** infrastructure |
-| [§6.5.2](#652--how-to-use-chaoshub-and-run-your-first-chaos-experiment) | **ChaosHub → Pod Delete → Launch Experiment** + terminals |
-| [§6.5.3](#653--same-experiment-from-the-terminal-make-demo-65) | `make demo-65` (YAML path) |
-| [§6.5.3a](#653a--real-output-examples-verified-on-the-lab-cluster) | Real terminal output samples |
-
-This stage is not “install Litmus and move on.” You deliberately kill a pod, watch health stay **200**, and watch Kubernetes recover — in the **UI and terminal together**.
-
-### What you need to know first
-
-| Question | Stage 6 (Falco) | Stage 6.5 (Chaos) |
-|---|---|---|
-| Did something bad happen? | Yes — alerts on shells, file reads | Not the focus |
-| Did the **service stay up** when a pod died? | No — Falco does not answer this | **Yes — this is the point** |
-| Did the system **recover** automatically? | No | **Yes — measure MTTR** |
-
-**Chaos engineering** deliberately injects controlled failures (pod kill, latency, memory pressure) and you observe:
-
-1. **Availability** — do users still get HTTP 200 during the failure?
-2. **Recovery** — does Kubernetes recreate the pod?
-3. **Blast radius** — does one broken pod take down the whole app?
-
-**LitmusChaos** runs experiments defined as Kubernetes YAML (`ChaosEngine`). The operator creates a short-lived **runner pod** that executes the failure (e.g. delete one pod) while you watch health checks and `kubectl get pods`.
-
-**Why this matters for DevOps:** You already proved security controls (Stages 3–6). Regulators and DORA Pillar 3 also ask: *did you test that the system survives failure?* This stage produces that evidence.
-
-### How Stage 6.5 fits the stack
-
-```text
-Stage 6 Falco     → "We saw suspicious behavior"
-Stage 6.5 Chaos   → "We killed a pod and login still worked"
-Stage 7 Grafana   → "We can graph MTTR and error rates over time"
-```
-
-**Kyverno interaction (important):** Stage 4 policies block non-compliant pods in `clearledger`. Litmus runner pods do not pass those checks. Therefore **ChaosEngine YAML lives in the `litmus` namespace** but **targets** apps in `clearledger` via `spec.appinfo.appns`. This is a real-world pattern: platform tools run in a platform namespace.
+Open [Stage 7](#stage-7--security-observability) — no Litmus install needed.
 
 ---
 
-### 6.5.0 — Before you start (fix auth-service restarts)
+### Only continue below if you want chaos/resilience (~1 hour)
 
-Chaos kills pods. **Replacement pods must start cleanly** or the lab becomes “debugging CrashLoopBackOff” instead of learning resilience.
+**What you will do:** Install **LitmusChaos**, delete one `auth-service` pod on purpose, and prove `/auth/health` stays **200** while Kubernetes replaces the pod.
 
-**Symptoms:** `auth-service` **1/2 Ready**, **CrashLoopBackOff**, many ReplicaSets, ArgoCD **503**, `connection to postgres timed out` in logs.
+**What Litmus is (first time here):** A chaos tool with a web UI at `http://litmus.local`. Falco (Stage 6) detects bad behavior. Litmus tests whether the app **survives** when a pod dies.
 
-**Common causes:**
+### Do the steps in this order
 
-| Cause | Fix |
-|---|---|
-| Stage 6 `default-deny-all` without **postgres ingress** | `make fix-65-prereqs` (adds `allow-postgres`) |
-| ArgoCD syncing old deployment (no `startupProbe`, 256Mi) | `make fix-65-prereqs` |
-| Cold-start slower than liveness probe | `startupProbe` in `infra/manifests/auth-service/deployment.yaml` |
+| Step | Section | What you do |
+|------|---------|-------------|
+| 1 | [§6.5.0](#650--before-you-start-fix-auth-service-restarts) | Auth pods **2/2 Ready** |
+| 2 | [§6.5.1](#651--install-litmuschaos-operator-ui-cluster-connection) | Install Litmus, UI shows **Active 1** |
+| 3 | [§6.5.2](#652--run-your-first-experiment-pod-delete) | Pod-delete experiment + `curl` stays 200 |
+| 4 | [§6.5.7](#657--health-check) | `make check-65`, snapshot |
 
-**One command:**
+**Optional:** [§6.5.3](#653--same-experiment-from-the-terminal-make-demo-65) — same test via `make demo-65` instead of the UI wizard.
+
+**Copy-paste path:**
 
 ```bash
+export GITHUB_OWNER=Osomudeya          # your GitHub username — required for fix-65-prereqs
+make fix-65-prereqs                    # auth 2/2 + netpol
+bash stages/stage-6.5-chaos-engineering/scripts/install-litmus.sh
+open http://litmus.local               # admin / litmus
+# §6.5.2 — ChaosHub → Pod Delete → Run (keep curl health=200 in a terminal)
+make check-65
+make snapshot STAGE=65
+```
+
+**Done when:** `make check-65` passes, or you skipped and went to Stage 7.
+
+---
+
+### 6.5.0 — Before you start (auth pods must be 2/2)
+
+Chaos deletes pods. If replacements fail to start, you debug CrashLoopBackOff instead of learning resilience.
+
+```bash
+export GITHUB_OWNER=Osomudeya   # required — without this, fix-argocd breaks ArgoCD repoURL
 make fix-65-prereqs
 kubectl get pods -n clearledger -l app=auth-service
 ```
 
-**Pass:** exactly **2 pods**, both **2/2 Ready**. Do not run chaos until this is true.
+**Pass:** two pods, both **2/2 Ready**. Do not install Litmus until this is true.
 
-> **ArgoCD users:** If your app syncs from `clearledger-infra.git`, copy `infra/manifests/auth-service/deployment.yaml` and the Stage 6 netpol files into that repo and sync — otherwise self-heal may revert the fix within minutes.
+**If something fails:**
+
+| Symptom | Fix |
+|---------|-----|
+| ArgoCD **ComparisonError** after `fix-65-prereqs` | `kubectl apply -f stages/stage-2-gitops/argocd/clearledger-app.yaml` |
+| Auth **Init:0/1**, Vault `permission denied` | Re-run Stage 5 `setup.sh` + `seed-vault-secrets.sh`, delete auth/ledger pods |
+| Auth **1/2** or postgres timeout | `make fix-65-prereqs` again (adds netpol + startup probes) |
 
 ---
 
 ### 6.5.1 — Install LitmusChaos (operator, UI, cluster connection)
 
-One script installs everything and connects your cluster to the UI:
-
 ```bash
-export LITMUS_PASSWORD='your-password'   # only if you changed it from default litmus
 bash stages/stage-6.5-chaos-engineering/scripts/install-litmus.sh
-make open-litmus   # http://litmus.local
-```
-
-| Component | Role |
-|-----------|------|
-| `litmus-core` + `kubernetes-chaos` | Chaos **operator** — runs `ChaosEngine` YAML (`make demo-65`) |
-| `chaos` (ChaosCenter) | Web UI + MongoDB — **§6.5.2** |
-| `litmus-ingress.yaml` | Exposes **http://litmus.local** |
-| `connect-litmus-infra.sh` (end of install) | Registers agent — Overview **Active 1** |
-
-**What the install script does (step by step):**
-
-| Step | Action | Purpose |
-|------|--------|---------|
-| 1 | `kubectl apply` → `litmus-install.yaml` | Creates `litmus` namespace |
-| 2 | `kubectl apply` → `litmus-rbac.yaml` | `litmus-admin` SA (pod delete in `clearledger`) |
-| 3 | `helm install litmus-core` | Watches `ChaosEngine` CRs, creates runner pods |
-| 4 | `helm install litmus-k8s` | Installs `pod-delete`, latency, memory-hog experiments |
-| 5 | `helm install chaos` | ChaosCenter UI + MongoDB |
-| 6 | `kubectl apply` → `litmus-ingress.yaml` | UI at **http://litmus.local** (+ `/backend/` for API) |
-| 7 | `connect-litmus-infra.sh` | Subscriber agent → infrastructure **Active** (not Pending) |
-
-**Login:**
-
-| Field | Value |
-|-------|-------|
-| URL | **http://litmus.local** |
-| Username | `admin` |
-| Password | `litmus` (or the password you set at first login) |
-
-**Expected pods after install:**
-
-```text
 kubectl get pods -n litmus
-NAME                                            READY   STATUS
-litmus-f95fd6fc4-xxxxx                          1/1     Running    ← litmus-core operator
-chaos-litmus-frontend-xxxxx                     1/1     Running    ← UI
-chaos-litmus-server-xxxxx                       1/1     Running    ← GraphQL API
-chaos-mongodb-0                                 1/1     Running
-clearledger-chaos-infra-subscriber-xxxxx        1/1     Running    ← cluster connected
-clearledger-chaos-infra-chaos-operator-xxxxx    1/1     Running
+open http://litmus.local    # login: admin / litmus
 ```
 
-**Pass before §6.5.2:** open **http://litmus.local** → **Overview** shows **Infrastructures: Active 1**. If **0** or infrastructure **Pending**, see §6.5.1b / §6.5.1d.
+**Pass before §6.5.2:** **Overview** shows **Infrastructures: Active 1** (not 0, not Pending).
 
----
-
-### 6.5.1b — If Overview still shows “0 infrastructures”
-
-The UI cannot run experiments until the cluster agent is connected.
+**Verify pods:**
 
 ```bash
-export LITMUS_PASSWORD='your-password'   # default is litmus
+kubectl get pods -n litmus
+# litmus-core, chaos frontend/server, mongodb, subscriber — all Running
+```
+
+#### If Overview shows 0 infrastructures or PENDING
+
+The UI is empty until a **subscriber agent** connects your cluster:
+
+```bash
+export LITMUS_PASSWORD='litmus'   # only if you changed the default
 bash stages/stage-6.5-chaos-engineering/scripts/connect-litmus-infra.sh
-kubectl get pods -n litmus | grep subscriber    # should be Running
 ```
 
-Hard-refresh the browser (`Cmd+Shift+R`). **Do not** bookmark `/account/.../settings` URLs — start at **http://litmus.local** only.
+Hard-refresh the browser. Start at **http://litmus.local** only — not old `/account/.../settings` bookmarks.
+
+#### UI navigation (click order for §6.5.2)
+
+1. **Overview** — confirm **Active 1**
+2. **ChaosHubs** → **Pod Delete** → **Launch Experiment**
+3. **Chaos Experiments** — watch **Running → Completed**
+
+Left nav: **Overview**, **Environments**, **ChaosHub**, **Chaos Experiments**. Skip **Resilience Probes** and deep **Settings** URLs for this lab.
 
 ---
 
-### 6.5.1c — How to navigate the Litmus UI (read before you click)
+### 6.5.2 — Run your first experiment (pod delete)
 
-Think of ChaosCenter as **three layers**:
+**Goal:** Kill one `auth-service` pod and prove `/auth/health` stays **200**.
 
-```text
-1. Project (admin-project)     ← top-left dropdown
-2. Environment (clearledger-lab) ← where your cluster is registered
-3. Infrastructure (clearledger-cluster) ← the agent on YOUR Kubernetes cluster
-```
-
-#### Left sidebar — what each item is for
-
-| Nav item | What it is | When you use it |
-|----------|------------|-----------------|
-| **Overview** | Dashboard: how many infrastructures are **Active** | First stop after login — must show **Active 1** |
-| **Environments** | Groups infrastructures (e.g. Pre-Prod lab) | Click **clearledger-lab** to see your cluster |
-| **ChaosHub** | Catalog of fault templates (pod-delete, latency, …) | Pick **pod-delete** before creating an experiment |
-| **Chaos Experiments** | Your saved tests + **Run** button | Where you actually start chaos |
-| **Resilience Probes** | Health checks during experiments | Optional; skip in this lab |
-
-#### Status badges — what to look for
-
-| Badge | Meaning | What to do |
-|-------|---------|------------|
-| **PENDING** (purple) | Agent registered in UI but **not confirmed** yet — subscriber has not finished handshake | Wait 1–2 min, refresh. Still PENDING? Run §6.5.1d |
-| **Active** (green) | Cluster connected — you can run experiments | Go to §6.5.2 |
-| **Overview: 0 infrastructures** | No agent installed | `make connect-litmus` |
-| **Blank white page** | Wrong URL or API not reachable | Use **http://litmus.local** only; re-apply `litmus-ingress.yaml` |
-
-#### Quick map of the left nav
-
-| Item | Use in this lab |
-|------|-----------------|
-| **Overview** | Is the cluster connected? Must show **Infrastructures: Active 1** |
-| **Environments** | **clearledger-lab** → **clearledger-cluster** — status must be **Active** |
-| **ChaosHubs** | Pick **Pod Delete** → **Launch Experiment** (main UI path — §6.5.2) |
-| **Chaos Experiments** | List past runs; open one to see the timeline after you click **Run** |
-| **Resilience Probes** | Skip for now |
-| **Project Setup** | Skip for now |
-
-#### Navigation path for this lab (click order)
-
-1. **http://litmus.local** → log in
-2. **Overview** → confirm **Infrastructures: Active 1**
-3. **Environments** → **clearledger-lab** → **clearledger-cluster** → **Active** (not Pending)
-4. **ChaosHubs** → default hub → **Pod Delete** → **Launch Experiment** (§6.5.2)
-5. **Chaos Experiments** → watch status **Running → Completed**
-
-You do **not** need deep **Settings** URLs (`/account/.../settings/...`) — they often show a blank page.
-
----
-
-### 6.5.1d — Why infrastructure shows **PENDING**
-
-**PENDING** means: Litmus created the infrastructure record in MongoDB, but the **subscriber** has not yet confirmed that all agent pods on your cluster are healthy.
-
-Common cause in this lab: the **event-tracker** pod crashes (missing CRD when we skip duplicate CRD install). The subscriber waits for event-tracker → never confirms → UI stays **PENDING**.
-
-**Fix (already in `connect-litmus-infra.sh`):**
+**Before you click Run in the UI**, open two terminals:
 
 ```bash
-export LITMUS_PASSWORD='your-password'
-make connect-litmus
+# Terminal A — watch pods
+kubectl get pods -n clearledger -l app=auth-service -w
+
+# Terminal B — watch health every 5 seconds
+while true; do
+  date +%H:%M:%S
+  curl -s -o /dev/null -w "health=%{http_code}\n" http://clearledger.local/auth/health
+  sleep 5
+done
 ```
 
-**Verify from terminal:**
+**In the UI (`http://litmus.local`):**
 
-```bash
-kubectl get pods -n litmus | grep -E 'subscriber|event-tracker'
-# subscriber: Running
-# event-tracker: should be gone or not required
+1. **ChaosHubs** → **Pod Delete** → **Launch Experiment**
+2. Target: namespace **`clearledger`**, label **`app=auth-service`**, kind **Deployment**
+3. Infrastructure: **clearledger-cluster** (must be **Active**)
+4. Blast radius: **50%**, duration **30s**
+5. Click **Run** (not Schedule)
 
-kubectl logs -n litmus -l app.kubernetes.io/name=subscriber --tail=5
-# look for: "AgentID: ... has been confirmed"
+**What success looks like:**
 
-kubectl get cm subscriber-config -n litmus -o jsonpath='{.data.IS_INFRA_CONFIRMED}'
-# true
-```
+| Where | Good sign |
+|-------|-----------|
+| Terminal A | One pod **Terminating**, then back to **2/2 Ready** |
+| Terminal B | `health=200` even while one pod is down |
+| Litmus UI | Experiment **Running → Completed** |
 
-Refresh **Environments → clearledger-lab** — **clearledger-cluster** should change from **PENDING** to **Active**.
+**Prefer terminal over UI?** Skip the wizard and run [§6.5.3](#653--same-experiment-from-the-terminal-make-demo-65) (`make demo-65`) instead.
 
----
-
-### 6.5.2 — How to use ChaosHub and run your first chaos experiment
+<details>
+<summary>Full UI walkthrough (expand if the wizard is confusing)</summary>
 
 **Time:** ~20 minutes. **You need:** browser at **http://litmus.local** + two terminal windows on your Mac (where `kubectl` and `/etc/hosts` for `clearledger.local` work).
 
@@ -4881,7 +5023,7 @@ That page lists experiment **cards** (Pod Delete, Pod CPU Hog, Pod Memory Hog, �
 **After login you should see:**
 
 - Left nav: **Overview**, **Environments**, **ChaosHub**, **Chaos Experiments**
-- **Overview** card: **Infrastructures → Active 1** (if **0**, run §6.5.1b first)
+- **Overview** card: **Infrastructures → Active 1** (if **0**, run `connect-litmus-infra.sh` — see §6.5.1)
 
 **What “connected” means:** A `subscriber` pod in `litmus` talks to ChaosCenter. The UI is no longer an empty shell — it can schedule experiments on **your** cluster.
 
@@ -5012,9 +5154,11 @@ kubectl apply -f stages/stage-6.5-chaos-engineering/infra/chaos/notification-ser
 kubectl apply -f stages/stage-6.5-chaos-engineering/infra/chaos/ledger-service-network-latency.yaml
 ```
 
+</details>
+
 ---
 
-### 6.5.3 — Same experiment from the terminal (`make demo-65`)
+### 6.5.3 — Same experiment from the terminal (`make demo-65`) — optional
 
 Use this **after** the ChaosHub exercise (§6.5.2), or if you prefer a scripted demo first. It runs the **same pod-delete test** without clicking through the UI wizard.
 
@@ -5369,53 +5513,47 @@ If the VM corrupts later: `make snapshots` → `make restore STAGE=65`. See [Sav
 
 This stage is **not** “install Grafana and move on.” **Stage 7 is not complete** until your dashboards show **real** Kyverno violations and Falco alerts that **you triggered** in §7.4 — plus portfolio screenshots (§7.6). `make check-7` only proves the stack is up; it does **not** prove you can detect security events.
 
-> **Am I ready for Stage 7?**
->
-> - [ ] `make check-6` passes — Falco runtime detection working (Stage 6.5 optional; skip is fine)
-> - [ ] Platform pods stable — low RESTARTS, load average reasonable (`multipass exec clearledger -- uptime`)
-> - [ ] Run [§7.0](#70--free-node-resources-scale-down-litmus) first if you completed Stage 6.5 (scale Litmus to zero)
-> - [ ] ~half day; heaviest stage on a single-node VM
->
-> **Done when:** §7.6 checklist complete — dashboards show **your** Kyverno denial and Falco alert, not empty panels.
-> **Then save:** `make snapshot STAGE=7` → `make snapshots` (confirm `clearledger.stage7`) — after `make check-7` in §7.7.
+**Before you start:** `make check-6` should pass (Stage 6.5 is optional — skip is fine). Check the VM is not overloaded: `multipass exec clearledger -- uptime`. If you ran Stage 6.5, do [§7.0](#70--free-node-resources-scale-down-litmus) first to scale Litmus down. Plan about half a day — this is the heaviest stage on a single-node VM.
 
-> **Already installed?** If `kubectl get pods -n monitoring` shows Grafana **3/3** and Loki **1/1**, skip §7.1 and start at **§7.2** (verify the stack), then **§7.4** (hands-on lab).
+**Done when:** §7.6 is complete — dashboards show **your** Kyverno denial and Falco alert, not empty panels. Then `make check-7` (§7.7), `make snapshot STAGE=7`, and `make snapshots` (confirm `clearledger.stage7`).
+
+**Already installed?** If `kubectl get pods -n monitoring` shows Grafana **3/3** and Loki **1/1**, skip §7.1. Start at §7.2 (verify the stack), then §7.4 (hands-on lab).
 
 ---
 
 ### What you need to know first
 
-Each earlier stage has its own view: CI logs, Kyverno CLI, Falco UI, `kubectl logs`. Stage 7 **correlates** them.
+Up to now, each stage had its own window into the cluster. Stage 3 gave you CI scan results in GitHub Actions. Stage 4 showed Kyverno blocking a bad deploy in the terminal. Stage 6 gave you Falco alerts in its UI, and you could always run `kubectl logs` on a pod. Those views are useful, but they are scattered.
 
-| Tool | What it stores | Think of it as… |
-|---|---|---|
-| **Prometheus** | Numbers over time (counters, rates) | A spreadsheet of metrics scraped every 15–30s |
-| **Loki** | Log lines from pods (Falco, apps) | Searchable text — like `grep` across the cluster |
-| **Grafana** | Charts that query Prometheus + Loki | The screen you show an auditor |
+Stage 7 brings them together in one place: **Grafana**. Instead of jumping between five different tools, you open a dashboard and see whether security events, policy violations, and app health are happening over time.
 
-**ServiceMonitors / PodMonitors** tell Prometheus *where to scrape*. No monitor for Kyverno → Kyverno panels stay empty. No PodMonitor for `auth-service` → Request Rate stays empty until §7.5 (metrics-enabled images deployed via GitOps).
+#### The three tools you are installing
 
-**Promtail** ships container logs into Loki. No Loki → log panels say “No data” even when `kubectl logs` works.
+**Prometheus** collects numbers from the cluster — things like “how many Kyverno denials in the last hour” or “how many HTTP requests per second.” It checks those numbers every 15–30 seconds and keeps a history you can graph.
 
-#### How Stage 7 fits the full stack
+**Loki** collects log lines — the same kind of text you see from `kubectl logs`, but from many pods at once. Falco alerts, failed login attempts, and application errors all land here so you can search them later.
 
-| Stage | What happened | What shows up in Grafana |
-|---|---|---|
-| **3 — CI** | Scans in GitHub Actions | Compliance narrative (tools marked ACTIVE) |
-| **4 — Kyverno** | Blocked bad `kubectl apply` | **Kyverno Policy Violations** (Prometheus) |
-| **5 — Vault** | Secrets injected at runtime | Indirectly — fewer secret-in-Git incidents |
-| **6 — Falco** | Shell / sensitive file read | **Security Event Timeline** (Loki) |
-| **6 — NetworkPolicy** | Blocked pod traffic | Runtime layer in compliance view |
-| **Apps** | HTTP requests, failed logins | **Service Health** (Loki + Prometheus) |
+**Grafana** is the web UI where charts and tables pull data from Prometheus and Loki. This is what you would show an auditor: not a one-off terminal screenshot, but proof that you can **find and measure** events after they happen.
 
-```text
-You run a command (terminal)
-  → Kyverno / Falco / app logs an event
-  → Prometheus or Loki stores it (15–90s later)
-  → Grafana panel updates
-```
+Prometheus does not magically know what to collect. **ServiceMonitors** and **PodMonitors** are small config objects that point it at the right targets. If Kyverno has no monitor, the Kyverno dashboard stays empty even when Kyverno is working fine. The same applies to application request rates — those panels stay blank until §7.5, when metrics-enabled images are deployed through GitOps.
 
-**Beginner takeaway:** The terminal proves the event happened. The dashboard proves you can **detect and measure** it later.
+Logs follow a similar path. **Promtail** reads container logs and sends them to Loki. If Loki is not running, Grafana log panels show “No data” even though `kubectl logs` still works on individual pods.
+
+#### How this connects to what you already built
+
+When you blocked a bad `kubectl apply` in Stage 4, Kyverno recorded that denial. In Stage 7, that shows up on the **Kyverno Policy Violations** dashboard (via Prometheus).
+
+When you triggered a shell inside a pod in Stage 6, Falco wrote an alert. In Stage 7, that appears on the **Security Event Timeline** (via Loki).
+
+When ClearLedger handles HTTP traffic or a failed login, those events feed the **Service Health** dashboards (Loki and Prometheus together).
+
+Vault (Stage 5) and network policies (Stage 6) do not always have their own flashy panel, but they still matter: fewer secrets in Git and blocked pod traffic show up indirectly in a healthier, quieter cluster.
+
+#### What you will do in this stage
+
+You will run a command in the terminal — for example, a Kyverno violation or a Falco trigger — and then wait a short time while Prometheus or Loki ingests the event. Within about 15–90 seconds, the matching Grafana panel should update.
+
+That is the whole point of observability for security: the terminal proves the event happened once; the dashboard proves you can **detect and measure** it later, without being logged into the cluster at that exact moment.
 
 ---
 
@@ -5437,13 +5575,47 @@ You can scale Litmus back up later if you want to re-run chaos experiments (`bas
 
 ### 7.1 — Install the observability stack
 
+**Safe to run more than once.** The script checks what is already installed. If Grafana, Prometheus, and Loki are healthy, it skips the heavy install and only updates dashboards and scrape configs. Running it again after a partial failure will not duplicate or break a working stack.
+
+**When to add `FORCE=1`:** only if something is genuinely stuck — for example you edited the Helm values files and need a full reinstall, or Loki keeps crashing in a restart loop:
+
+```bash
+FORCE=1 bash stages/stage-7-observability/scripts/install-observability.sh
+```
+
+On a first-time install, use the plain command in Step 1 below. Do not use `FORCE=1` unless the troubleshooting section tells you to.
+
+**macOS, Linux, and WSL2:** `FORCE=1 bash ...` works as written. **Native Windows PowerShell** does not use that syntax — run the lab inside **WSL2 Ubuntu** (recommended), or set the variable first: `$env:FORCE=1; bash stages/stage-7-observability/scripts/install-observability.sh`.
+
+**Step 1 — install** (wait until the script prints `✓ Stage 7 installed.`):
+
 ```bash
 bash stages/stage-7-observability/scripts/install-observability.sh
 ```
 
-The installer is idempotent: if everything is already healthy, it only refreshes dashboards and monitors. Use `FORCE=1` only when Helm values changed or Loki keeps restarting.
+#### While Step 1 runs — you may see “Waiting for Falco” near the end
 
-**Expected — monitoring namespace pods (names vary):**
+Most of the install is about Grafana, Prometheus, and Loki. Then the terminal suddenly mentions Falco again. If you finished Stage 6 a while ago, that can feel out of place.
+
+**What you already have from Stage 6:** Falco watches running pods and writes alerts when something suspicious happens — like a shell starting inside `auth-service`. You proved that worked at `http://falco.local` or with `kubectl logs`.
+
+**What Stage 7 adds:** Grafana cannot open the Falco UI. Stage 7 builds a path so the **same alerts** also show up on a Grafana dashboard called **Security Event Timeline**. Think of it as plumbing:
+
+1. Falco still runs in the `falco` namespace (same as Stage 6).
+2. **Promtail** (installed with Loki) copies Falco’s log lines into **Loki**.
+3. Grafana reads those lines from Loki and draws the timeline chart.
+
+The install script touches Falco one more time to make sure that plumbing can connect. It re-runs the **same Stage 6 Helm chart** — an upgrade, not a second Falco. You might see `Waiting for Falco DaemonSet` for a few minutes. **Let it finish.** That message is expected.
+
+Empty Grafana panels right after install are also normal — you have not triggered any new alerts yet. In **§7.4** you run a shell inside a pod again (same idea as Stage 6) and watch the alert land on the **Security Event Timeline** in Grafana, not only in the Falco UI.
+
+**Step 2 — check pods** (run this after Step 1 finishes):
+
+```bash
+kubectl get pods -n monitoring
+```
+
+You want something like this (pod name suffixes vary):
 
 ```text
 NAME                                              READY   STATUS    RESTARTS   AGE
@@ -5453,9 +5625,7 @@ loki-0                                            1/1     Running   0          5
 loki-promtail-....                                1/1     Running   0          5m
 ```
 
-```bash
-kubectl get pods -n monitoring
-```
+Grafana must show **3/3** Ready (not 2/3). Loki must show **1/1**. If pods are still `Pending` or `ContainerCreating`, wait a few minutes and run `kubectl get pods -n monitoring` again.
 
 **Expected — Loki healthy:**
 
@@ -5518,10 +5688,12 @@ Run these three checks so you know **which layer** is broken if a panel is empty
 #### Check 1 — Prometheus has Kyverno metrics
 
 ```bash
-kubectl exec -n monitoring deploy/kube-prometheus-stack-prometheus -c prometheus -- \
-  wget -qO- 'http://localhost:9090/api/v1/query?query=kyverno_admission_requests_total' 2>/dev/null \
+kubectl exec -n monitoring deploy/kube-prometheus-stack-grafana -c grafana -- \
+  wget -qO- 'http://kube-prometheus-stack-prometheus.monitoring:9090/api/v1/query?query=kyverno_admission_requests_total' 2>/dev/null \
   | head -c 400
 ```
+
+(Prometheus runs as a StatefulSet pod, not a Deployment — this query goes through Grafana to the Prometheus Service.)
 
 **Expected:** JSON with `"status":"success"` and a `"metric"` block (values may be `0` until you trigger a violation in §7.4).
 
@@ -5569,46 +5741,56 @@ Or in the UI: **Dashboards** → filter tag **`clearledger`** → you should see
 
 ### 7.3 — Your first 10 minutes in Grafana
 
-#### Where to go first
+**What you are doing here:** logging in and clicking around so Grafana feels familiar. You are **not** proving anything yet — that is **§7.4**. Right now empty panels and zeros are normal.
 
-Do not open all six dashboards at once — Loki can struggle on a small cluster. Use this order:
+#### Step 1 — open Grafana
 
-| Order | Dashboard | Why start here |
-|---|---|---|
-| **1** | [Kyverno Policy Violations](http://grafana.local/d/clearledger-kyverno-violations) | You already practiced Kyverno in Stage 4 — easy win |
-| **2** | [Security Event Timeline](http://grafana.local/d/clearledger-security-events) | Ties to Stage 6 Falco — log-based |
-| **3** | [Service Health + Auth](http://grafana.local/d/clearledger-service-health) | App traffic and failed logins |
-| **4** | [Compliance Posture](http://grafana.local/d/clearledger-compliance) | Single pane — sums the story for auditors |
-| **5** | [Audit Log Analysis](http://grafana.local/d/clearledger-audit-logs) | Control-plane audit (often empty on MicroK8s) |
-| **6** | [DORA Metrics](http://grafana.local/d/clearledger-dora-metrics) | Deploy frequency / lead time proxies |
+Go to **http://grafana.local** and log in: `admin` / `admin123`.
 
-**Always set time range:** top-right → **Last 15 minutes** (while learning).
+#### Step 2 — set the time range
 
-Use **UID links** above, not long auto-generated URLs — old cached slugs cause `not correct url` in the browser console.
+Top-right corner → click the time picker → choose **Last 15 minutes**. Do this on every dashboard while learning. If the range is too wide (Last 24 hours), Loki queries can slow down on a small VM.
 
-#### How to read a panel (30-second guide)
+#### Step 3 — open dashboards one at a time
 
-| Panel type | Usually powered by | What you are looking for |
-|---|---|---|
-| **Stat** (big number) | Prometheus or Loki | Did count go **above 0** after your test? |
-| **Time series** (line chart) | Prometheus or Loki | Spike or new line **after** the timestamp you ran the command |
-| **Logs** (scrollable lines) | Loki | Your event text — rule name, `CRITICAL`, `Failed login attempt` |
-| **Pie / bar** | Prometheus or Loki | Which rule or priority dominated in the window |
+Open **one** link, look around, then close it or move to the next. Do not open all six in separate tabs at once — Loki can struggle on a single-node lab VM.
 
-**Prometheus panels** = numbers scraped from `/metrics` endpoints (Kyverno, ArgoCD, apps).
+1. [Kyverno Policy Violations](http://grafana.local/d/clearledger-kyverno-violations) — policy blocks from Stage 4. You may see zeros. That is fine before §7.4.
+2. [Security Event Timeline](http://grafana.local/d/clearledger-security-events) — Falco alerts from Stage 6. You may see old `postgres` noise or an empty log table. Also fine before §7.4.
+3. [Service Health + Auth](http://grafana.local/d/clearledger-service-health) — app traffic and login attempts.
+4. [Compliance Posture](http://grafana.local/d/clearledger-compliance) — summary view for auditors. Skim it; come back after §7.4.
+5. [Audit Log Analysis](http://grafana.local/d/clearledger-audit-logs) — often empty on MicroK8s. That is expected; not a bug.
+6. [DORA Metrics](http://grafana.local/d/clearledger-dora-metrics) — deploy-frequency style charts. Optional skim.
 
-**Loki panels** = log lines (Falco JSON in `falco` namespace, auth-service stdout).
+Use the links above (short URLs). Avoid old bookmarked URLs with long random slugs — they can show `not correct url` in the browser.
 
-If **only** log panels fail with `connection refused`, Loki is down or restarting — see §7.1 sanity checks. Metric panels can still work.
+**Alternative:** **Dashboards** (left menu) → search tag **`clearledger`** → you should see the same six titles from Check 3 in §7.2.
 
-#### What “good” looks like before vs after the lab
+#### Step 4 — how to read what you see (quick)
 
-| Dashboard | Before §7.4 | After §7.4 (success) |
-|---|---|---|
-| Kyverno | Violations = 0 or flat | **Policy Violations (last hour) > 0** |
-| Security Event Timeline | Empty log table | **CRITICAL** row with shell / `Terminal shell in container` |
-| Service Health | Failed logins = 0 | **Failed Login Attempts > 0** |
-| Compliance | Top stats zero | **Policy Violations**, **Runtime Threats**, **Failed Auth** non-zero |
+Grafana panels pull data from two places:
+
+- **Prometheus** — numbers over time (Kyverno violation counts, request rates).
+- **Loki** — log lines (Falco JSON alerts, auth-service log messages).
+
+A **big number** panel asks: did this count go above zero? A **line chart** asks: was there a spike after I ran something? A **logs** panel shows the actual text — rule names, `CRITICAL`, `Failed login attempt`.
+
+If **only** log panels say `connection refused`, Loki may be down — re-check §7.1. If number panels work but log panels fail, that points to Loki specifically.
+
+#### What you should expect right now (before §7.4)
+
+You are only touring the UI. Empty or zero panels do **not** mean Stage 7 failed.
+
+- **Kyverno** — violations at 0 or flat lines. Normal until you trigger a bad `kubectl apply` in §7.4.
+- **Security Event Timeline** — empty table, or old Falco noise from `postgres`. Normal until you trigger a shell in §7.4.
+- **Service Health** — failed logins at 0. Normal until §7.4.
+- **Compliance** — top stats at zero. Normal until §7.4.
+
+After §7.4, those same dashboards should show **your** events: a Kyverno denial, a Falco CRITICAL shell alert, and failed login counts above zero.
+
+#### Step 5 — move on
+
+When you have opened at least dashboards **1–3** and you understand that empty panels are OK for now, continue to **§7.4**. That is where you run commands in the terminal and watch the panels update.
 
 ---
 
@@ -5641,38 +5823,93 @@ spec:
 YAML
 ```
 
-**Expected terminal output (success = blocked):**
+**How to know it worked**
+
+You are testing whether Kyverno **blocks** a deliberately bad pod. Success means the pod **never gets created**.
+
+**Pass — you should see:**
+
+- The terminal prints **`Error from server`** and **`denied the request`**
+- The exact policy names in the error do not matter. Your output might list one rule or several (`disallow-root-containers`, `require-resource-limits`, `drop-all-capabilities`, …). More lines just means more rules failed — that is still a pass.
+- The pod name never shows up in the cluster:
+
+```bash
+kubectl get pods -n clearledger | grep stage7-kyverno-lab
+```
+
+**Expected:** no output.
+
+**Fail — stop and fix Stage 4 first:**
+
+- The command ends quietly with **`created`** (no error)
+- `kubectl get pods -n clearledger` shows **`stage7-kyverno-lab`**
+
+That means Kyverno let a root pod through. Run `make check-4` before continuing Stage 7.
+
+**Example of a passing terminal** (yours may list more policies):
 
 ```text
 Error from server: error when creating "STDIN": admission webhook "validate.kyverno.svc" denied the request:
 policy disallow-root-containers/validate-run-as-non-root fail: Running as root is not allowed
 ```
 
-If the pod **creates** instead, Kyverno is not enforcing — run `make check-4` before continuing.
-
-**Confirm Prometheus saw it** (optional):
+**Confirm Prometheus saw it** (optional but useful if Grafana is empty):
 
 ```bash
-kubectl exec -n monitoring deploy/kube-prometheus-stack-prometheus -c prometheus -- \
-  wget -qO- 'http://localhost:9090/api/v1/query?query=kyverno_admission_requests_total{request_allowed="false"}' 2>/dev/null \
+kubectl exec -n monitoring deploy/kube-prometheus-stack-grafana -c grafana -- \
+  wget -qO- 'http://kube-prometheus-stack-prometheus.monitoring:9090/api/v1/query?query=kyverno_admission_requests_total{request_allowed="false"}' 2>/dev/null \
   | grep -o '"value":\[[^]]*\]' | head -3
 ```
 
-**Expected:** a `"value"` entry with a recent Unix timestamp and a number **greater than 0**.
+**Expected:** a `"value"` entry with a recent Unix timestamp and a number **greater than 0** (for example `"value":[..., "1"]`). If you see this, Kyverno and Prometheus are working even when Grafana panels say **No data**.
 
-**Grafana** — open [Kyverno Policy Violations](http://grafana.local/d/clearledger-kyverno-violations?from=now-15m&to=now)
+**Grafana** — open [Kyverno Policy Violations](http://grafana.local/d/clearledger-kyverno-violations?from=now-15m&to=now). Set time range **Last 15 minutes** (top-right).
 
-| Panel | What to look for |
-|---|---|
-| Policy Violations (last hour) | Number **> 0** |
-| Violations by Policy | Bar for `disallow-root-containers` or similar |
-| Violation Rate | Line tick up in the last few minutes |
+**Which panels to check** (titles match the dashboard exactly):
+
+- **Top row:** **Policy Violations (time range)** and **Violations (time range)** — both should show a number **> 0**. **Active Kyverno Rules** (often **18**) proves Grafana can reach Prometheus even when the other two are empty.
+- **Middle:** **Violation Rate by Resource Kind** — a spike for **Pod** near the time you ran the command.
+- **Bottom:** **Top Blocked Resource Types** — a row for **Pod**; **Violations by Namespace (trend)** — a spike for **clearledger**.
+
+**If the top two stat panels say "No data" but Prometheus shows a value > 0**
+
+This is a common timing quirk, not a broken install. Those panels use `increase()` over the selected time range. Prometheus needs to see the counter **change** during the window (for example 1 → 2). A single denial can record in Prometheus while Grafana still shows **No data**.
+
+Do this:
+
+1. Run the same `kubectl apply` command **a second time** (it will be denied again — that is expected).
+2. Wait **60 seconds** (Prometheus scrapes every ~30s).
+3. In Grafana: **Last 15 minutes** → click **Refresh** (circular arrow, top-right).
+
+After the second denial you should see **2** in the top stat panels and spikes on the Pod / clearledger charts. Screenshot that for §7.6.
+
+**Still empty? Prove it in Explore** (counts for the lab):
+
+1. Grafana left menu → **Explore**
+2. Datasource: **Prometheus**
+3. Query: `sum(kyverno_admission_requests_total{request_allowed="false"})`
+4. **Run query** — expect **1** or **2**
+
+A screenshot of the terminal denial plus Explore showing a number **> 0** is enough portfolio proof if the dashboard stats stay slow.
 
 ---
 
 #### Exercise B — Falco shell → Loki → Security Event Timeline
 
-**Terminal** — exec into auth-service (Stage 6 same technique):
+**What you are doing (same idea as Exercise A):**
+
+- **Exercise A:** you did something bad → Kyverno blocked it → Grafana **Kyverno** dashboard updated.
+- **Exercise B:** you do something suspicious **inside** a running pod → Falco detects it → Grafana **Security Event Timeline** updates.
+
+You already did this in **Stage 6** (`make demo-6`). Here you do it again and prove the alert shows up in **Grafana**, not only in `http://falco.local`.
+
+**The story in one line:** pretend you are an attacker who got shell access inside `auth-service` — Falco should scream, and the scream should appear on the timeline dashboard.
+
+---
+
+**Step 1 — trigger the alert (terminal)**
+
+Copy-paste all three lines:
 
 ```bash
 AUTH_POD=$(kubectl get pod -n clearledger -l app=auth-service \
@@ -5681,40 +5918,115 @@ echo "Using pod: $AUTH_POD"
 kubectl exec -n clearledger "$AUTH_POD" -c auth-service -- /bin/sh -c 'id && exit'
 ```
 
-**Expected:** command prints `uid=0(root)` or similar and exits — Falco rules fire on shell spawn.
+**You only need to read two lines of output. Ignore everything else.**
 
-**Confirm Falco logged it:**
-
-```bash
-kubectl logs -n falco -l app.kubernetes.io/name=falco --tail=5 | grep -i shell || \
-  kubectl logs -n falco -l app.kubernetes.io/name=falco --tail=5
+```text
+Using pod: auth-service-77b7d9cd99-xxxxx     ← real pod name (not empty)
+uid=1000 gid=1000 groups=1000                 ← command ran inside the pod
 ```
 
-**Expected:** a line containing `Terminal shell in container` or priority `Critical`.
+That is Step 1 done. The pod is still running — you did not break anything.
 
-**Confirm Loki has it** (after ~60s):
+**Fail:** `error: Internal error` or `container not found` — run `kubectl get pods -n clearledger -l app=auth-service` and retry with a **Running** pod.
+
+---
+
+**Step 2 — confirm Falco saw it (terminal, right away)**
+
+The Falco log is one long JSON line. Do not try to read the whole thing. Run:
+
+```bash
+kubectl logs -n falco -l app.kubernetes.io/name=falco --tail=50 | grep -i 'Shell spawned'
+```
+
+**Pass — you should see one short phrase somewhere in the line:**
+
+```text
+Shell spawned in ClearLedger container ... pod=auth-service-... cmd=sh -c id && exit
+```
+
+Or the rule name:
+
+```text
+"rule":"Shell Spawned in ClearLedger Container"
+```
+
+**That one grep hit means Exercise B worked in the terminal.** Screenshot this line for your portfolio.
+
+**Ignore:**
+
+- `Defaulted container "falco" out of: ...` — normal kubectl noise
+- Lines about `postgres-0` and `/etc/passwd` — background noise from Stage 6, not your test
+- The rest of the JSON (`output_fields`, `k8smeta`, etc.) — you do not need to parse it
+
+**If grep prints nothing:** run Step 1 again, wait 5 seconds, then re-run the grep.
+
+---
+
+**Step 3 — confirm Loki stored it (wait ~60 seconds first)**
+
+Promtail needs a moment to ship the log line to Loki. Wait **60–90 seconds** after Step 1, then:
 
 ```bash
 kubectl exec -n monitoring loki-0 -- wget -qO- \
-  'http://127.0.0.1:3100/loki/api/v1/query?query=%7Bnamespace%3D%22falco%22%7D&limit=2' 2>/dev/null \
-  | grep -o 'Terminal shell[^"]*' | head -1
+  'http://127.0.0.1:3100/loki/api/v1/query?query=%7Bnamespace%3D%22falco%22%2Ccontainer%3D%22falco%22%7D%20%7C%3D%20%22Shell%20spawned%22&limit=3' 2>/dev/null \
+  | grep -i 'auth-service'
 ```
 
-**Expected:** substring like `Terminal shell in container` (or non-empty grep output).
+**Pass:** a line mentioning **`auth-service`** and **Shell spawned**.
 
-**Grafana** — open [Security Event Timeline](http://grafana.local/d/clearledger-security-events?from=now-15m&to=now)
+**Do not use** `grep ClearLedger` alone — postgres noise also contains the word `ClearLedger` and will fool you into thinking Loki has your shell alert when it does not.
 
-| Panel | What to look for |
-|---|---|
-| Falco Alerts by Priority | **CRITICAL** line or spike |
-| Recent CRITICAL / WARNING Events | Log row with your pod name and shell rule |
-| CRITICAL Alerts (period) | Stat **≥ 1** |
+**Empty output?** As long as Step 2 passed, continue to Step 4 — Grafana may still show CRITICAL counts from Falco traffic even when this grep is empty.
+
+---
+
+**Step 4 — open Grafana (most panels empty is normal)**
+
+Open [Security Event Timeline](http://grafana.local/d/clearledger-security-events?from=now-1h&to=now).
+
+Before you look at panels:
+
+1. Time range → **Last 1 hour**
+2. Auto-refresh → **Off** (not 5s)
+3. Run Step 1 **again** if your shell was more than a few minutes ago
+4. Wait **90 seconds**, then click **Refresh** once
+
+**What you will see — and what it means**
+
+| Panel | Common result | Good enough for the lab? |
+|-------|---------------|---------------------------|
+| **CRITICAL Alerts (period)** | Big number (e.g. **836**) | **Yes** — Falco → Loki → Grafana is working |
+| **Recent CRITICAL / WARNING Events** | Many rows saying `Sensitive file read` / `postgres-0` | **Partial** — Falco logs are flowing; scroll or search for **`auth-service`** or **Shell spawned** |
+| **Falco Alerts by Priority** (top chart) | **No data** | **OK to ignore** — heavy query often times out on a small VM |
+| **Alerts by Rule Name** | **No data** | **OK to ignore** |
+| **WARNING / Total Events** | **No data** | **OK to ignore** |
+
+**You are not failing if only the bottom-left red stat and the log list have data.** Postgres noise drowns out your single shell line in the log panel — that is expected on this cluster.
+
+**Pass for Exercise B (pick one):**
+
+1. **Best:** Step 2 grep shows `Shell spawned` **and** Grafana **CRITICAL Alerts** ≥ 1 — screenshot both
+2. **Also fine:** Step 2 grep screenshot **plus** Grafana log panel showing any CRITICAL rows (proves Loki path works even if shell is buried)
+3. **Fallback:** Step 2 grep **plus** Grafana **Explore** → Loki → `{namespace="falco", container="falco"} |= "Shell spawned"`
+
+**To find your shell in the log panel:** click inside **Recent CRITICAL / WARNING Events** and use the browser search (Cmd+F) for `auth-service` or `Shell spawned`.
+
+Screenshot for §7.6.
 
 ---
 
 #### Exercise C — Failed login → Loki → Service Health
 
-**Terminal** — send traffic and bad logins:
+**What you are doing:** pretend someone is guessing passwords on your login API. `auth-service` writes `Failed login attempt` to its logs. Grafana **Service Health** should show the count go up.
+
+Same pattern as A and B: **terminal action → logs → dashboard**.
+
+---
+
+**Step 1 — send bad login attempts (terminal)**
+
+Copy-paste the whole block:
 
 ```bash
 for i in $(seq 1 10); do
@@ -5726,54 +6038,95 @@ done
 echo "done"
 ```
 
-**Expected:** `done` (no output per curl is fine).
+**Pass:** the only output you need is:
 
-**Confirm auth-service logged failures:**
-
-```bash
-kubectl logs -n clearledger -l app=auth-service --tail=20 | grep -i 'Failed login' | tail -3
+```text
+done
 ```
 
-**Expected:**
+No output from the `curl` lines is normal. The loop hits `/auth/health` (keeps the app warm) and `/auth/login` with a wrong password ten times.
+
+**Fail:** `curl: (6) Could not resolve host` — run `bash scripts/setup-hosts.sh` on your Mac. `curl: (7) Failed to connect` — check `kubectl get pods -n clearledger -l app=auth-service`.
+
+---
+
+**Step 2 — confirm auth-service logged it (terminal, right away)**
+
+```bash
+kubectl logs -n clearledger -l app=auth-service --tail=30 | grep -i 'Failed login' | tail -3
+```
+
+**Pass — you should see lines like:**
 
 ```text
 Failed login attempt for email: lab-attacker@evil.com
 ```
 
-**Grafana** — open [Service Health](http://grafana.local/d/clearledger-service-health?from=now-15m&to=now)
+You may see several lines (one per failed attempt). **One line is enough.** Screenshot this for your portfolio.
 
-| Panel | What to look for |
-|---|---|
-| Failed Login Attempts | Stat **> 0** |
-| Successful Logins | May stay 0 — that is fine |
-| Auth Service Logs | Lines with `Failed login attempt` |
+**If grep prints nothing:** wait 10 seconds and run again. If still empty, check the auth pod is Running: `kubectl get pods -n clearledger -l app=auth-service`.
 
 ---
 
-#### Exercise D — Compliance dashboard (auditor view)
+**Step 3 — open Grafana (wait ~60 seconds after Step 1)**
 
-After A + B + C, open [Compliance Posture](http://grafana.local/d/clearledger-compliance?from=now-1h&to=now)
+Open [Service Health + Auth Security](http://grafana.local/d/clearledger-service-health?from=now-1h&to=now).
 
-**Expected — top row stats non-zero:**
+Set **Last 1 hour**, auto-refresh **Off**, click **Refresh** once.
 
-| Stat | Source exercise |
-|---|---|
-| Policy Violations | Exercise A (Kyverno) |
-| Runtime Threats | Exercise B (Falco) |
-| Failed Auth Attempts | Exercise C (auth logs) |
+**What to check (ignore empty panels elsewhere):**
 
-This is the **one screenshot** that shows defense-in-depth: admission + runtime + application.
+| Panel | Pass | If empty |
+|-------|------|----------|
+| **Failed Login Attempts** | Number **> 0** | Step 2 passed? Wait 60s, refresh. Terminal proof still counts. |
+| **Auth Service Logs** | Lines with `Failed login attempt` | Use Cmd+F in the panel for `lab-attacker` |
+| **Successful Logins** | May stay **0** | Fine — you only sent bad passwords |
+| **Request Rate** | May be empty | Fine until §7.5 metrics images — not required for Exercise C |
 
-**✋ Hands-on checkpoint — a real event you triggered shows up in Grafana**
+**Pass for Exercise C:** Step 2 grep **plus** **Failed Login Attempts** > 0 **or** log panel showing your email.
+
+---
+
+#### Exercise D — Compliance dashboard (the auditor summary)
+
+**What you are doing:** open one dashboard that rolls up Exercises A, B, and C. This is the “show the auditor” view — admission control + runtime detection + application security in one screen.
+
+**When:** only after you finished A, B, and C.
+
+**Step 1 — open the dashboard**
+
+[Compliance Posture](http://grafana.local/d/clearledger-compliance?from=now-1h&to=now)
+
+Set **Last 1 hour**, auto-refresh **Off**, click **Refresh**.
+
+**Step 2 — check the top row stats**
+
+| Stat on dashboard | Came from | Pass |
+|-------------------|-----------|------|
+| **Policy Violations** | Exercise A (Kyverno) | **> 0** |
+| **Runtime Threats** | Exercise B (Falco) | **> 0** (postgres noise counts — that is OK) |
+| **Failed Auth Attempts** | Exercise C (bad logins) | **> 0** |
+
+All three do not need to be huge numbers. They just need to be **above zero** after your tests.
+
+**If one stat is still 0:** re-run that exercise (A, B, or C), wait 90 seconds, refresh. Policy Violations may need a second Kyverno denial like Exercise A.
+
+**This is screenshot #3 for §7.6** — the single frame that proves defense-in-depth.
+
+---
+
+**✋ Hands-on checkpoint — you proved detection, not just installation**
+
+Quick sanity check that Grafana is wired up:
 
 ```bash
 curl -s -u admin:admin123 'http://grafana.local/api/search?tag=clearledger' | jq -r '.[].title'
 curl -s -u admin:admin123 'http://grafana.local/api/datasources' | jq -r '.[].name'
 ```
 
-Expected: your six dashboard titles list; datasources include **both** Prometheus and Loki. Then in the UI, the Security Event Timeline shows the denial/alert you just caused — not an empty panel.
+**Pass:** six dashboard titles (Kyverno, Security Event Timeline, Service Health, Compliance, Audit Log, DORA) and datasources **Prometheus** + **Loki**.
 
-If you skip this: `make check-7` passes on an empty stack. Passing the health check is not the same as proving you can detect a security event — and detection is the whole point of the stage.
+**Stage 7 is about detection.** `make check-7` only proves pods are running. You are done when **you** triggered events in §7.4 and saved screenshots per **§7.6** — Kyverno denial, Falco alert, failed logins, and the Compliance summary.
 
 ---
 
@@ -5803,8 +6156,8 @@ bash stages/stage-7-observability/scripts/build-metrics-images.sh
 **Expected — query after rollout (~60s):**
 
 ```bash
-kubectl exec -n monitoring deploy/kube-prometheus-stack-prometheus -c prometheus -- \
-  wget -qO- 'http://localhost:9090/api/v1/query?query=http_requests_total' 2>/dev/null \
+kubectl exec -n monitoring deploy/kube-prometheus-stack-grafana -c grafana -- \
+  wget -qO- 'http://kube-prometheus-stack-prometheus.monitoring:9090/api/v1/query?query=http_requests_total' 2>/dev/null \
   | grep -o '"__name__":"http_requests_total"' | head -1
 ```
 
@@ -5865,77 +6218,61 @@ Warnings about Loki restarts or missing dashboards — fix with §7.1 before cla
 
 ---
 
-### 7.8 — Technical issues we hit (and how to explain them in interviews)
+### 7.8 — What broke (lab notes + interview talking points)
 
-Use this when an interviewer asks *”What broke in observability?”* or *”How do Prometheus, Loki, and Grafana fit together?”*
+**The stack in one sentence:** Prometheus stores **numbers** (metrics), Loki stores **log lines**, Grafana **displays** both. Nothing appears until something actually happens in the cluster.
 
-#### CI pipeline issues fixed before Stage 7 could complete
+#### What tripped you up in the lab
 
-These CI problems blocked the delivery of metrics-enabled images and are worth documenting because they represent real DevSecOps pipeline concerns.
+1. **Empty dashboards right after install**
+   Normal. Grafana does not create events — you trigger them in §7.4 (Kyverno denial, Falco shell, failed logins).
 
-**`}}` in GitHub Actions workflow (Jun 2026)**
+2. **Loki slow or refresh stuck on “Cancel”**
+   Falco logs are huge. **Last 24 hours** overloads a small cluster. Use **Last 1 hour**, one dashboard at a time, wait ~10 seconds.
 
-Python dict literals inside `run:` blocks produce `}}` when closing nested structures (e.g. `{“sha1”: e[“SHA”]}`). GitHub's expression engine parses `}}` as a closing delimiter even inside `run:` blocks — it rejected every workflow run before any job started (0 jobs, 0s completion, `failure`). Fixed by extracting nested dicts into named variables so `}}` never appears on a single line.
+3. **`make check-7` passed but panels still empty** *(lab checklist only — not an interview topic)*
+   The health check confirms Prometheus/Loki/Grafana pods are up. It does **not** mean events exist. You still need §7.4 + §7.6 before you snapshot and move on.
 
-**Stale Trivy vulnerability database**
+#### What to say in interviews (two real topics)
 
-Trivy caches its CVE database on the runner. After several days, the cache exceeds the 5-day max-age and `trivy image` fails before scanning a single layer. Fixed with `GRYPE_DB_MAX_ALLOWED_BUILT_AGE=336h` (grype) and a `prepare-scanners` job that downloads the Trivy DB once per workflow — all scan jobs then use `--skip-db-update`.
+| Topic | One-liner |
+|---|---|
+| Empty dashboards | “Grafana is a viewer — panels stay empty until the underlying metric or log exists in the time range.” |
+| Loki overload / slow queries | “We hit query storms on a single-node Loki; we capped range, concurrency, and probe timeouts — same capacity trade-offs as prod.” |
+| Proving detection works | “I triggered a policy denial and a runtime alert, then saw both in Grafana — action in the terminal, then the matching log or metric on the panel.” |
 
-**Docker DNS drops mid `pip install`**
+#### Other fixes (quick reference)
 
-Builds failed when the host resolver (`127.0.0.53`) or Docker's inherited DNS flaked — nginx metadata pulls, GitHub checkout, and pip inside `docker build` all hit the same problem. Fixed with `scripts/configure-vm-network.sh` (pins upstream DNS on `systemd-resolved` and in `/etc/docker/daemon.json`). Mac: `bash scripts/configure-vm-network.sh` · Linux/WSL2: `bash scripts/configure-vm-network.sh --inside-vm`. If builds still fail with `[Errno 101] Network is unreachable`, check the **Network diagnostic (on build failure)** step in GitHub Actions for `host_dns=` / `container_dns=` — `1 0` points at Docker bridge/NAT, not DNS.
+| If you saw… | Remember… |
+|---|---|
+| Kyverno panel still 0 after denial | Wait 30–60s for Prometheus scrape; refresh dashboard |
+| Request Rate empty | Optional — needs `/metrics` on app images (`build-metrics-images.sh`) |
+| Failed login stat 0, log stream has lines | Re-run Exercise C; stats count last **1h** of logs |
+| Falco panels empty | Run Exercise B; filter `{namespace="falco", container="falco"}` |
+| Audit Log dashboard empty | Expected on MicroK8s — audit logs not shipped to Loki yet |
+| Wrong dashboard URL / blank page | Use UID links from §7.3; re-run installer |
+| After Mac reboot, auth/ledger **Unknown** or **Init:0/1** | [Path D](#saving-your-progress) — `setup.sh` + `seed-vault-secrets.sh`, delete auth/ledger pods; restore only if that fails |
 
-**Python 3.13 wheel compatibility**
+#### CI issues (before Stage 7 could ship metrics images)
 
-Upgrading from `python:3.12-slim` to `python:3.13-slim` (to fix CVE-2026-4224, CVE-2026-3644, CVE-2025-13462) broke the build because `asyncpg==0.29.0` and `psycopg2-binary==2.9.9` had no pre-built cp313 wheels. Upgraded to `asyncpg==0.31.0` and `psycopg2-binary==2.9.12` which ship cp313 wheels. CVE-2026-7210 (CRITICAL) is suppressed in `.grype.yaml` and `.trivyignore` because its only fix is in Python 3.15.0b2 (beta — not acceptable for production).
+If your pipeline failed earlier in the lab: GitHub Actions `}}` syntax, stale Trivy DB, VM DNS drops, Python 3.13 wheels, Kyverno blocking ArgoCD syncs, Kustomize image tags. Details live in `docs/troubleshooting.md` — not needed for the Grafana exercises.
 
-**Kyverno blocking ArgoCD syncs on image tag updates**
+**30-second interview story:**
 
-After Stage 4 (Kyverno in Enforce mode), every ArgoCD sync that touched the `frontend` and `notification-service` deployments was blocked by Kyverno's `disallow-root-containers` autogen rule. The pod-level `securityContext.runAsNonRoot: true` was present but Kyverno's autogen generates per-container rules that require the field at container level individually. Auth-service and ledger-service already had it at container level; frontend and notification-service only had it at pod level. Fixed by adding `runAsNonRoot: true` to the container-level `securityContext` in both manifests in `clearledger-infra`.
-
-**Kustomize + ArgoCD image substitution**
-
-The infra repo was refactored to use Kustomize (prod pattern): deployment manifests use placeholder images (`clearledger/frontend:gitops`) and `kustomization.yaml` substitutes them with real registry images and SHA tags. ArgoCD auto-detects `kustomization.yaml` and runs `kustomize build` before applying. CI's `update-manifests` job uses `kustomize edit set image` to update only the `kustomization.yaml` — not individual deployment files — keeping manifests clean and immutable. The CI pipeline uses `rsync` to copy canonical manifests from the app repo, ensuring the infra repo never drifts from the source of truth.
-
----
-
-| Issue | What learners saw | Root cause | Fix (what we did) | Interview one-liner |
-|---|---|---|---|---|
-| **Empty dashboards after install** | Six dashboards exist, every panel says “No data” | Grafana is a **viewer** — it does not create events. Kyverno/Falco/app logs must happen first. | §7.4 lab: trigger denial, shell, failed login; set **Last 15 minutes** | *“Dashboards are empty until security events exist and the time range includes them.”* |
-| **Loki `connection refused` in browser** | Log panels red; metrics panels OK | Loki pod **crash-looping** under heavy LogQL; Kubernetes **liveness probe** killed it while busy (1s timeout, no memory cap) | More memory + slower probes in `loki-stack-values.yaml`; shorter default dashboard ranges; Grafana query timeout | *“We separated ‘pod Running’ from ‘service accepting queries’ and right-sized Loki for a single-node lab.”* |
-| **Opening all dashboards at once** | Loki restarts climb; everything goes empty | Six boards × 3h LogQL = query storm on one Loki replica | Open **one dashboard at a time**; default **1h/6h** not 3h/24h; cap `max_query_length` | *“We treated observability like production: rate-limit queries and load-test the path Grafana uses.”* |
-| **`make check-7` passes but Stage 7 not done** | Health check green, screenshots still empty | Health check only tests **pods + `/ready`**, not “Falco alert visible” | Done checklist in §7.6: require **your** events + screenshots 1–3 | *“Synthetic checks prove uptime; product proof needs correlated events on named dashboards.”* |
-| **Kyverno panel stays 0** | Terminal shows admission denied, Grafana shows 0 | Prometheus had not scraped yet, or no `request_allowed="false"` series in range | Wait 30–90s; use **Violations (last hour)** panel; confirm metric with PromQL in §7.2 | *“Admission denial is immediate; metrics are eventually consistent on scrape interval.”* |
-| **Request Rate panel always empty** | Failed logins work, HTTP rate flat | Cluster runs old images without `/metrics`; PodMonitor had nothing to scrape | `git push` (CI → infra repo → ArgoCD) or lab shortcut `build-metrics-images.sh` + PodMonitor `clearledger-apps` | *“Logs and metrics are separate pipelines — Promtail does not replace Prometheus app metrics.”* |
-| **Wrong Grafana dashboard links** | Console: `not correct url` / `skipping rendering` | Old dashboard UID/slug cached (em-dash vs hyphen) | UID-only URLs in §7.3; installer purges stale UIDs | *“We standardized dashboard UIDs in Git and treated Grafana URLs like API contracts.”* |
-| **Only six dashboards (not 30+)** | “Where did Kubernetes / Node dashboards go?” | `defaultDashboardsEnabled: false` on purpose | ClearLedger sidecar imports only `clearledger` tag | *“We reduced noise for a security lab — one tag, six audit-focused boards.”* |
-| **Audit Log dashboard empty** | Expected on MicroK8s | Cluster audit logs not shipped to Loki yet | Documented as future work; Falco + Kyverno + app logs still prove the lab | *“We scoped MVP observability to signals we actually emit; audit log shipping is a Phase 2 sink.”* |
-| **Falco panels all "No data"** | Wrong rule names; libbpf noise; rules used only `k8smeta` | Promtail ships `falco` container JSON; custom rules output `Shell spawned in ClearLedger` | LogQL: `{namespace="falco", container="falco"} != "libbpf" \| json`; rules: `k8s.ns.name` OR `k8smeta.ns.name` | *“Dashboards must match the log line Promtail actually ingests.”* |
-| **Failed login stat empty, log stream OK** | Stat used `$__range` + wrong substring | App logs say `Failed login attempt for …` | `instant` + `[1h]` + `\|= "Failed login attempt"` | *“Stat and log panels need different Loki query windows.”* |
-| **Runtime Threats = No data** | PromQL metrics not in Prometheus | `falcosecurity_*` counters never scraped | Compliance panel uses Loki count of Falco `Critical` lines | *“Use logs when metrics are not wired.”* |
-| **Pod Status = No data** | Wrong `condition="true"` label on `kube_pod_status_ready` | Metric is 0/1 per pod, no condition label | `sum(kube_pod_status_ready{namespace="clearledger"} == 1)` | *“Validate PromQL in Prometheus Explore before pasting into Grafana.”* |
-| **Request Rate empty** | `http_requests_total` has no `namespace` label | PodMonitor only scrapes clearledger pods | `sum by (app) (rate(http_requests_total[$__rate_interval]))` | *“Counter labels must match what the app actually exports.”* |
-| **Runtime Threat Trend empty** | LogQL panel wired to Prometheus | Compliance dashboard panel id 6 | Datasource **Loki** + same Falco LogQL as timeline | *“Datasource type must match query language.”* |
-| **Kyverno stat 0, table > 0** | Stat used fixed `[1h]`, table used `$__range` | Align windows to dashboard time picker | Both use `$__range` after dashboard refresh | *“Stat and table panels must share the same time window.”* |
-| **Kyverno stat 0, table shows 1.07** | 24h window + sparse counter | Event outside stat window | `ceil(sum(increase(...[1h])))` on stat panels | *“Pick a PromQL window that includes your test.”* |
-| **Argo CD 503 / redirect loop** | Only `server.insecure` patched | Missing `server.grpc.web` and `server.url` | `stages/stage-2-gitops/infra/argocd-cmd-params.yaml` + ingress reload | *“Ingress-terminated TLS needs the full Argo CD server parameter set.”* |
-
-**Story arc for interviews (30 seconds):**
-
-> “We wired Stages 4–6 into Grafana with ServiceMonitors for Prometheus and Promtail for Loki. The hard part wasn’t Helm — it was proving the **full path**: terminal action → metric or log → panel. We hit Loki instability under query load, fixed probes and limits, and defined Stage 7 done only when **our** Kyverno denial and Falco CRITICAL alert appeared on named dashboards with screenshots.”
+> “We wired Kyverno metrics and Falco logs into Grafana. The interesting part was end-to-end validation: I denied a bad pod, exec’d a shell to trigger Falco, and watched both show up on security dashboards. We also had to tune Loki on a single-node cluster when wide time ranges caused query timeouts.”
 
 ---
 
-### 7.9 — Re-apply dashboards after wiring fixes
+### 7.9 — If panels look wrong after a repo update
 
-If panels were empty before the query fixes in this repo:
+Re-apply dashboards, then generate **real** events (§7.4 — not fake data):
 
 ```bash
 bash stages/stage-7-observability/scripts/install-observability.sh
-SKIP_PROMPT=1 make demo-7
+# Then run Exercises A–C from §7.4 (Kyverno denial, Falco shell, failed logins)
 ```
 
-Set **Last 15 minutes**, then refresh each dashboard.
+Open Grafana at **Last 1 hour**, wait ~30–60s after each exercise, refresh once. See §7.10 for what each dashboard should show.
 
 ---
 
@@ -6063,92 +6400,73 @@ make snapshot STAGE=7
 make snapshots    # must show clearledger.stage7 — do not skip
 ```
 
-If the VM corrupts later: `make snapshots` → `make restore STAGE=7`. See [Saving your progress](#saving-your-progress).
+If the VM corrupts later: try [Path D — Mac reboot](#saving-your-progress) first (Vault re-bind); if that fails, `make snapshots` then `make restore STAGE=7`. See [Saving your progress](#saving-your-progress).
+
+### After Mac reboot — quick recovery
+
+If you closed the laptop or Multipass hung and came back to **Unknown** auth/ledger pods or **Init:0/1** with Vault `permission denied`, follow **Path D** in [Saving your progress](#saving-your-progress). You usually do **not** need `make restore` if you have a `stage7` snapshot and Path D succeeds.
 
 ---
 
 ## Stage 7.5 — OpenTelemetry (Optional)
 
-> Metrics and logs tell you what happened. Traces tell you **where time was spent and which service caused the delay.**
+**Skip this entire stage if you want.** Stage 7 (metrics + logs) is enough to finish the homelab and move to Stage 8. Do 7.5 only if you want traces for your portfolio or interviews — and only if the VM has spare RAM (~1.5 Gi free).
 
-**Goal:** send a real transaction and open Grafana Tempo to see its full journey: `POST /transactions` (ledger-service) → `GET /verify` (auth-service) → SQL INSERT (postgres) as a single waterfall with exact timings on each hop.
+### What traces add
 
-> **Optional — you can skip to Stage 8.** Traces are interview gold, but metrics + logs from Stage 7 are enough to complete the homelab. Skip if memory is tight or you are moving to AWS.
->
-> **Fast path:** `make check-7` passes + §7.6 screenshots done → jump to [Stage 8](#stage-8--aws-migration).
->
-> **Full path — Am I ready for Stage 7.5?**
->
-> - [ ] `make check-7` passes — Prometheus, Loki, Grafana healthy
-> - [ ] §7.6 done checklist complete (dashboards show real events)
-> - [ ] [§7.5.1](#751--check-memory-and-load-before-starting) — at least 1.5 Gi free RAM, load below ~2× VM CPU count
-> - [ ] Litmus scaled down (§7.0) if you ran Stage 6.5
->
-> **Done when:** `bash scripts/health-check.sh 7.5` passes and you have a Tempo trace screenshot.
-> **Then save:** `make snapshot STAGE=75` → `make snapshots` (confirm `clearledger.stage75`).
+Stage 7 tells you *that* something happened. Traces tell you *where time went* inside a single request.
 
-### What you need to know first
+- **Metrics** — “50 requests, 2 errors in the last minute.”
+- **Logs** — “Error at 14:23:07 on this pod.”
+- **Traces** — “The JWT call to auth-service took 120ms; Postgres INSERT took 8ms.”
 
-You have already seen what metrics and logs give you in Stage 7. Here is the gap they leave:
+That waterfall is what you build here: one real `POST /transactions` with timings for **ledger-service**, then **auth-service**, then **postgres**.
 
-- **Prometheus** tells you `ledger-service had 50 requests in the last minute, 2 were errors`
-- **Loki** tells you `request X logged a 500 error at 14:23:07`
-- Neither tells you: which call inside ledger-service failed? Was it the auth-service JWT check, the Postgres write, or the Redis publish? And how long did each step take?
+### Before you start (lab checklist)
 
-**Distributed tracing** answers this. Every request gets a **Trace ID** at the entry point. As it crosses service boundaries, each service adds a **Span** — a named, timed operation. The result is a waterfall diagram showing the complete call tree with exact durations.
+Finish Stage 7 first: §7.4 exercises done, §7.6 screenshots saved, `SKIP_CHAOS_CHECK=1 make check-7` passes.
 
-**OpenTelemetry (OTel)** is the vendor-neutral standard for this. The ClearLedger services already have OTel instrumentation in the code (`opentelemetry-instrumentation-fastapi`, `opentelemetry-instrumentation-sqlalchemy`). They send spans via gRPC to an **OTel Collector**, which forwards them to **Grafana Tempo** for storage. Grafana then queries Tempo and renders the trace.
+Then check the VM has headroom (`multipass exec clearledger -- free -h` — want ~1.5 Gi free). If you ran Stage 6.5 Litmus, scale it down (§7.0) before adding Tempo.
 
-**Why your pods have been logging warnings since Stage 7:**
+**Done when:** you see a trace waterfall in Grafana Explore (Tempo) and `make check-75` passes. Save with `make snapshot STAGE=75`.
+
+### Why apps log OTEL warnings today
+
+Since Stage 7 you may see:
 
 ```
 WARNING: Transient error StatusCode.UNAVAILABLE encountered while exporting traces
 ```
 
-This is the OTel exporter in each app trying to reach `otel-collector.monitoring.svc.cluster.local:4317` — which doesn't exist yet. The app degrades gracefully (traces are dropped, everything else works). Stage 7.5 installs the collector and stops these warnings permanently.
+Each app is already instrumented and tries to send spans to `otel-collector.monitoring:4317`. That service does not exist until this stage. Apps keep working; traces are dropped. Installing the collector below stops the warnings.
+
+### How data flows
+
+1. **ledger-service** (and other apps) — OTel SDK auto-instruments FastAPI and SQLAlchemy
+2. **OTel Collector** (`monitoring` namespace, port 4317) — batches spans
+3. **Grafana Tempo** — stores traces
+4. **Grafana Explore** — Tempo datasource, waterfall view
+
+OpenTelemetry is the standard; Tempo is just the storage backend. Apps send spans to the collector, not directly to Tempo — swap backends later without changing app code.
 
 ---
 
-### How the pipeline works
+### 7.5.1 — Check memory and load
 
-```
-app pod (ledger-service)
-  │  OTel SDK auto-instruments FastAPI + SQLAlchemy
-  │  sends spans via gRPC to port 4317
-  ▼
-OTel Collector (monitoring namespace, port 4317)
-  │  batches and forwards
-  ▼
-Grafana Tempo (monitoring namespace, port 4317 for OTLP, 3100 for query)
-  │  stores traces
-  ▼
-Grafana → Explore → Tempo datasource → trace waterfall
-```
-
----
-
-### 7.5.1 — Check memory and load before starting
-
-Tempo adds ~300MB. Confirm you have headroom and the node is not already saturated:
+Tempo needs ~300MB. Confirm headroom before installing:
 
 ```bash
-multipass exec clearledger -- free -h
-# You need at least 1.5Gi available
-
-multipass exec clearledger -- uptime
-# load average (1m) should stay below ~2× your VM CPU count (e.g. <12 on the default 6-CPU VM)
-
-bash scripts/health-check.sh 7
+multipass exec clearledger -- free -h    # want ~1.5Gi available
+multipass exec clearledger -- uptime      # load should be reasonable for your CPU count
+SKIP_CHAOS_CHECK=1 bash scripts/health-check.sh 7
 ```
 
-If memory is low or load is high, confirm Litmus is still scaled down (§7.0):
+If Litmus is still running from Stage 6.5, scale it down first (§7.0):
 
 ```bash
 kubectl get pods -n litmus --field-selector=status.phase=Running
 # Expected: no resources found
 ```
-
-If Litmus pods are still Running, scale them down again before installing Tempo.
 
 ---
 
@@ -6177,7 +6495,7 @@ kubectl get pods -n monitoring -l app.kubernetes.io/name=tempo
 ```
 
 ```bash
-kubectl exec -n monitoring tempo-0 -- wget -qO- http://localhost:3100/ready
+kubectl exec -n monitoring tempo-0 -- wget -qO- http://localhost:3200/ready
 # Expected: ready
 ```
 
@@ -6199,12 +6517,20 @@ kubectl get pods -n monitoring -l app=otel-collector
 # Expected: otel-collector-xxxxx   1/1   Running
 ```
 
-**Verify it can receive traces (check the collector logs):**
+**Verify the collector started (not trace receipt yet):**
+
+Apps **push** spans to the collector over OTLP — the collector does not scrape pods. At this step you are only confirming it is listening.
 
 ```bash
-kubectl logs -n monitoring deploy/otel-collector --tail=10
-# Expected: service started, no errors
+kubectl logs -n monitoring deploy/otel-collector --tail=15
+# Expected:
+#   Starting GRPC server ... endpoint: 0.0.0.0:4317
+#   Starting HTTP server ... endpoint: 0.0.0.0:4318
+#   Everything is ready. Begin running and processing data.
+# No crash loops or repeated errors.
 ```
+
+Proof that traces are actually flowing comes later — after you generate traffic in §7.5.6, check collector logs for span export lines from the `debug` exporter, then confirm the trace in Grafana Tempo (§7.5.7).
 
 ---
 
@@ -6265,32 +6591,122 @@ curl -s -X POST http://clearledger.local/ledger/transactions \
   -d '{"amount": 5000, "direction": "credit"}' | python3 -m json.tool
 ```
 
+**Verify the collector received spans:**
+
+```bash
+kubectl logs -n monitoring deploy/otel-collector --tail=30 \
+  | grep -iE "Traces|spans|ResourceSpans" || echo "No span lines yet — see §7.5.5 (OTEL env / netpol)"
+# Expected after a successful transaction: debug exporter lines mentioning exported traces/spans
+```
+
 ---
 
 ### 7.5.7 — View the trace in Grafana
 
-1. Open **http://grafana.local**
-2. Left sidebar → **Explore** (compass icon)
-3. Top datasource dropdown → select **Tempo**
-4. Search type: **Search** tab
-5. Service name: `ledger-service`
-6. Click **Run query**
-7. Click on the most recent trace
+Open **http://grafana.local** → left sidebar **Explore** (compass icon).
 
-**What you should see:**
+#### Step 1 — Select Tempo and open Search
+
+At the top of the query pane:
+
+1. Datasource dropdown (orange **T** logo) → **Tempo**
+2. Query row labeled **A (Tempo)** → three tabs: **Search** | TraceQL | Service Graph
+3. Click **Search** — this shows dropdown filters. **TraceQL** is a text box only; if you land there with nothing typed you get `0 series returned`.
+
+#### Step 2 — Filter by service
+
+In the **Search** tab:
+
+- **Service Name** → type or select `ledger-service`
+- Leave Span Name, Status, Duration, and Tags empty for now
+- Grafana shows the query it will run: `{resource.service.name="ledger-service"}`
+
+Set the time range (top-right clock icon) to **Last 15 minutes** so your §7.5.6 transaction is included.
+
+#### Step 3 — Run the query
+
+Grafana Explore often has **no button labeled “Run query”**. After you pick a service, results may appear automatically. If the table is empty, use the **blue circular refresh button** in the **top-right** of the main pane (next to the time picker). A magnifying-glass icon beside it does the same in some versions.
+
+#### Step 4 — Open the trace waterfall
+
+Below the query editor, find **Table - Traces**. You should see at least one row like:
+
+| Column | Example |
+|--------|---------|
+| Trace ID | `5730edf3…` (blue link) |
+| Start time | when you ran the `curl` |
+| Service | `ledger-service` |
+| Name | `POST /transactions` |
+| Duration | ~200ms (yours may differ) |
+
+**Click the Trace ID link.** The right panel opens the trace detail view.
+
+#### What the trace detail view shows
+
+Header: **`ledger-service: POST /transactions`**
+
+- **Trace ID** — unique ID for this request
+- **Duration** — total end-to-end time
+- **Services** — `2` (`ledger-service` and `auth-service` for a normal transaction)
+
+Expand spans in the timeline:
 
 ```
-POST /transactions   (ledger-service)   ~50ms total
-  ├── GET /verify    (auth-service)     ~12ms  ← JWT verification call
-  ├── INSERT         (postgres)         ~8ms   ← database write
-  └── PUBLISH        (redis)            ~2ms   ← notification trigger (if amount ≥ 10000)
+ledger-service   POST /transactions          (~total duration)
+  ├── auth-service   GET /verify             ← JWT check over HTTP
+  ├── ledger-service INSERT / sqlalchemy    ← Postgres write
+  └── (optional) redis PUBLISH              ← only if amount ≥ notification threshold
 ```
 
-Each bar is a span. The width is proportional to time spent. Clicking a span shows its attributes — the SQL query text, HTTP status code, service name.
+Click any span bar to see **Span attributes** (HTTP method, status, SQL text) and **Resource attributes** (`service.name`, `k8s.cluster.name=clearledger`, etc.).
 
-**Connecting traces to logs:** Click any span → **Logs** tab → Grafana jumps to the matching Loki log entries for that pod at that exact timestamp.
+**Connecting traces to logs:** with a span selected, open the **Logs** tab — Grafana jumps to matching Loki entries for that pod at that timestamp.
 
-**Take a screenshot of the trace waterfall.** This is your portfolio proof for Stage 7.5.
+**Screenshot this trace detail view** — portfolio proof for Stage 7.5.
+
+#### TraceQL alternative
+
+Prefer the text box? Switch to the **TraceQL** tab, paste:
+
+```traceql
+{ resource.service.name = "ledger-service" }
+```
+
+Then use the same **blue refresh** button top-right.
+
+#### If the table is empty
+
+| Symptom | Fix |
+|---------|-----|
+| `0 series returned` on TraceQL | Switch to **Search** tab, or paste the TraceQL query above |
+| Search tab, no rows | Widen time range; re-run the §7.5.6 `curl` transaction |
+| Error connecting to Tempo | Datasource URL must be port **3200** — `kubectl apply -f stages/stage-7.5-opentelemetry/infra/otel/grafana-datasource-tempo.yaml` then `kubectl rollout restart deployment/kube-prometheus-stack-grafana -n monitoring` |
+| No spans in collector logs | See §7.5.5 (OTEL env vars / network policy) |
+
+---
+
+### 7.5.7b — Understand when a trace happens
+
+Tracing is **not always on**. Spans are created only when a request hits an instrumented route. `/health` probes create small traces; your `POST /transactions` in §7.5.6 created the full one.
+
+**One HTTP request → one trace ID → many spans:**
+
+| Span in Tempo | What caused it |
+|---------------|----------------|
+| `POST /transactions` (`ledger-service`) | Your curl reached the ledger API |
+| `GET /verify` (`auth-service`) | Ledger called auth to validate the JWT |
+| SQL / sqlalchemy spans | `db.commit()` inserted the row |
+| Redis span | Only if `amount >= 10000` (notification threshold in `main.py`) |
+
+Your `amount: 5000` transaction is why you saw auth + SQL but **no redis** — that is expected.
+
+**Why both services share one trace:** OpenTelemetry copies a trace ID into outbound HTTP headers. When ledger calls auth, auth continues the same trace instead of starting a new one.
+
+**Exercise A — map spans to code:** Open `app/ledger-service/main.py`, find `create_transaction`. Each bar in the waterfall maps to a step in that function (`get_current_user` → auth, `db.commit` → SQL, `redis_client.publish` → redis).
+
+**Exercise B — threshold:** Run §7.5.6 again with `"amount": 15000`. Search Tempo — a redis span appears. With `5000` it does not.
+
+**Exercise C — three signals, one request:** Note the trace start time. At the same moment: **Tempo** shows where time went, **Loki** shows what was logged, **Prometheus** shows request rate. Same incident, three lenses.
 
 ---
 
@@ -6310,125 +6726,134 @@ Expected output:
   ✓ auth-service has OTEL_EXPORTER_OTLP_ENDPOINT set
 ```
 
+**If you see a warning instead:**
+
+```text
+⚠ OTel env vars not found on auth-service — redeploy with updated manifests
+```
+
+`check-75` looks for `OTEL_EXPORTER_OTLP_ENDPOINT` in the **deployment manifest**. Older Stage 5 manifests may not list it even though tracing works — the Python apps default to `http://otel-collector.monitoring.svc.cluster.local:4317` when the env var is missing.
+
+You can proceed if collector logs show spans and Tempo shows your trace. To clear the warning, apply **only** the app deployments (not the whole kustomize tree — Kyverno may block redis/postgres patches):
+
+```bash
+kubectl apply -f infra/manifests/auth-service/deployment.yaml
+kubectl apply -f infra/manifests/ledger-service/deployment.yaml
+kubectl rollout restart deployment/auth-service deployment/ledger-service -n clearledger
+make check-75
+```
+
 **Save your VM** after `make check-75` — see the block at the end of Stage 7.5 below.
 
 ---
 
-### What you learned in Stage 7.5
+### What you learned
 
-- The three observability signals and when each one is the right tool: metrics for aggregates, logs for forensics, traces for request journeys
-- What a span is (a named, timed operation) and how spans nest to form a trace
-- How W3C TraceContext headers propagate a Trace ID across service boundaries automatically — without changing business logic
-- How to find performance bottlenecks: look at span durations to see which service or database call is the slowest
-- Why OTel is vendor-neutral: the same instrumentation works with Tempo today and Datadog or Jaeger tomorrow with only a collector config change
-- The collector pattern: apps never talk directly to storage — they talk to a collector, which routes to whatever backend you configure
+You installed the missing piece from Stage 7: **traces**.
 
-**What you can now put on your CV / say in an interview:**
+Stage 7 gave you **metrics** (how many requests per second?) and **logs** (what did the app print?). Stage 7.5 adds **traces** (where did one slow request spend its time?).
 
-> Added distributed tracing with OpenTelemetry and Grafana Tempo, and can follow a single request across services in one trace.
+**Example from this lab:** when you ran `POST /transactions`, Tempo showed one timeline:
 
-### DevSecOps lesson — Stage 7.5 in one paragraph
+- ledger received the request
+- ledger called auth to verify your token
+- ledger wrote to Postgres
 
-**Observability is not one tool, it is three signals working together.** Prometheus told you ledger-service had an error spike. Loki told you which log line fired. Tempo told you the auth-service JWT check was taking 200ms because it was hitting a cold Postgres connection — that is the root cause, and neither metrics nor logs could show it alone. OpenTelemetry is the 2026 standard because it is vendor-neutral and already built into modern frameworks — you instrument once and route to whatever backend you choose. The collector in the middle is the routing layer: change the exporter config, not the application.
+That is one **trace** — one user action, one ID, multiple services. It only exists for that request; nothing is traced when no one is calling the API.
 
-**Save your VM before Stage 8** (optional stage — skip if you did not run 7.5). After `make check-75` passes:
+| Signal | Question it answers | You used |
+|--------|---------------------|----------|
+| Metrics | How busy is the service? | Prometheus (Stage 7) |
+| Logs | What was logged? | Loki (Stage 7) |
+| Traces | Which step in this request was slow? | Tempo (Stage 7.5) |
+
+**If someone asks in an interview:** “I sent one transaction through the API and used Grafana Tempo to see it hit ledger, then auth, then the database — all in one trace.”
+
+---
+
+### Stage 7.5 done — save your VM
+
+Optional stage. Skip the snapshot if you are moving straight to Stage 8 without 7.5.
 
 ```bash
+make check-75          # confirm tracing stack is up
 make snapshot STAGE=75
-make snapshots    # must show clearledger.stage75 — do not skip
+make snapshots         # must list clearledger.stage75
 ```
 
-If the VM corrupts later: `make snapshots` → `make restore STAGE=75`. See [Saving your progress](#saving-your-progress).
+VM broke later? `make snapshots` then `make restore STAGE=75`. Details: [Saving your progress](#saving-your-progress).
 
 ---
 
 ## Stage 8 — AWS Migration
 
-> The architecture survives the migration because the contracts are portable.
+**Goal:** run the same ClearLedger app on AWS instead of your laptop VM.
 
-**Goal:** the same application, the same security layers, running on AWS managed services instead of your laptop.
+You are not rewriting the application. Stages 0–7 built containers on Kubernetes with GitOps, Kyverno, secrets, and observability. Stage 8 changes **where** it runs — you keep the same images, the same ArgoCD workflow, and the same security policies; only the cloud services underneath change (MicroK8s → EKS, Vault → Secrets Manager, and so on).
+
+- **Homelab:** MicroK8s, Postgres in a pod, dev Vault, Docker Hub, `clearledger.local`
+- **AWS:** EKS, RDS, Secrets Manager, ECR, ALB hostname
 
 > **Am I ready for Stage 8?**
 >
 > - [ ] Homelab complete through Stage 7 (Stage 7.5 optional)
-> - [ ] `make check-7` passes (and `health-check.sh 7.5` if you did traces)
+> - [ ] `make check-7` passes (and `make check-75` if you did traces)
 > - [ ] AWS account with billing alerts enabled — `make aws-up` creates billable resources
-> - [ ] Understand what Stages 0–7 built (read §8.2 even if you use `make aws-up`)
+> - [ ] Skim §8.2 so you know what `make aws-up` does (even if you use the quick path)
 >
-> **Done when:** app reachable on AWS ALB, ArgoCD syncing, `make aws-down` run when finished to stop charges.
+> **Done when:** app reachable on the AWS ALB, ArgoCD syncing, and you run `make aws-down` when finished to stop charges.
 
-### Demo stack vs production
+### What `make aws-up` gives you
 
-| | Demo stack (`make aws-up`) | Production add-ons (documented, not auto-applied) |
-|---|---|---|
-| Label | **Demo stack** — production-*shaped*, not production-*ready* | Production hardening checklist below |
-| Deploy | ArgoCD app `clearledger-aws` → `stages/stage-8-aws-migration/manifests/` | Staging env → promote same SHA |
-| TLS | HTTP ALB | `ingress-aws-https.example.yaml` + ACM |
-| Observability | Stage 7 stack installed by spinup | Same + alert routing |
-| CI | `ci-aws.yaml` — Gitleaks, Semgrep, Checkov, Trivy, Cosign | + full DAST against `AWS_DAST_BASE_URL` |
+This is a **demo stack** — production-*shaped*, not production-*ready*. HTTP only (no TLS cert). Stage 7 observability is installed automatically. CI still runs Gitleaks, Semgrep, Checkov, Trivy, and Cosign.
 
-> **Do not** `kubectl apply` app Deployments on AWS after bootstrap. Git + ArgoCD is the contract (Stage 2). Spinup may apply kustomize **once** if Git is not pushed yet; push `kustomization.yaml` and let ArgoCD own the cluster.
+For real production you would add HTTPS (see `ingress-aws-https.example.yaml`), staging before promote, and alert routing. Those are documented but not applied by the spinup script.
 
-### Secrets: three patterns (Vault → ESO → CSI)
+**GitOps rule:** after bootstrap, do not `kubectl apply` app Deployments by hand. ArgoCD owns the cluster (Stage 2). Push manifest changes to Git and let ArgoCD sync.
 
-| Pattern | Where | How pods get secrets |
-|---|---|---|
-| **1. Vault agent** | Homelab Stages 5–7 | Sidecar injects **files** at `/vault/secrets/*` |
-| **2. ESO** | AWS Stage 8 (**this lab**) | Syncs Secrets Manager → **K8s Secret** → `secretKeyRef` / env |
-| **3. CSI Driver** | AWS Stage 8 (installed + §8.5 exercise) | Mounts SM secrets as **files** — no Secret object in etcd |
+### Secrets on AWS
 
-```text
-Vault:  SM/Vault KV → agent sidecar → /vault/secrets/database_url (file)
-ESO:    Secrets Manager → ESO (IRSA) → K8s Secret → DATABASE_URL env
-CSI:    Secrets Manager → CSI volume (IRSA on app SA) → /mnt/secrets/database_url (file)
-```
+On the homelab, Vault injected secret **files**. On AWS, secrets live in **Secrets Manager**. Two ways to get them into pods:
 
-**This lab uses ESO by default** (`manifests/deployments/auth-service.yaml` + `external-secrets.yaml`). **CSI is installed on every AWS spinup** (step 11) — SecretProviderClasses are in Git; the §8.5 exercise swaps auth to file mounts. See `manifests/csi/` and `docs/secrets-patterns.md`.
+1. **ESO (default in this lab)** — External Secrets Operator copies Secrets Manager → Kubernetes Secret → env vars like `DATABASE_URL`.
+2. **CSI (installed + §8.5 exercise)** — mounts secrets as **files** at `/mnt/secrets/*` (no Secret object in etcd). Same code path as Vault homelab.
 
-**IRSA** is how AWS trusts Kubernetes identities (ESO pod or app pod). No `AWS_ACCESS_KEY_ID` in Git or cluster config.
+**IRSA** lets AWS trust a Kubernetes ServiceAccount — no `AWS_ACCESS_KEY_ID` in Git or in the cluster. Details: `stages/stage-8-aws-migration/docs/secrets-patterns.md`.
 
 ---
 
 ### 8.1 — Two ways through Stage 8
 
-| Path | When to use it |
-|---|---|
-| **Quick** — `make aws-up` | You want the full demo stack fast (~45–60 min). Read §8.2 so you know what ran. |
-| **Manual** — §8.3 step by step | You are learning AWS migration mechanics, interviewing, or debugging a failed spinup. |
-
-> **Do not skip the manual section if you only ran `make aws-up`.** The Makefile wraps `aws-spinup.sh`; without §8.2–§8.5 you will not know what Terraform, ESO, CSI, or ArgoCD each contributed.
-
-**Quick path:**
+**Quick path (~45–60 min):** edit `terraform/secrets.tf` (replace `CHANGE_ME_BEFORE_APPLY`), then:
 
 ```bash
-# Edit terraform/secrets.tf first — replace CHANGE_ME_BEFORE_APPLY
-make aws-up    # wraps stages/stage-8-aws-migration/scripts/aws-spinup.sh
-make aws-down  # destroys billable resources
+make aws-up    # runs stages/stage-8-aws-migration/scripts/aws-spinup.sh
+make aws-down  # destroys billable resources when you are done
 ```
+
+Read §8.2 afterward so you know what ran.
+
+**Manual path (§8.3):** run Terraform, ECR push, ArgoCD, Kyverno, ESO, and deploy yourself. Use this when learning, interviewing, or debugging a failed spinup.
+
+Do not skip §8.2–§8.5 if you only ran `make aws-up` — otherwise you will not know what Terraform, ESO, or ArgoCD each did.
+
+Before your first Stage 8 push, read [§8 — CI routing and `CLEARLEDGER_CI_TARGET`](#ci-routing-stages-17-vs-stage-8) and set `CLEARLEDGER_CI_TARGET=aws` only after Terraform succeeds — not while you are still on Stages 1–7.
 
 ---
 
-### 8.2 — What `make aws-up` runs (15 steps)
+### 8.2 — What `make aws-up` runs
 
-| Step | Script banner | What it does |
-|---|---|---|
-| 1 | Prerequisites | `aws`, `terraform`, `kubectl`, `docker`, `helm`, `git`, `kustomize`; `aws sts get-caller-identity` |
-| 2 | Terraform | VPC, EKS 1.31, RDS, ECR, ALB IAM, Secrets Manager, GuardDuty, CloudTrail, IRSA roles, GitHub OIDC role |
-| 3 | GuardDuty & CloudTrail | Confirms detectors and trail logging |
-| 4 | Build & push ECR | `docker build` + push auth/ledger/notification; optional Cosign sign |
-| 5 | GitOps manifests | Patches `manifests/kustomization.yaml` with ECR registry + git SHA; patches ESO/CSI region |
-| 6 | kubeconfig | `aws eks update-kubeconfig` |
-| 7 | ArgoCD | Stable manifest install in `argocd` namespace |
-| 8 | Kyverno | Helm install + `infra/policies/` ClusterPolicies |
-| 9 | Falco | Helm + **falco** IRSA role (not ESO role) |
-| 10 | ESO + IRSA SAs | External Secrets Operator + workload ServiceAccounts with IRSA annotations |
-| 11 | **CSI driver** | `install-csi-secrets.sh` — Secrets Store CSI Driver + AWS provider + SecretProviderClasses |
-| 12 | Observability | Stage 7 stack (`install-observability.sh`) |
-| 13 | GitOps deploy | ArgoCD Application `clearledger-aws` → `stages/stage-8-aws-migration/manifests/` |
-| 14 | ALB | Waits for `clearledger-ingress` hostname |
-| 15 | Summary | Prints HTTP URL, tear-down reminder, pointer to §8.3 |
+The spinup script runs 15 steps in order:
 
-Default deploy uses **ESO** (step 10). Step 11 installs **CSI** so you can run §8.5 without reinstalling anything.
+**Setup (1–6)** — check tools and AWS login; `terraform apply` (VPC, EKS, RDS, ECR, Secrets Manager, GuardDuty, CloudTrail, IAM); confirm security services; build and push images to ECR; patch `manifests/kustomization.yaml` with your registry and git SHA; configure `kubectl` for EKS.
+
+**Platform (7–12)** — install ArgoCD; Kyverno + cluster policies; Falco; External Secrets Operator + IRSA service accounts; CSI secrets driver; Stage 7 observability stack.
+
+**Deploy (13–15)** — ArgoCD app `clearledger-aws` syncs `stages/stage-8-aws-migration/manifests/`; wait for ALB hostname; print URL and tear-down reminder.
+
+Default app deploy uses **ESO** for secrets. CSI is also installed so you can try file mounts in §8.5 without extra setup.
+
+**Terraform layout** — there is no `terraform.tf` file. The `terraform {}` block (version, providers, optional S3 backend) is at the top of `main.tf`. Resources are split by topic: `vpc.tf`, `eks.tf`, `rds.tf`, `ecr.tf`, `alb.tf`, `iam.tf`, `secrets.tf`, `security.tf`. Run all commands from `stages/stage-8-aws-migration/terraform/`.
 
 ---
 
@@ -6459,28 +6884,94 @@ terraform output -raw kubeconfig_command
 cd ../../..
 ```
 
+> **When did ECR get created?** During `terraform apply` (step 2), not when you `docker push`.
+> Terraform provisions empty ECR repositories (`clearledger/auth-service`, `ledger-service`,
+> `notification-service`) in **`eu-west-1`**. Check the ECR console **Created at** timestamp —
+> it matches your apply time (e.g. `2026-06-30 10:55:31 UTC+01`). Images appear only after
+> step 4 (`docker build` + `docker push`). Repos with **0 images** after apply is normal.
+
+**Set your CLI default region** (GuardDuty, CloudTrail, EKS, RDS, and ECR are all regional —
+without this, AWS CLI defaults to `us-east-1` and commands look like resources are missing):
+
+```bash
+aws configure set region eu-west-1
+aws configure get region   # expect: eu-west-1
+```
+
 **Steps 3–4 — Security services + ECR images**
 
 ```bash
-aws guardduty list-detectors
-aws cloudtrail get-trail-status --name clearledger-trail
+AWS_REGION=eu-west-1   # or rely on aws configure set region above
 
+# Step 3 — verify security services (must pass --region eu-west-1)
+aws guardduty list-detectors --region "${AWS_REGION}"
+# Expect: DetectorIds: ["<id>"]  — empty [] means wrong region, not "not created"
+
+aws cloudtrail get-trail-status --name clearledger-trail --region "${AWS_REGION}"
+# Expect: IsLogging: true
+# Error "Unknown trail ... us-east-1" → you forgot --region eu-west-1
+
+# Step 4 — build and push images to the ECR repos Terraform already created
 ECR_REGISTRY=$(terraform -chdir=stages/stage-8-aws-migration/terraform output -raw ecr_registry_url)
-aws ecr get-login-password --region eu-west-1 | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+AUTH_ECR=$(terraform -chdir=stages/stage-8-aws-migration/terraform output -raw auth_service_ecr_url)
+LEDGER_ECR=$(terraform -chdir=stages/stage-8-aws-migration/terraform output -raw ledger_service_ecr_url)
+NOTIFY_ECR=$(terraform -chdir=stages/stage-8-aws-migration/terraform output -raw notification_service_ecr_url)
 TAG=$(git rev-parse --short HEAD)
-docker build -t "${ECR_REGISTRY}/clearledger/auth-service:${TAG}" app/auth-service && docker push ...
-# Repeat for ledger-service, notification-service (or run step 4 block from aws-spinup.sh)
+
+aws ecr get-login-password --region "${AWS_REGION}" \
+  | docker login --username AWS --password-stdin "${ECR_REGISTRY}"
+
+docker build -t "${AUTH_ECR}:${TAG}" app/auth-service && docker push "${AUTH_ECR}:${TAG}"
+docker build -t "${LEDGER_ECR}:${TAG}" app/ledger-service && docker push "${LEDGER_ECR}:${TAG}"
+docker build -t "${NOTIFY_ECR}:${TAG}" app/notification-service && docker push "${NOTIFY_ECR}:${TAG}"
+
+# Confirm images landed (optional)
+aws ecr describe-images --repository-name clearledger/auth-service --region "${AWS_REGION}" \
+  --query 'imageDetails[*].imageTags' --output table
 ```
 
 **Step 5 — GitOps source of truth**
 
+Patch placeholders in `kustomization.yaml` (same `sed` as `aws-spinup.sh` step 5):
+
 ```bash
-# aws-spinup.sh sed-patches these — do the same manually or copy kustomization after spinup:
-# stages/stage-8-aws-migration/manifests/kustomization.yaml  → ECR + tag
-# manifests/external-secrets.yaml + manifests/csi/*.yaml       → region
-git add stages/stage-8-aws-migration/manifests/
+AWS_REGION=eu-west-1
+ECR_REGISTRY=$(terraform -chdir=stages/stage-8-aws-migration/terraform output -raw ecr_registry_url)
+TAG=$(git rev-parse --short HEAD)
+KUST=stages/stage-8-aws-migration/manifests/kustomization.yaml
+
+sed -i.bak \
+  -e "s|REPLACE_ECR_REGISTRY|${ECR_REGISTRY}|g" \
+  -e "s|REPLACE_IMAGE_TAG|${TAG}|g" \
+  "${KUST}"
+rm -f "${KUST}.bak"
+
+# Region in ESO + CSI manifests (only if not eu-west-1)
+if [[ "${AWS_REGION}" != "eu-west-1" ]]; then
+  sed -i.bak "s|region: eu-west-1|region: ${AWS_REGION}|g" \
+    stages/stage-8-aws-migration/manifests/external-secrets.yaml \
+    stages/stage-8-aws-migration/manifests/csi/auth-service-spc.yaml \
+    stages/stage-8-aws-migration/manifests/csi/ledger-service-spc.yaml
+  rm -f stages/stage-8-aws-migration/manifests/external-secrets.yaml.bak \
+        stages/stage-8-aws-migration/manifests/csi/*.bak 2>/dev/null || true
+fi
+
+# Verify before commit
+grep -E 'newName:|newTag:' "${KUST}"
+# Expect: 334091769766.dkr.ecr.eu-west-1.amazonaws.com/clearledger/... and your git SHA
+
+git add stages/stage-8-aws-migration/manifests/kustomization.yaml
 git commit -m "stage8: ECR images ${TAG}"
 git push
+```
+
+Also fix the ArgoCD Application repo URL once (replace with your GitHub username):
+
+```bash
+# Example: Osomudeya/clearledger — check: git remote get-url origin
+sed -i.bak 's|YOUR_GITHUB_USERNAME|YOUR_ACTUAL_GITHUB_USER|g' \
+  stages/stage-8-aws-migration/argocd/clearledger-aws-app.yaml
+rm -f stages/stage-8-aws-migration/argocd/clearledger-aws-app.yaml.bak
 ```
 
 **Step 6 — Cluster access**
@@ -6627,11 +7118,7 @@ Revert by switching kustomization back to `auth-service.yaml` and syncing.
 
 ---
 
-Everything you built in Stages 0–7 runs on a VM on your laptop. In production, you would use cloud-managed services: AWS EKS instead of MicroK8s, RDS instead of a Postgres container, ECR instead of Docker Hub, Secrets Manager or Vault on EC2 instead of dev-mode Vault.
-
-The key insight: **the application code does not change.** The Dockerfiles, the FastAPI services, the CI pipeline logic — all identical. What changes is the infrastructure underneath. That is the point of containerization and Kubernetes — your app is portable because it does not depend on the underlying platform.
-
-**Terraform** provisions the AWS resources. It reads `.tf` files that describe the desired infrastructure (VPC, subnets, EKS cluster, RDS database, etc.) and creates everything in your AWS account.
+**Terraform** provisions the AWS resources — VPC, EKS, RDS, ECR, Secrets Manager, IAM roles — from `.tf` files in `stages/stage-8-aws-migration/terraform/`.
 
 ### Two OIDC Ideas in Stage 8
 
@@ -6662,23 +7149,76 @@ No AWS keys inside Kubernetes Secrets
 
 When Terraform runs, it creates a role called `clearledger-github-actions-ecr`. The Stage 8 pipeline in `.github/workflows/ci-aws.yaml` assumes that role using OIDC, logs in to ECR, pushes images, then updates `stages/stage-8-aws-migration/manifests/kustomization.yaml` — ArgoCD app `clearledger-aws` syncs the cluster.
 
-**After the stack is up** (§8.3 or `make aws-up`), configure GitHub for ongoing AWS CI:
+### CI routing: Stages 1–7 vs Stage 8 {#ci-routing-stages-17-vs-stage-8}
+
+The repo ships **two** workflow files. Only one should be active for push/PR on your fork at a time:
+
+| | Homelab (Stages 1–7) | AWS (Stage 8) |
+|---|---|---|
+| **Workflow** | `.github/workflows/ci.yaml` | `.github/workflows/ci-aws.yaml` |
+| **Runner** | Self-hosted `clearledger` (Multipass VM) | GitHub-hosted `ubuntu-latest` |
+| **Registry** | Docker Hub | ECR |
+| **GitOps target** | `clearledger-infra` repo | `stages/stage-8-aws-migration/manifests/` in this repo |
+| **Opt-in** | **Default** — nothing to configure | Set repo variable `CLEARLEDGER_CI_TARGET=aws` after `terraform apply` |
+
+**Fresh starters (Stages 1–7) — no change.** When you fork or clone this repo and follow the lab from Stage 0, you do **not** set `CLEARLEDGER_CI_TARGET`. The variable is unset by default, so:
+
+- Every push to `main` runs **`ci.yaml`** on your self-hosted runner (same as before).
+- **`ci-aws.yaml` jobs are skipped** on push (they only run when `CLEARLEDGER_CI_TARGET=aws` or you trigger the workflow manually).
+- Repository variables are **per-repo** — they are not in git and are **not** copied when someone forks your repo. Each learner configures their own fork.
+
+**Stage 8 only — enable AWS CI after Terraform.** Set the variables below **after** `terraform apply` succeeds (§8.3 step 2), not while you are still on Stages 1–7.
+
+> **⚠ Caution — do not set `CLEARLEDGER_CI_TARGET=aws` early**
+>
+> If you set `CLEARLEDGER_CI_TARGET=aws` before Stage 8:
+>
+> - Homelab **`ci.yaml` stops running** on push (no Docker Hub builds, no `clearledger-infra` updates).
+> - **`ci-aws.yaml` runs instead** and will fail at the ECR/OIDC steps until AWS infrastructure, `AWS_ACTIONS_ROLE_ARN`, and `AWS_ACCOUNT_ID` / `AWS_REGION` are configured.
+>
+> Symptoms: pushes queue forever on a missing self-hosted runner, or AWS CI fails with OIDC/ECR errors while you are still on MicroK8s. **Fix:** delete the variable (or set it back to empty) until you start §8, or finish §8 setup first.
+>
+> To remove if you set it by mistake: GitHub → repo **Settings** → **Secrets and variables** → **Actions** → **Variables** → delete `CLEARLEDGER_CI_TARGET`.
+
+**After the stack is up** (§8.3 or `make aws-up`), configure GitHub for AWS CI on **GitHub-hosted runners** (same security gates as homelab CI — no self-hosted runner):
 
 ```text
-GitHub production environment secrets:
-  GITHUB_ACTIONS_ROLE_ARN = terraform output github_actions_ecr_role_arn
+GitHub repository Variables (Settings → Secrets and variables → Actions → Variables):
+  CLEARLEDGER_CI_TARGET = aws          # routes push/PR to ci-aws.yaml, skips homelab ci.yaml
+  AWS_ACCOUNT_ID        = your 12-digit AWS account ID
+  AWS_REGION            = eu-west-1
 
-GitHub Variables:
-  AWS_ACCOUNT_ID = your 12-digit AWS account ID
-  AWS_REGION     = eu-west-1
+GitHub production environment (create first — Settings → Environments → New environment → name: production):
+  AWS_ACTIONS_ROLE_ARN = terraform output github_actions_ecr_role_arn
 ```
 
-Run **CI — AWS (ECR + OIDC)** from the Actions tab (manual). Same gates as `ci.yaml`; updates `kustomization.yaml` in this repo — not `clearledger-infra`.
+> GitHub rejects secret names starting with `GITHUB_` — use `AWS_ACTIONS_ROLE_ARN`, not `GITHUB_ACTIONS_ROLE_ARN`.
 
-| Workflow | When it runs | Registry | GitOps target |
-|---|---|---|---|
-| `ci.yaml` | Push to `main` | Docker Hub | `clearledger-infra` (Stages 1–7) |
-| `ci-aws.yaml` | Manual | ECR | `stages/stage-8-aws-migration/manifests/` |
+With `CLEARLEDGER_CI_TARGET=aws`, every push to `main` runs **CI — AWS (ECR + OIDC)** on `ubuntu-latest` (Gitleaks → Semgrep → Checkov → build → scan → ECR push → kustomization update). Homelab `ci.yaml` (self-hosted) is skipped.
+
+Homelab `ci.yaml` also **ignores** `stages/stage-8-aws-migration/**` on push — so Stage 8 manifest-only commits never queue on the self-hosted runner even if you forgot to set the variable yet.
+
+Set the variables once (replace `YOUR_USERNAME` with your GitHub user or org):
+
+```bash
+gh variable set CLEARLEDGER_CI_TARGET --body aws --repo YOUR_USERNAME/clearledger
+gh variable set AWS_ACCOUNT_ID --body "$(aws sts get-caller-identity --query Account --output text)" --repo YOUR_USERNAME/clearledger
+gh variable set AWS_REGION --body eu-west-1 --repo YOUR_USERNAME/clearledger
+```
+
+Also apply the OIDC trust policy (`iam.tf` — `repo:YOUR_USERNAME/clearledger:environment:production`) and re-run `terraform apply` if you have not since that edit.
+
+Create the `production` environment and set the OIDC role secret:
+
+```bash
+# One-time: create the environment (404 on gh secret set means this step was skipped)
+gh api --method PUT "repos/YOUR_USERNAME/clearledger/environments/production"
+
+gh secret set AWS_ACTIONS_ROLE_ARN \
+  --env production \
+  --body "$(terraform -chdir=stages/stage-8-aws-migration/terraform output -raw github_actions_ecr_role_arn)" \
+  --repo YOUR_USERNAME/clearledger
+```
 
 ### Production Hardening Checklist
 

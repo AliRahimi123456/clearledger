@@ -3,8 +3,13 @@ name: ClearLedger DevSecOps Pipeline (GitHub)
 on:
   push:
     branches: [main]
+    # Stage 8 AWS manifests use ci-aws.yaml (GitHub-hosted). Homelab CI skips these paths.
+    paths-ignore:
+      - 'stages/stage-8-aws-migration/**'
   pull_request:
     branches: [main]
+    paths-ignore:
+      - 'stages/stage-8-aws-migration/**'
   schedule:
     # Compliance scans (kube-bench) run weekly, not per commit.
     - cron: "0 6 * * 1"  # every Monday 6am
@@ -36,7 +41,8 @@ jobs:
     # clearledger.local or the local MicroK8s cluster.
     runs-on: [self-hosted, clearledger]
     # Weekly scheduled runs are reserved for compliance scanning (kube-bench).
-    if: github.event_name != 'schedule'
+    # Skipped when CLEARLEDGER_CI_TARGET=aws (Stage 8 uses ci-aws.yaml on GitHub-hosted runners).
+    if: github.event_name != 'schedule' && vars.CLEARLEDGER_CI_TARGET != 'aws'
     steps:
       - name: Checkout code (full history for secrets scan)
         uses: actions/checkout@v4
@@ -75,6 +81,7 @@ jobs:
     # clearledger.local or the local MicroK8s cluster.
     runs-on: [self-hosted, clearledger]
     needs: secrets-scan
+    if: vars.CLEARLEDGER_CI_TARGET != 'aws'
     steps:
       - name: Checkout code (SAST runs on source)
         uses: actions/checkout@v4
@@ -115,6 +122,7 @@ jobs:
     # clearledger.local or the local MicroK8s cluster.
     runs-on: [self-hosted, clearledger]
     needs: secrets-scan
+    if: vars.CLEARLEDGER_CI_TARGET != 'aws'
     steps:
       - name: Checkout code (IaC lives in infra/)
         uses: actions/checkout@v4
@@ -203,6 +211,7 @@ jobs:
     name: "Build images"
     runs-on: [self-hosted, clearledger]
     needs: [prepare-scanners]
+    if: vars.CLEARLEDGER_CI_TARGET != 'aws'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -233,6 +242,7 @@ jobs:
     name: "Scan images"
     runs-on: [self-hosted, clearledger]
     needs: [build-images]
+    if: vars.CLEARLEDGER_CI_TARGET != 'aws'
     steps:
       - name: Checkout code (.grype.yaml ignore rules)
         uses: actions/checkout@v4
@@ -278,6 +288,7 @@ jobs:
   publish-images:
     name: "Publish images"
     runs-on: [self-hosted, clearledger]
+    if: vars.CLEARLEDGER_CI_TARGET != 'aws'
     needs: [scan-images]
     steps:
       - name: Checkout code
@@ -324,7 +335,7 @@ jobs:
     # clearledger.local or the local MicroK8s cluster.
     runs-on: [self-hosted, clearledger]
     needs: [publish-images]
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && vars.CLEARLEDGER_CI_TARGET != 'aws'
     steps:
       - name: Checkout app repo (canonical manifests)
         uses: actions/checkout@v4
@@ -413,7 +424,7 @@ jobs:
     # clearledger.local or the local MicroK8s cluster.
     runs-on: [self-hosted, clearledger]
     needs: [update-manifests]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && vars.ENABLE_DAST == 'true'
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && vars.ENABLE_DAST == 'true' && vars.CLEARLEDGER_CI_TARGET != 'aws'
     steps:
       - name: Checkout app repo (DAST config + custom tests live here)
         uses: actions/checkout@v4
