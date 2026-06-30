@@ -7268,67 +7268,137 @@ kubectl get secretproviderclass -n clearledger --no-headers | wc -l | xargs echo
 kubectl apply -f stages/stage-8-aws-migration/argocd/clearledger-aws-app.yaml
 ```
 
-**👀 Argo CD UI (now)** — refresh the browser (https://localhost:8080 or 8081, whichever port you forwarded). Open application **`clearledger-aws`**. Wait until **Synced** and **Healthy** (often 2–5 minutes on first sync).
+---
 
-```bash
-# CLI equivalent while you watch the UI
-kubectl get application clearledger-aws -n argocd -w
-kubectl get pods -n clearledger -w
+#### 👀 Step 13 — Watch ArgoCD sync (UI + CLI)
+
+Open the Argo CD browser tab you kept open (port-forward from step 7).
+
+```
+https://localhost:8080        ← or 8081 if 8080 was busy
 ```
 
-**Step 14 — wait for the ALB hostname** (AWS provisions the load balancer after the Ingress exists; first time can take **2–5 minutes**):
+Click **`clearledger-aws`**. You want to see:
+
+```
+APP HEALTH    → Healthy       (green circle)
+SYNC STATUS   → Synced        (green tick)
+```
+
+It usually takes **2–5 minutes** on first deploy. You can watch the same info from the terminal without touching the browser:
+
+```bash
+kubectl get application clearledger-aws -n argocd -w
+# Ctrl-C when HEALTH STATUS shows Healthy
+```
+
+While that's settling, watch pods start up in a second terminal:
+
+```bash
+kubectl get pods -n clearledger -w
+# All pods should reach 1/1 Running within 2 minutes
+# Ctrl-C when everything is Running
+```
+
+---
+
+#### 👀 Step 14 — Get your public app URL (ALB)
+
+AWS takes **2–5 minutes** after ArgoCD syncs to provision the load balancer.
+Run this and wait until the ADDRESS column fills in:
 
 ```bash
 kubectl get ingress clearledger-ingress -n clearledger -w
-# Wait until ADDRESS/HOSTNAME column shows something like:
-# k8s-clearledg-clearled-xxxxxxxxxx-yyyyyyyyyy.eu-west-1.elb.amazonaws.com
+# ADDRESS is empty at first, then shows something like:
+# clearledger-xxxxxxxxxx.eu-west-1.elb.amazonaws.com
+# Ctrl-C once the hostname appears
 ```
 
-When the hostname appears, export it:
+Export the URL for the steps below:
 
 ```bash
 export ALB_DNS=$(kubectl get ingress clearledger-ingress -n clearledger \
   -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
-echo "App URL: http://${ALB_DNS}"
+echo "Your app is live at: http://${ALB_DNS}"
 ```
 
-#### 👀 ALB — first time the app is public
+> **Still empty after 10 minutes?** See [ALB hostname never appears](#alb-hostname-never-appears) in §Troubleshooting.
 
-**In the browser** (paste the `http://` URL — no `/etc/hosts` entry needed):
+---
 
-| URL | Expected |
+#### 👀 Step 15 — Open the app in your browser
+
+Paste this URL directly into your browser — no DNS entry, no port-forward, no VPN needed. It is a real public URL:
+
+```
+http://clearledger-xxxxxxxxxx.eu-west-1.elb.amazonaws.com/auth/health
+```
+
+You should see:
+
+```json
+{"status":"ok","service":"auth-service"}
+```
+
+Check all three services:
+
+| Browser URL | What you expect to see |
 |---|---|
-| `http://${ALB_DNS}/auth/health` | JSON, HTTP **200**, healthy status |
-| `http://${ALB_DNS}/ledger/health` | JSON, HTTP **200** |
-| `http://${ALB_DNS}/notifications/health` | JSON, HTTP **200** |
+| `http://${ALB_DNS}/auth/health` | `{"status":"ok","service":"auth-service"}` |
+| `http://${ALB_DNS}/ledger/health` | `{"status":"ok","service":"ledger-service"}` |
+| `http://${ALB_DNS}/notifications/health` | `{"status":"ok","service":"notification-service"}` |
 
-**Or in the terminal:**
+Or check all three at once from the terminal:
 
 ```bash
-curl -fsS "http://${ALB_DNS}/auth/health" && echo
-curl -fsS "http://${ALB_DNS}/ledger/health" && echo
-curl -fsS "http://${ALB_DNS}/notifications/health" && echo
+for path in auth/health ledger/health notifications/health; do
+  echo -n "  http://${ALB_DNS}/${path}  →  "
+  curl -fsS "http://${ALB_DNS}/${path}" || echo "FAILED"
+done
 ```
 
-**👀 AWS Console (optional)** — EC2 → **Load balancers** → `clearledger` → **Target groups** → targets **healthy**. Unhealthy targets usually mean pods not Ready or wrong health check path.
+Expected output:
 
-**If the hostname stays empty** for more than ~10 minutes: `kubectl describe ingress clearledger-ingress -n clearledger` and check `kube-system` for the AWS Load Balancer Controller pod.
+```
+  http://.../auth/health         →  {"status":"ok","service":"auth-service"}
+  http://.../ledger/health       →  {"status":"ok","service":"ledger-service"}
+  http://.../notifications/health →  {"status":"ok","service":"notification-service"}
+```
 
-**If health URLs return 502/503:** pods may still be starting, ESO secrets not synced yet (§8.4), or RDS not reachable — check Argo CD pod health and `kubectl get pods -n clearledger`.
+---
 
-ArgoCD watches **`stages/stage-8-aws-migration/manifests/` in this repo** (app `clearledger-aws`). Homelab Stages 1–7 still use `clearledger-infra`; AWS Stage 8 uses the in-repo kustomize path so ESO/CSI manifests stay colocated.
+#### 👀 Step 16 — Verify in the AWS Console (optional but recommended)
 
-**✋ Hands-on checkpoint — EKS nodes are Ready and the app pulls from ECR**
+This is what the deployed stack looks like from AWS side:
+
+| Console location | What to look for |
+|---|---|
+| **EC2 → Load Balancers** | A load balancer named `clearledger-…` with state **Active** |
+| **EC2 → Target Groups** | Two or three target groups, all targets showing **healthy** |
+| **ECR → Repositories** | `clearledger/auth-service`, `clearledger/ledger-service`, `clearledger/notification-service` — each with a recently pushed image tag |
+| **EKS → Clusters → clearledger → Workloads** | Your pods shown as Running in the `clearledger` namespace |
+| **Secrets Manager** | `clearledger/auth-service`, `clearledger/ledger-service`, `clearledger/postgres` — all present |
+
+> **502/503 from the ALB?** The load balancer is up but the pods aren't healthy yet, or the secrets haven't synced. Check: `kubectl get pods -n clearledger` (all `1/1 Running`?) and `kubectl get externalsecret -n clearledger` (both `SecretSynced True`?).
+
+---
+
+**✋ Hands-on checkpoint — app is publicly reachable**
 
 ```bash
-kubectl get nodes
+# All three must print {"status":"ok",...}
+curl -fsS "http://${ALB_DNS}/auth/health"         && echo
+curl -fsS "http://${ALB_DNS}/ledger/health"        && echo
+curl -fsS "http://${ALB_DNS}/notifications/health" && echo
+
+# All pods Running
 kubectl get pods -n clearledger
+
+# Nothing printed here = all pods Running (non-Running pods would show)
 kubectl get pods -n clearledger --field-selector=status.phase!=Running
 ```
 
-Expected: nodes `Ready`; app pods `Running`; the last command prints **nothing**. `ImagePullBackOff` here means your images aren't in ECR or the node IAM role can't pull them.
-
-If you skip this, you move on to secrets (§8.4) on top of an app that was never actually running, and every later failure inherits this one.
+> `ImagePullBackOff` in the pod list means ECR images aren't there yet — check GitHub Actions and re-run the workflow. A `502` from the health URL means the pod isn't ready yet — wait 30 seconds and retry.
 
 ---
 
