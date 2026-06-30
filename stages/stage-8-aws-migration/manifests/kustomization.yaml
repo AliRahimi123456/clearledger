@@ -19,6 +19,7 @@ resources:
   - external-secrets.yaml
   - csi/auth-service-spc.yaml
   - csi/ledger-service-spc.yaml
+  - monitoring/servicemonitors.yaml
   - ingress-aws.yaml
 
 images:
