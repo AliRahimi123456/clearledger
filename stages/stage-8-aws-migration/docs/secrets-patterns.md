@@ -16,7 +16,12 @@ All AWS paths use **IRSA** — no static AWS keys in the cluster.
 
 ## 1. Vault (homelab)
 
-Manifests: `infra/manifests/*/deployment.yaml` with `vault.hashicorp.com/agent-inject` annotations.
+| Stage | Manifests | How secrets arrive |
+|---|---|---|
+| **0–4** | `infra/manifests/*/deployment.yaml` | `secretKeyRef` → Kubernetes Secrets (`auth-service/secret.yaml`, etc.) |
+| **5–7** | Same path after §5.4 copy | Vault agent sidecar → files `/vault/secrets/*` (`vault.hashicorp.com/agent-inject` annotations) |
+
+Stage 0 manual deploys use `stages/stage-0-raw-kubernetes/infra/manifests/` with `secretKeyRef` until GitOps takes over in Stage 2.
 
 ---
 

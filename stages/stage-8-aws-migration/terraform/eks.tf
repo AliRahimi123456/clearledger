@@ -159,6 +159,64 @@ resource "aws_eks_node_group" "main" {
   }
 }
 
+# ── EBS CSI driver addon ──────────────────────────────────────────────────────
+# Why: EKS does not ship with EBS CSI by default since Kubernetes 1.23.
+# Without it, any PersistentVolumeClaim backed by EBS (used by Prometheus, Loki,
+# and any stateful workload) will stay Pending indefinitely with:
+#   "no volume plugin matched" / "waiting for a volume to be created"
+# The addon needs its own IRSA role because it calls ec2:CreateVolume, etc.
+
+data "aws_iam_policy_document" "ebs_csi_assume" {
+  statement {
+    effect  = "Allow"
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+    principals {
+      type        = "Federated"
+      identifiers = [aws_iam_openid_connect_provider.eks.arn]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "${replace(aws_iam_openid_connect_provider.eks.url, "https://", "")}:sub"
+      values   = ["system:serviceaccount:kube-system:ebs-csi-controller-sa"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "${replace(aws_iam_openid_connect_provider.eks.url, "https://", "")}:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "ebs_csi" {
+  name               = "${var.project_name}-ebs-csi-role"
+  assume_role_policy = data.aws_iam_policy_document.ebs_csi_assume.json
+
+  tags = {
+    Name = "${var.project_name}-ebs-csi-role"
+  }
+}
+
+resource "aws_iam_role_policy_attachment" "ebs_csi" {
+  role       = aws_iam_role.ebs_csi.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"
+}
+
+resource "aws_eks_addon" "ebs_csi" {
+  cluster_name             = aws_eks_cluster.main.name
+  addon_name               = "aws-ebs-csi-driver"
+  service_account_role_arn = aws_iam_role.ebs_csi.arn
+
+  # Why: node group must exist before the addon can schedule its pods.
+  depends_on = [
+    aws_eks_node_group.main,
+    aws_iam_role_policy_attachment.ebs_csi,
+  ]
+
+  tags = {
+    Name = "${var.project_name}-ebs-csi"
+  }
+}
+
 # ── IRSA — OpenID Connect provider ───────────────────────────────────────────
 # Why IRSA: lets individual pods assume IAM roles via Kubernetes service accounts.
 # This replaces node-level IAM roles — a pod gets exactly the permissions it needs.

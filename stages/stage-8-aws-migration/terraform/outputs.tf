@@ -76,6 +76,11 @@ output "developer_readonly_role_arn" {
   value       = aws_iam_role.developer_readonly.arn
 }
 
+output "ebs_csi_role_arn" {
+  description = "IAM role ARN for the EBS CSI driver addon (annotated on ebs-csi-controller-sa)"
+  value       = aws_iam_role.ebs_csi.arn
+}
+
 output "alb_dns_name" {
   description = "Access ClearLedger at this URL after kubectl apply — the ALB is provisioned by the controller when the Ingress is created, not by Terraform. Run: kubectl get ingress clearledger-ingress -n clearledger -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'"
   # Why: the ALB DNS name is only available after the Kubernetes Ingress resource

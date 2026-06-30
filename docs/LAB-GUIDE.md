@@ -908,7 +908,7 @@ You're about to start the four app services: auth, ledger, notification, and fro
 
 **Two files per service (mostly).** A **Deployment** tells Kubernetes *which container image to run* and *how many copies*. A **Service** gives that app a stable name inside the cluster (e.g. `auth-service` → so ledger can find auth without knowing pod IP addresses). You apply the Deployment first, then the Service.
 
-**Why the `sed` command?** The deployment YAML files in Git contain a placeholder — literally the text `DOCKER_USERNAME` — because everyone's Docker Hub username is different. You already set yours in §0.3 (`export DOCKER_USERNAME=veeno`). The `sed` line swaps that placeholder for your real username **on the fly**, as the manifest is sent to Kubernetes. You never edit the file in Git. If you skip `sed` and apply the raw file, Kubernetes tries to pull an image called `DOCKER_USERNAME/clearledger-auth-service` — which does not exist.
+**Why the `sed` command?** The deployment YAML files in Git contain a placeholder — literally the text `DOCKER_USERNAME` — because everyone's Docker Hub username is different. You already set yours in §0.3 (`export DOCKER_USERNAME=YOUR_DOCKERHUB_USERNAME`). The `sed` line swaps that placeholder for your real username **on the fly**, as the manifest is sent to Kubernetes. You never edit the file in Git. If you skip `sed` and apply the raw file, Kubernetes tries to pull an image called `DOCKER_USERNAME/clearledger-auth-service` — which does not exist.
 
 **Why files under `stages/stage-0-raw-kubernetes/`?** Stage 0 deployments read secrets from Kubernetes (`secretKeyRef`). The copies under `infra/manifests/` are for GitOps later — using those too early is a common mistake (see the CrashLoop note in **Verify** below). The `STAGE0=...` variable from the top of §0.5 points at the right folder.
 
@@ -1360,7 +1360,7 @@ GitHub gives you a full copy-paste install guide on one page. Use it — don’t
 2. **Settings** → **Actions** → **Runners** → **New self-hosted runner**
 3. Select **Linux** and **x64**
 
-The page title should look like: **Add new self-hosted runner · YOUR_USERNAME/clearledger** (e.g. `Osomudeya/clearledger`).
+The page title should look like: **Add new self-hosted runner · YOUR_USERNAME/clearledger**.
 
 That page has three sections you will use:
 
@@ -1633,7 +1633,7 @@ Kubernetes cluster                    ← what is actually running
 **Manual sync** (same thing CI does — useful after editing manifests locally without a full pipeline run):
 
 ```bash
-export GITHUB_OWNER=YOUR_USERNAME          # e.g. Osomudeya
+export GITHUB_OWNER=YOUR_USERNAME
 export INFRA_REPO_TOKEN='ghp_...'          # same PAT as Stage 1 §1.4 — required if clearledger-infra is private
 make push-infra-manifests GITHUB_OWNER="$GITHUB_OWNER"
 argocd app sync clearledger --grpc-web     # optional nudge; ArgoCD polls on its own
@@ -1879,11 +1879,11 @@ Stage 1 ends here
 **How the image tag ties to your code:** every pipeline run is triggered by a git commit. GitHub gives that commit a unique ID called the **SHA** (a long hex string like `a1b2c3d4e5f6789…`). The workflow sets `IMAGE_TAG` to that SHA and uses it everywhere:
 
 1. **Build** — `docker build -t clearledger-auth-service:a1b2c3d4…`
-2. **Publish** — push to Docker Hub as `veeno/clearledger-auth-service:a1b2c3d4…`
+2. **Publish** — push to Docker Hub as `YOUR_DOCKERHUB_USERNAME/clearledger-auth-service:a1b2c3d4…`
 3. **Update manifests** — `kustomize edit set image …:a1b2c3d4…` in `clearledger-infra`
 4. **Commit message** — `ci: deploy a1b2c3d4… — all gates passed`
 
-So if production is running `veeno/clearledger-auth-service:a1b2c3d4…`, you paste that tag into GitHub (`https://github.com/Osomudeya/clearledger/commit/a1b2c3d4…`) and see the **exact source code** that built it. No guessing, no “maybe it was `latest`”. That one-to-one link is why teams use commit SHAs instead of floating tags like `v0.1.0` for deploys.
+So if production is running `YOUR_DOCKERHUB_USERNAME/clearledger-auth-service:a1b2c3d4…`, you paste that tag into GitHub (`https://github.com/YOUR_GITHUB_USERNAME/clearledger/commit/a1b2c3d4…`) and see the **exact source code** that built it. No guessing, no “maybe it was `latest`”. That one-to-one link is why teams use commit SHAs instead of floating tags like `v0.1.0` for deploys.
 
 #### GitOps manifest flow — three places, one chain
 
@@ -1909,7 +1909,7 @@ Stage 2+: ArgoCD syncs the cluster to match Git
 
 **The placeholder trick (read this slowly).**
 
-`auth-service/deployment.yaml` does not say `docker.io/veeno/clearledger-auth-service:abc123`. It says:
+`auth-service/deployment.yaml` does not say `docker.io/YOUR_DOCKERHUB_USERNAME/clearledger-auth-service:abc123`. It says:
 
 ```yaml
 image: clearledger/auth-service:gitops
@@ -1920,15 +1920,15 @@ That string is not a real image on Docker Hub — it is a **label** Kustomize re
 ```yaml
 images:
   - name: clearledger/auth-service          # matches the label in deployment.yaml
-    newName: docker.io/veeno/clearledger-auth-service   # real registry path
+    newName: docker.io/YOUR_DOCKERHUB_USERNAME/clearledger-auth-service   # real registry path
     newTag: abc123def456…                                 # real version (commit SHA)
 ```
 
-When ArgoCD deploys, it runs `kustomize build`. Kustomize reads both files and substitutes the label with `docker.io/veeno/clearledger-auth-service:abc123…`.
+When ArgoCD deploys, it runs `kustomize build`. Kustomize reads both files and substitutes the label with `docker.io/YOUR_DOCKERHUB_USERNAME/clearledger-auth-service:abc123…`.
 
 **What you edit vs what CI edits**
 
-You already edited `kustomization.yaml` once in §1.3 — you replaced `YOUR_DOCKERHUB_USERNAME` with `veeno` in the `newName:` lines. That is a one-time setup step. You might edit the `resources:` list later when a new stage adds files (Vault in Stage 5, for example).
+You already edited `kustomization.yaml` once in §1.3 — you replaced `YOUR_DOCKERHUB_USERNAME` with your Docker Hub user in the `newName:` lines. That is a one-time setup step. You might edit the `resources:` list later when a new stage adds files (Vault in Stage 5, for example).
 
 You do **not** update `newTag:` yourself after every git push. When CI passes, it writes the new commit SHA into `newTag:` for you. If you did that by hand on every deploy, you would eventually typo a tag and break production.
 
@@ -4879,7 +4879,7 @@ Open [Stage 7](#stage-7--security-observability) — no Litmus install needed.
 **Copy-paste path:**
 
 ```bash
-export GITHUB_OWNER=Osomudeya          # your GitHub username — required for fix-65-prereqs
+export GITHUB_OWNER=YOUR_GITHUB_USERNAME          # required for fix-65-prereqs
 make fix-65-prereqs                    # auth 2/2 + netpol
 bash stages/stage-6.5-chaos-engineering/scripts/install-litmus.sh
 open http://litmus.local               # admin / litmus
@@ -4897,7 +4897,7 @@ make snapshot STAGE=65
 Chaos deletes pods. If replacements fail to start, you debug CrashLoopBackOff instead of learning resilience.
 
 ```bash
-export GITHUB_OWNER=Osomudeya   # required — without this, fix-argocd breaks ArgoCD repoURL
+export GITHUB_OWNER=YOUR_GITHUB_USERNAME   # required — without this, fix-argocd breaks ArgoCD repoURL
 make fix-65-prereqs
 kubectl get pods -n clearledger -l app=auth-service
 ```
@@ -7016,7 +7016,7 @@ fi
 
 # Verify before commit
 grep -E 'newName:|newTag:' "${KUST}"
-# Expect: 334091769766.dkr.ecr.eu-west-1.amazonaws.com/clearledger/... and your git SHA
+# Expect: YOUR_AWS_ACCOUNT.dkr.ecr.eu-west-1.amazonaws.com/clearledger/... and your git SHA
 
 git add stages/stage-8-aws-migration/manifests/kustomization.yaml
 git commit -m "stage8: ECR images ${TAG}"
@@ -7026,7 +7026,7 @@ git push
 Also fix the ArgoCD Application repo URL once (replace with your GitHub username):
 
 ```bash
-# Example: Osomudeya/clearledger — check: git remote get-url origin
+# Example: YOUR_GITHUB_USERNAME/clearledger — check: git remote get-url origin
 sed -i.bak 's|YOUR_GITHUB_USERNAME|YOUR_ACTUAL_GITHUB_USER|g' \
   stages/stage-8-aws-migration/argocd/clearledger-aws-app.yaml
 rm -f stages/stage-8-aws-migration/argocd/clearledger-aws-app.yaml.bak

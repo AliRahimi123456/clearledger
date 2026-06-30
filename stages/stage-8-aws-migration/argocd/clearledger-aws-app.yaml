@@ -15,7 +15,7 @@ spec:
   project: default
   source:
     # Fork learners: change repoURL to your fork before first sync.
-    repoURL: https://github.com/Osomudeya/clearledger.git
+    repoURL: https://github.com/YOUR_GITHUB_USERNAME/clearledger.git
     targetRevision: main
     path: stages/stage-8-aws-migration/manifests
   destination:

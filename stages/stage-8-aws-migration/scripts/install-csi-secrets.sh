@@ -17,6 +17,11 @@ AWS_PROVIDER_ARGS=(
   --namespace kube-system
   --set secrets-store-csi-driver.syncSecret.enabled=true
   --set secrets-store-csi-driver.enableSecretRotation=true
+  # Why tokenRequests: the AWS provider uses IRSA — the kubelet must project a
+  # ServiceAccount token for the pod so the CSI driver can call STS and get
+  # temporary credentials. Without this the mount fails with:
+  #   "CSI token error: serviceAccount.tokens not provided"
+  --set "secrets-store-csi-driver.tokenRequests[0].audience=sts.amazonaws.com"
   --wait --timeout=300s
 )
 
@@ -38,11 +43,6 @@ else
   helm upgrade --install secrets-provider-aws aws-secrets-manager/secrets-store-csi-driver-provider-aws \
     "${AWS_PROVIDER_ARGS[@]}"
 fi
-
-echo "▶ Patching CSIDriver to enable tokenRequests (required for IRSA)..."
-kubectl patch csidriver secrets-store.csi.k8s.io \
-  --type merge \
-  -p '{"spec":{"tokenRequests":[{"audience":"sts.amazonaws.com"}]}}' 2>&1 || true
 
 echo "▶ Applying SecretProviderClass manifests..."
 kubectl apply -f "${CSI_MANIFESTS}/"

@@ -1093,7 +1093,7 @@ authentication required: Repository not found
 ```bash
 argocd app get clearledger --grpc-web | grep -i repo
 # Bad:  YOUR_GITHUB_USERNAME/clearledger-infra
-# Good: Osomudeya/clearledger-infra  (your username)
+# Good: YOUR_GITHUB_USERNAME/clearledger-infra  (your username)
 
 # Fix: edit repoURL in stages/stage-2-gitops/argocd/clearledger-app.yaml, then:
 kubectl apply -f stages/stage-2-gitops/argocd/clearledger-app.yaml

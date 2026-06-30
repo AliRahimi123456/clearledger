@@ -106,8 +106,12 @@ variable "eks_node_instance_type" {
 variable "eks_node_count" {
   description = "Number of EKS worker nodes"
   type        = number
-  default     = 3
-  # Why 3: minimum for pod anti-affinity across AZs. Reduce to 2 to save cost.
+  default     = 4
+  # Why 4: the full stack (app pods + Kyverno + Falco + ESO + ArgoCD + observability)
+  # runs ~56 pods. t3.medium nodes have a max-pods limit of ~17 per node (VPC CNI
+  # default). 3 nodes × 17 = 51 slots — not enough for rolling updates. 4 nodes
+  # gives 68 slots and comfortable headroom. Reduce to 3 only if you disable Falco
+  # or the observability stack to stay under the limit.
 }
 
 variable "github_owner" {

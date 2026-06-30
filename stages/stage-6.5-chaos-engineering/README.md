@@ -32,7 +32,7 @@ Open [Stage 7](../../docs/LAB-GUIDE.md#stage-7--security-observability).
 **Copy-paste path:**
 
 ```bash
-export GITHUB_OWNER=Osomudeya          # your GitHub username
+export GITHUB_OWNER=YOUR_GITHUB_USERNAME
 make fix-65-prereqs
 bash stages/stage-6.5-chaos-engineering/scripts/install-litmus.sh
 open http://litmus.local               # admin / litmus

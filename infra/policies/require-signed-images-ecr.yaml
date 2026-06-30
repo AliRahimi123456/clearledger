@@ -1,4 +1,6 @@
 # Stage 8 — verify Cosign signatures on Amazon ECR images (same key as homelab)
+#
+# SETUP: Replace the placeholder below with your actual cosign.pub content (same key as require-signed-images.yaml).
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
@@ -37,7 +39,4 @@ spec:
               entries:
                 - keys:
                     publicKeys: |-
-                      -----BEGIN PUBLIC KEY-----
-                      MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEwImhy6k0hehBv4EtucuV9fWxniEb
-                      0EadtpBilEMbtjecHRhVsNHwewM39B5nkPrJ+M0w818EKNYYbb6VL1+tQg==
-                      -----END PUBLIC KEY-----
+                      PASTE_YOUR_COSIGN_PUBLIC_KEY_HERE
