@@ -50,6 +50,60 @@ The app is the vehicle. DevSecOps is the destination.
 
 **After every stage:** run `make check-N`, then `make snapshot STAGE=N` and `make snapshots` to confirm the checkpoint exists — see [Saving your progress](#saving-your-progress). From Stage 4 onward, also check platform pod restart counts — see the **Am I ready?** box at the start of each stage.
 
+---
+
+## How to think through this lab
+
+This lab is not a checklist of installs. It is practice in three habits that matter in real jobs: understanding how things are built, choosing the right fix, and keeping systems running day to day.
+
+**Understand before you automate.** Stage 0 makes you deploy by hand so you see what Kubernetes actually does — pods, services, secrets, ingress. Later stages add tools only after you have felt the pain they fix. When you reach Stage 2, you will already know why letting everyone run `kubectl apply` from their laptop does not work on a team.
+
+**Choose with a reason.** Almost every step here answers a concrete question: Where do passwords live? Who is allowed to deploy? How do we know an image came from our build and not somewhere else? When the guide says to use two GitHub repos, or to scan before you push an image, or to block unsigned images — that is a decision, not a random rule. Ask yourself: *what goes wrong if we skip this?*
+
+**Run it like production, even on a laptop.** Can you tell what version is running? Can you roll back? Can you see why a pod crashed? Checkpoints like `make check-N`, snapshots, and the troubleshooting section train you to verify work instead of assuming green text means success. When something fails, read the error, fix the cause, and note what you changed — that story is what interviews ask for.
+
+Read the paragraphs before each command. They are the point. The commands are proof you understood.
+
+---
+
+## Tools you will meet (and what problem each one fixes)
+
+You do not need to memorize this list. Come back here when a new name appears and you wonder *why now*.
+
+**On your laptop:** Multipass runs a small Ubuntu machine so Kubernetes has enough room to breathe. Docker builds the app into containers. `make` wraps long commands into short ones like `make setup` and `make check-4`. Entries in `/etc/hosts` (like `clearledger.local`) let your browser reach the app without buying a domain.
+
+**The app itself:** Three Python APIs (auth, ledger, notifications), a web frontend, Postgres for data, and Redis so ledger can notify alerts without calling notification directly. nginx ingress sends browser traffic to the right service.
+
+**Kubernetes (Stage 0):** MicroK8s is a small Kubernetes cluster inside the VM. You use `kubectl` to create deployments, services, secrets, and access rules. You learn the objects first; automation comes later.
+
+**Two GitHub repos (Stage 1):** `clearledger` holds your code and the build pipeline. `clearledger-infra` holds only Kubernetes YAML — what should be running. Splitting them means a README edit does not accidentally trigger a deploy, and you can see exactly which image tag production is supposed to use.
+
+**GitHub Actions + self-hosted runner (Stage 1):** Every push to `main` runs tests and scans, builds images, signs them, pushes to Docker Hub, and updates image tags in `clearledger-infra`. The runner lives inside your VM because GitHub’s cloud runners cannot reach your local cluster or `clearledger.local`.
+
+**ArgoCD (Stage 2):** Watches `clearledger-infra` and applies changes to the cluster. After Stage 1, the infra repo updates but the cluster might not — that gap is intentional. ArgoCD closes it: Git says what should run; the cluster catches up.
+
+**Scan tools in the pipeline (Stage 3):** Gitleaks hunts passwords committed to git. Semgrep reads your Python for unsafe patterns. Checkov checks Kubernetes YAML for risky settings. Trivy scans container images for known CVEs. Syft lists what is inside an image; Grype checks that list for vulnerabilities. Cosign signs the image so Stage 4 can reject anything unsigned.
+
+**Kyverno (Stage 4):** A gate at the cluster front door. Even if someone bypasses CI, Kyverno can block pods that run as root, skip resource limits, or use unsigned images.
+
+**Vault (Stage 5):** Stores passwords and keys outside Git and outside Kubernetes secret objects. A small sidecar in each pod fetches credentials at startup. You delete the old Kubernetes secrets and login still works — that is the lesson.
+
+**Falco + network policies (Stage 6):** Falco watches running containers for suspicious actions (like an unexpected shell). Network policies limit which pods can talk to which — a stolen pod cannot reach everything.
+
+**Litmus (Stage 6.5, optional):** Deliberately kills a pod so you prove the app stays up and Kubernetes replaces it. Detection is not the same as surviving failure.
+
+**Prometheus, Grafana, Loki (Stage 7):** Prometheus collects numbers (CPU, request rates, errors). Grafana draws dashboards. Loki stores logs so you can search without opening each pod. You need this to show security and reliability with evidence, not guesses.
+
+**OpenTelemetry + Tempo (Stage 7.5, optional):** Follows one login or transaction across auth → ledger → notification as a single trace. Metrics tell you something is slow; traces show where time was spent.
+
+**AWS pieces (Stage 8):** Terraform creates VPC, EKS, RDS, ECR, and IAM roles in code. EKS is Kubernetes in AWS. ECR holds images. RDS is managed Postgres. The load balancer replaces nginx for public access. External Secrets Operator pulls passwords from AWS Secrets Manager. Same app patterns as the homelab — different endpoints.
+
+**Helper scripts:** `scripts/health-check.sh` and `make check-N` tell you if a stage is actually done. Snapshots save the VM before risky steps. `docs/troubleshooting.md` maps common errors to fixes.
+
+Each stage adds one layer. None of them replace the others. Scans do not stop a hacker inside a running pod; Falco does not build your image; ArgoCD does not store passwords. That is why the order matters.
+
+---
+
 ### The checkpoint rule (read this once)
 
 Every major section ends with a **✋ Hands-on checkpoint**. That is not optional, its how you avoid the silent failures that make learners quit.

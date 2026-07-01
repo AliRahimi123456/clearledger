@@ -40,3 +40,6 @@ kubeconfig
 .cursor/
 
 stages/stage-3-security-gates/dast/__pycache__/
+
+# freeCodeCamp draft — not part of the lab
+docs/fcc.md
