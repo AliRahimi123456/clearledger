@@ -197,6 +197,29 @@ Start here:
 - [docs/compliance-mapping.md](./docs/compliance-mapping.md)
 - [docs/interview-prep.md](./docs/interview-prep.md)
 
+## If this helped
+
+**[Star the repo](https://github.com/Osomudeya/clearledger/stargazers)** if you are getting value from the lab — it helps others find it and tells me to keep building.
+
+### [DevOps Beyond Tutorials](https://osomudeya.kit.com/23db7ca59f)
+
+Weekly breakdowns of production architecture, troubleshooting stories, and interview lessons you will not find in certification courses.
+
+**[Get the newsletter →](https://osomudeya.kit.com/23db7ca59f)**
+
+## Go beyond the lab
+
+You have built the project. Now learn the thinking behind it.
+
+These are guided ebooks — the same mental model behind ClearLedger, built from 4+ years of production DevOps work.
+
+| Resource | What you will learn |
+|---|---|
+| [**DevOps Operating System**](https://osomudeya.gumroad.com/l/devops-atlas) | Most beginners learn Docker, Kubernetes, and Terraform separately. Interviews do not test them separately. Why production systems are designed the way they are, how the pieces fit together, and how to think like an engineer instead of following tutorials. |
+| [**DevOps Interview Decoder**](https://osomudeya.gumroad.com/l/pcpbks) | If you have built projects but freeze when someone asks "Why is it designed this way?", this is for you. The hidden purpose behind common DevOps interview questions and how to explain your decisions with confidence. Pairs with [`docs/interview-prep.md`](./docs/interview-prep.md). |
+
+**[Connect on LinkedIn](https://www.linkedin.com/in/osomudeya-zudonu-17290b124/)** · Share this repo with someone breaking into DevOps or DevSecOps.
+
 ## Lab Guide
 
 See [docs/LAB-GUIDE.md](./docs/LAB-GUIDE.md) for the full walkthrough;

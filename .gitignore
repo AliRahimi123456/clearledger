@@ -42,5 +42,4 @@ kubeconfig
 stages/stage-3-security-gates/dast/__pycache__/
 
 # freeCodeCamp draft and lab guide — not part of the public repo
-docs/fcc.md
 docs/LAB-GUIDE.md
