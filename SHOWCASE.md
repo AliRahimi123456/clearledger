@@ -12,7 +12,7 @@ Every recommendation below points to something you can screenshot or demo from t
 Pick the level that matches where you are today:
 
 **Junior:**
-> Built a production-grade DevSecOps homelab securing a fintech microservices app across 8 stages — from raw Kubernetes to full security automation.
+> Built a production-grade DevSecOps homelab securing a fintech microservices app across 8 stages, from raw Kubernetes to full security automation.
 
 **Mid:**
 > Implemented a complete DevSecOps pipeline for a fintech ledger system: GitOps with ArgoCD, policy enforcement with Kyverno, runtime security with Falco, and AWS migration with Terraform.
@@ -36,18 +36,18 @@ Copy, replace `[your GitHub URL]`, and post when you finish through Stage 4 (min
 
 ---
 
-I just completed ClearLedger — a DevSecOps homelab I built from scratch around a three-service fintech API.
+I just completed ClearLedger: a DevSecOps homelab I built from scratch around a three-service fintech API.
 
 What it includes:
 → Automated CI with security gates (Gitleaks, Semgrep, Trivy, Cosign)
-→ GitOps with ArgoCD — Git is the source of truth for the cluster
+→ GitOps with ArgoCD; Git is the source of truth for the cluster
 → Kyverno admission control blocking unsafe workloads
 → Falco runtime detection with alerts I triggered myself
 → Grafana dashboards mapping controls to compliance frameworks
 
 The app is simple on purpose. The lesson is the security architecture: how code gets scanned, how policy gets enforced, and how you prove it with evidence.
 
-I can walk through any stage live — from a Kyverno rejection to a Falco alert on a running pod.
+I can walk through any stage live, from a Kyverno rejection to a Falco alert on a running pod.
 
 Repo: [your GitHub URL]
 
@@ -69,7 +69,7 @@ Defense in depth, in order: CI gates in `.github/workflows/ci.yaml` stop bad art
 
 ### Q: "What is GitOps and how have you used it?"
 
-GitOps means the cluster matches Git — CI updates image tags in the infra repo, ArgoCD syncs `clearledger`, and `selfHeal` reverts manual drift. In ClearLedger the pipeline never runs `kubectl apply` to production; it commits to Git and ArgoCD reconciles. I can show the ArgoCD app as Synced/Healthy after a push.
+GitOps means the cluster matches Git, CI updates image tags in the infra repo, ArgoCD syncs `clearledger`, and `selfHeal` reverts manual drift. In ClearLedger the pipeline never runs `kubectl apply` to production; it commits to Git and ArgoCD reconciles. I can show the ArgoCD app as Synced/Healthy after a push.
 
 ### Q: "How do you handle secrets in a containerized application?"
 

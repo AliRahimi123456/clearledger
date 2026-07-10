@@ -1,4 +1,4 @@
-> **ClearLedger v1.0** — 10-stage DevSecOps homelab.
+> **ClearLedger v1.0**: 10-stage DevSecOps homelab.
 > Fintech app. Production security. Free to run. Migratable to AWS.
 
 ![Stages](https://img.shields.io/badge/stages-10-blue)
@@ -6,6 +6,14 @@
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Cost](https://img.shields.io/badge/local%20cost-free-brightgreen)
+
+[![GitHub stars](https://img.shields.io/github/stars/Osomudeya/clearledger?style=social)](https://github.com/Osomudeya/clearledger/stargazers)
+[![GitHub forks](https://img.shields.io/github/forks/Osomudeya/clearledger?style=social)](https://github.com/Osomudeya/clearledger/network/members)
+[![GitHub watchers](https://img.shields.io/github/watchers/Osomudeya/clearledger?style=social)](https://github.com/Osomudeya/clearledger/watchers)
+![Last commit](https://img.shields.io/github/last-commit/Osomudeya/clearledger)
+![Repo size](https://img.shields.io/github/repo-size/Osomudeya/clearledger)
+![Open issues](https://img.shields.io/github/issues/Osomudeya/clearledger)
+[![Visitors](https://visitor-badge.laobi.icu/badge?page_id=Osomudeya.clearledger)](https://github.com/Osomudeya/clearledger)
 
 # ClearLedger DevSecOps Lab
 
@@ -18,26 +26,13 @@ ClearLedger is a three-service fintech transaction ledger:
 | `auth-service` | Registration, login, JWT issuance |
 | `ledger-service` | Create transactions, balance, history |
 | `notification-service` | Event-driven alerts on large transactions |
-| `frontend` | Web UI — same APIs, visual proof it works |
+| `frontend` | Web UI: same APIs, visual proof it works |
 
 The app is the vehicle. DevSecOps is the lesson.
 
 ## Architecture
 
-```
-                      ┌─────────────────────────────────┐
-                      │  Multipass VM (clearledger)      │
-                      │                                  │
-Host machine          │  ┌─────────┐  ┌──────────────┐ │
-curl / browser ──────►│  │  nginx  │  │  MicroK8s    │ │
-                      │  │ ingress │─►│  Kubernetes  │ │
-                      │  └─────────┘  │              │ │
-                      │               │ auth-service  │ │
-                      │               │ ledger-svc   │─┼──► Postgres
-                      │               │ notif-svc    │ │    Redis
-                      │               └──────────────┘ │
-                      └─────────────────────────────────┘
-```
+![ClearLedger Architecture](./assets/images/readme_architecture.png)
 
 **Security layers added across 10 stages:**
 
@@ -72,9 +67,9 @@ curl / browser ──────►│  │  nginx  │  │  MicroK8s    │ �
 | 10 staged READMEs | Each stage is a self-contained learning unit |
 | Full DevSecOps pipeline | Gitleaks → Semgrep → Checkov → Trivy → Cosign |
 | 5 Grafana dashboards | Importable JSON — security posture visible immediately |
-| Terraform for AWS | VPC, EKS, ECR, RDS, GuardDuty, CloudTrail — one command |
+| Terraform for AWS | VPC, EKS, ECR, RDS, GuardDuty, CloudTrail; one command |
 | Stage health check | `bash scripts/health-check.sh [n]` — green or red, fix the red |
-| Local integration stack | `make integration-up` → http://localhost:3000 — see `docs/LAB-GUIDE.md` |
+| Local integration stack | `make integration-up` → http://localhost:3000 ; see `docs/LAB-GUIDE.md` |
 | Interview prep guide | Questions interviewers actually ask, answers that close offers |
 | Compliance mapping | Every control mapped to PCI-DSS, SOC2, CIS, NIST, SLSA |
 
@@ -86,7 +81,7 @@ curl / browser ──────►│  │  nginx  │  │  MicroK8s    │ �
 
 The pipeline runs on GitHub Actions with a self-hosted runner installed inside your VM. This lets the runner reach your local cluster and Docker Hub. Employers can see your pipeline runs publicly on GitHub.
 
-**Maintainers:** `TRIVY_VERSION` in `.github/workflows/ci.yaml` is pinned and should be bumped periodically — but a "new Trivy version available" notice in scan logs does **not** cause failures; scan gate failures are always fixable CVEs. Learners: see [LAB-GUIDE §3.5](docs/LAB-GUIDE.md#35--when-a-scan-fails-on-a-cve-you-didnt-inject).
+**Maintainers:** `TRIVY_VERSION` in `.github/workflows/ci.yaml` is pinned and should be bumped periodically, but a "new Trivy version available" notice in scan logs does **not** cause failures; scan gate failures are always fixable CVEs. Learners: see [LAB-GUIDE §3.5](docs/LAB-GUIDE.md#35--when-a-scan-fails-on-a-cve-you-didnt-inject).
 
 ## Setting Up Your Repository
 
@@ -103,7 +98,7 @@ make setup
 make stage-0
 ```
 
-Windows users: `make` works in Git Bash. Browser open commands use the URL printed — open it manually in your browser.
+Windows users: `make` works in Git Bash. Browser open commands use the URL printed, open it manually in your browser.
 
 ```bash
 # Create the infra repo (separate — ArgoCD watches this one)
@@ -112,13 +107,13 @@ Windows users: `make` works in Git Bash. Browser open commands use the URL print
 
 This repo contains the application code and lab stages.
 The infra repo contains only Kubernetes manifests.
-Keep them separate — this separation is the GitOps pattern you're learning.
+Keep them separate, this separation is the GitOps pattern you're learning.
 
 ## Prerequisites
 
-See [QUICKSTART.md](./QUICKSTART.md) — up and running in under 10 commands.
+See [QUICKSTART.md](./QUICKSTART.md): up and running in under 10 commands.
 
-Finished the lab? See [SHOWCASE.md](./SHOWCASE.md) — how to screenshot, post on LinkedIn, and talk about it in interviews.
+Finished the lab? See [SHOWCASE.md](./SHOWCASE.md): how to screenshot, post on LinkedIn, and talk about it in interviews.
 
 ## See It Working in 5 Minutes
 
@@ -149,34 +144,34 @@ Or open the web UI: `make open-ui` (or visit http://clearledger.local).
 
 > Screenshots from a completed lab run. Yours will look the same.
 
-**Web UI — Balance and transactions at a glance:**
-![ClearLedger Dashboard](./screenshots/01-ui-dashboard.png)
+**App UI — the ledger dashboard running on your cluster:**
+![ClearLedger Ledger UI](./assets/images/ledger_ui.png)
 
-**ArgoCD — Git is the single source of truth:**
-![ArgoCD Synced and Healthy](./screenshots/02-argocd-synced.png)
+**ArgoCD: Git is the single source of truth:**
+![ArgoCD Synced and Healthy](./assets/images/02-argocd-synced.png)
 
-**Kyverno — Policy blocks a root container at admission:**
+**Kyverno: Policy blocks a root container at admission:**
 ![Kyverno blocks root container](./screenshots/03-kyverno-block.png)
 
-**Falco — Runtime security catches a shell inside a running pod:**
-![Falco CRITICAL alert](./screenshots/04-falco-alert.png)
+**Falco: Runtime security catches sensitive file access inside a running pod:**
+![Falco CRITICAL alert](./assets/images/falco-alert.png)
 
-**Grafana — Every security event is visible and measurable:**
-![Grafana Security Dashboard](./screenshots/05-grafana-security.png)
+**Grafana: Every security event is visible and measurable:**
+![Grafana Security Dashboard](./assets/images/grafana-security.png)
 
-**CI Pipeline — Six security gates, all green:**
-![Pipeline all green](./screenshots/06-pipeline-green.png)
+**CI Pipeline: Seven security gates, all green:**
+![Pipeline all green](./assets/images/pipeline-green.png)
 
 > Screenshots are placeholders until you run the lab and take your own.
 > See [SCREENSHOT-GUIDE.md](./SCREENSHOT-GUIDE.md) for exact instructions.
 
 ## Repository Layout
 
-- `app/` — auth/ledger/notification services + frontend SPA
-- `infra/` — cumulative manifests/policies (current state)
-- `stages/` — 8 learning units (only what changes per stage)
-- `scripts/` — setup + health-check helpers
-- `docs/` — compliance + troubleshooting + interview prep
+- `app/`: auth/ledger/notification services + frontend SPA
+- `infra/`: cumulative manifests/policies (current state)
+- `stages/`: 8 learning units (only what changes per stage)
+- `scripts/`: setup + health-check helpers
+- `docs/`: compliance + troubleshooting + interview prep
 
 **Rule:** stage folders show what’s new; root `infra/` reflects your current end state.
 
@@ -204,10 +199,10 @@ Start here:
 
 ## Lab Guide
 
-See [docs/LAB-GUIDE.md](./docs/LAB-GUIDE.md) for the full walkthrough —
+See [docs/LAB-GUIDE.md](./docs/LAB-GUIDE.md) for the full walkthrough;
 what each stage teaches, what to verify, and the exact moment each
 concept clicks.
 
 ## License
 
-MIT — see [LICENSE](./LICENSE).
+MIT. See [LICENSE](./LICENSE).

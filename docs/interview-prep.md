@@ -1,6 +1,48 @@
-# ClearLedger DevSecOps — Interview Prep Sheet
+# ClearLedger DevSecOps: Interview Prep Sheet
 
 Questions interviewers actually ask. Answers they actually want to hear.
+
+---
+
+## Table of Contents
+
+- [How to Use This](#how-to-use-this)
+- [Universal Questions](#universal-questions-every-interview-every-level)
+  - [Walk me through your ClearLedger project](#q-walk-me-through-your-clearledger-project)
+  - [Why did you choose this tool over X?](#q-why-did-you-choose-this-tool-over-x)
+  - [What would you do differently?](#q-what-would-you-do-differently-if-you-built-this-again)
+- [Stage-Specific Questions](#stage-specific-questions)
+- [Stage 0: Kubernetes Fundamentals](#stage-0--kubernetes-fundamentals)
+  - [StatefulSet vs Deployment for Postgres](#q-what-is-a-statefulset-and-why-did-you-use-it-for-postgres-but-not-for-your-app-services)
+  - [Why UID 999 for Postgres vs UID 1000 for app pods?](#q-why-did-your-postgres-pod-run-as-uid-999-but-your-app-pods-ran-as-uid-1000)
+  - [readOnlyRootFilesystem: what breaks and how did you handle it?](#q-what-does-readonlyrootfilesystem-true-break-and-how-did-you-handle-it)
+- [Stage 1: CI Pipeline](#stage-1--ci-pipeline)
+  - [Why a self-hosted runner?](#q-why-a-self-hosted-runner-instead-of-githubs-cloud-runners)
+  - [Why update Git instead of running kubectl directly?](#q-your-ci-pipeline-updates-a-manifest-file-in-git-rather-than-running-kubectl-directly-why)
+- [Stage 2: ArgoCD / GitOps](#stage-2--argocd--gitops)
+  - [What does selfHeal actually mean?](#q-argocd-has-selfheal-true-in-your-config-what-does-that-actually-mean-in-practice-and-when-would-you-turn-it-off)
+  - [How do you handle secrets in the infra repo?](#q-how-do-you-handle-secrets-in-the-infra-repo-that-argocd-watches)
+- [Stage 3: Security Pipeline](#stage-3--security-pipeline)
+  - [Trivy failed a build — what do you do?](#q-trivy-failed-a-build-in-your-pipeline-walk-me-through-exactly-what-you-do-next)
+  - [What is an SBOM and why does it matter?](#q-what-is-an-sbom-and-why-does-it-matter-in-2026)
+  - [Gitleaks found a secret — what do you actually do?](#q-gitleaks-found-a-secret-in-your-repo-the-ci-blocked-the-push-what-do-you-actually-do)
+  - [Map your pipeline to DORA](#q-a-european-fintech-asks-you-to-map-their-devsecops-pipeline-to-dora)
+- [Stage 4: Kyverno (Admission Control)](#stage-4--kyverno-admission-control)
+  - [Enforce vs Audit mode](#q-what-is-the-difference-between-kyvernos-enforce-and-audit-mode-and-when-do-you-use-each)
+  - [How do you handle a legitimate UID exception?](#q-a-statefulset-for-a-legitimate-database-needs-to-run-as-a-specific-uid-that-your-kyverno-policy-blocks-how-do-you-handle-that)
+- [Stage 5: HashiCorp Vault](#stage-5--hashicorp-vault)
+  - [How does Vault's Kubernetes auth method work?](#q-what-is-vaults-kubernetes-auth-method-and-how-does-it-work-mechanically)
+  - [What happens when the Vault token expires mid-flight?](#q-what-happens-to-a-running-pod-if-the-vault-token-expires-mid-flight)
+- [Stage 6: Falco (Runtime Security)](#stage-6--falco-runtime-security)
+  - [Shell spawned at 2am — walk through your response](#q-falco-fires-an-alert-at-2am-shell-spawned-in-your-ledger-service-container-walk-me-through-your-response)
+  - [How does Falco detect threats?](#q-how-does-falco-detect-threats-what-is-the-performance-overhead)
+- [Stage 7: Observability](#stage-7--observability)
+  - [How do you make dashboards actionable?](#q-security-dashboards-are-nice-how-do-you-make-them-actionable-rather-than-decorative)
+- [Stage 8: AWS Migration](#stage-8--aws-migration)
+  - [What changes between homelab and production EKS?](#q-what-changes-between-your-homelab-setup-and-a-production-eks-deployment)
+  - [How do you handle multi-environment deployments?](#q-how-would-you-handle-multi-environment-deployments-devstaging-prod-with-this-architecture)
+- [Questions to Ask the Interviewer](#the-closer--questions-to-ask-the-interviewer)
+- [The One Rule](#the-one-rule)
 
 ---
 
@@ -8,9 +50,9 @@ Questions interviewers actually ask. Answers they actually want to hear.
 
 Every question below has three parts:
 
-- **What they are really testing** — the interviewer's actual intent
-- **Weak answer** — what most candidates say (what gets you rejected)
-- **Strong answer** — what closes the offer
+- **What they are really testing**: the interviewer's actual intent
+- **Weak answer**: what most candidates say (what gets you rejected)
+- **Strong answer**: what closes the offer
 
 Do not memorize the strong answers. Internalize the logic. If you can explain
 *why* in your own words under pressure, you own it. If you recite it, they
@@ -103,13 +145,13 @@ Self-awareness. Engineers who cannot critique their own work cannot grow.
 **Strong answer:**
 "Two things.
 
-First — network policies. I applied them in Stage 6 but I would put them in
+First, network policies. I applied them in Stage 6 but I would put them in
 Stage 0. Default-deny-all should be the starting point, not something you
 retrofit. Retrofitting network policies in a running system means you are
 discovering implicit service dependencies by breaking them. That is the wrong
 order.
 
-Second — secrets. In Stage 0 I intentionally used plaintext K8s Secrets to
+Second, secrets. In Stage 0 I intentionally used plaintext K8s Secrets to
 demonstrate the problem before solving it in Stage 5. That was good pedagogy
 but bad practice. In a real project I would never let plaintext secrets exist
 in the cluster for any period of time, even temporarily. The lesson would be:
@@ -131,7 +173,7 @@ Vault from day one, even in development."
 Do you understand Kubernetes primitives or did you copy manifests?
 
 **Strong answer:**
-"A StatefulSet gives each pod a stable, persistent identity — a consistent
+"A StatefulSet gives each pod a stable, persistent identity: a consistent
 hostname, ordinal index, and persistent volume that follows the pod across
 restarts. That matters for Postgres because the data on disk must survive
 pod restarts and the database needs a stable hostname for client connections.
@@ -331,7 +373,7 @@ the build go green. That defeats the purpose."
 Supply chain security awareness — a top-of-mind topic for fintech since EO 14028.
 
 **Strong answer:**
-"SBOM — Software Bill of Materials — is a machine-readable inventory of every
+"SBOM (Software Bill of Materials) is a machine-readable inventory of every
 component in a software artifact: libraries, dependencies, their versions,
 their licenses, and their known vulnerabilities.
 

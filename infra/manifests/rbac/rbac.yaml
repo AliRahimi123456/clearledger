@@ -10,7 +10,7 @@
 #
 # The principle: LEAST PRIVILEGE
 #   Each app gets the minimum access it needs. Nothing more.
-#   If auth-service only needs to look up service addresses, it cannot
+#   If auth-service only needs to look up service addresses, then it cannot
 #   read secrets, delete pods, or access anything else.
 #
 # What is in this file:

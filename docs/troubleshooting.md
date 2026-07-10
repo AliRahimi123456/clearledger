@@ -4,7 +4,250 @@ Common problems encountered during the lab, with exact diagnostic commands and f
 
 ---
 
-## Where am I stuck? (manual decision tree — no scripts)
+## Table of Contents
+
+- [Where Am I Stuck?](#where-am-i-stuck-manual-decision-tree-no-scripts)
+- [Host machine setup](#host-machine-setup)
+- [Disk health (long-running lab VM)](#disk-health-long-running-lab-vm)
+- [Cluster and VM Issues](#cluster--vm-issues)
+  - [VM not starting](#vm-not-starting)
+  - [kubectl cannot connect](#kubectl-cannot-connect)
+  - [Snapshot wasn't created](#snapshot-wasnt-created)
+  - [VM disk full or nearly full](#vm-disk-full-or-nearly-full)
+- [Stage 1 CI and GitHub Actions Issues](#stage-1-ci--github-actions-issues)
+  - [Job stays queued waiting for a runner](#job-stays-queued-waiting-for-a-runner)
+  - [Runner cannot use Docker](#runner-cannot-use-docker)
+  - [CI build fails: DNS server misbehaving](#ci-build-fails-dns-server-misbehaving-or-could-not-resolve-host)
+  - [Docker Hub login or push fails with IPv6](#docker-hub-login-or-push-fails-with-ipv6-network-is-unreachable)
+  - [pip: command not found](#pip-command-not-found)
+  - [Gitleaks finds demo secrets](#gitleaks-finds-demo-secrets)
+  - [IaC scan fails on Kubernetes manifests](#iac-scan-fails-on-kubernetes-manifests)
+  - [Dockerfile scan fails on Dockerfile.dev](#dockerfile-scan-fails-on-dockerfiledev)
+  - [Trivy install fails](#trivy-install-fails-trivy-command-not-found-or-apt-release-errors)
+  - [Trivy version notice (not a scan failure)](#trivy-version-x-is-now-available-notice-not-a-scan-failure)
+  - [Trivy install fails after "found version"](#trivy-install-fails-after-found-version)
+  - [Trivy blocks Python service images](#trivy-blocks-python-service-images)
+  - [Trivy blocks the frontend image](#trivy-blocks-the-frontend-image)
+  - [Cosign download or signing fails](#cosign-download-or-signing-slowsfails-stage-1)
+  - [Syft or Grype install is slow](#syft-or-grype-install-is-slow)
+  - [Manifest update points to wrong image path](#manifest-update-points-to-the-wrong-image-path)
+  - [DAST fails in Stage 1](#dast-fails-in-stage-1)
+  - [Argo CD install fails: annotation too long](#argo-cd-install-fails-applicationsets-annotation-too-long)
+  - [ArgoCD refresh fails in Stage 1](#argocd-refresh-fails-in-stage-1)
+- [Pod Issues](#pod-issues)
+  - [Pod stuck in Pending](#pod-stuck-in-pending)
+  - [Pod stuck in CrashLoopBackOff](#pod-stuck-in-crashloopbackoff)
+  - [readOnlyRootFilesystem causing failures](#readonlyrootfilesystem-causing-failures)
+  - [Image pull failures from Docker Hub](#image-pull-failures-from-docker-hub)
+- [Stage 4: Admission Control (Kyverno)](#stage-4--admission-control-kyverno)
+  - [Quick reference](#quick-reference)
+  - [Kyverno cleanup pods in ImagePullBackOff](#kyverno-cleanup-pods-in-imagepullbackoff)
+  - [Helm upgrade stuck or duplicate Kyverno pods](#helm-upgrade-stuck-or-duplicate-kyverno-pods)
+  - [Signature policy does not block unsigned images](#signature-policy-does-not-block-unsigned-images)
+  - [make check-4 fails on kube-bench](#make-check-4-fails-on-kube-bench)
+  - [Health check says Kyverno not running](#health-check-says-kyverno-not-running)
+  - [Policies not READY](#policies-not-ready)
+- [Kyverno Issues](#kyverno-issues)
+  - [Kyverno blocking a deployment you expect to pass](#kyverno-blocking-a-deployment-you-expect-to-pass)
+  - [PolicyReport showing violations](#policyreport-showing-violations)
+- [Stage 6: Runtime Security (Falco)](#stage-6--runtime-security-falco)
+  - [Common issues](#common-issues)
+- [Stage 6.5: Chaos Engineering (LitmusChaos)](#stage-65--chaos-engineering-litmuschaos)
+  - [Common issues](#common-issues-1)
+- [Stage 7: Observability](#stage-7--observability-grafana--prometheus--loki)
+  - [Common issues](#common-issues-2)
+  - [Quick recovery](#quick-recovery-re-provision-everything)
+- [Vault Issues](#vault-issues)
+  - [Stage 5: common issues](#stage-5--common-issues)
+  - [Mac reboot or sleep — auth/ledger pods sick (Vault)](#mac-reboot-or-sleep--authledger-pods-sick-vault)
+  - [Vault agent not injecting secrets](#vault-agent-not-injecting-secrets)
+  - [Vault pod not starting](#vault-pod-not-starting)
+  - [Secrets not appearing in /vault/secrets](#secrets-not-appearing-in-vaultsecrets)
+- [AWS and EKS (Stage 8)](#aws--eks-stage-8)
+  - [IRSA not working](#irsa-not-working--pod-using-node-role-instead-of-service-role)
+- [Stage 8: GitHub Actions OIDC / ECR publish fails](#stage-8--github-actions-oidc--ecr-publish-fails)
+  - [Not authorized to perform sts:AssumeRoleWithWebIdentity](#not-authorized-to-perform-stsassumerolewithwebidentity)
+- [ArgoCD Issues](#argocd-issues)
+  - [Authentication required / Repository not found](#comparisonerror-authentication-required--repository-not-found)
+  - [CLI warning: Failed to invoke grpc call](#cli-warning-failed-to-invoke-grpc-call-use-flag---grpc-web)
+  - [ArgoCD sync failed on vault-secret-rotation](#argocd-sync-failed-on-vault-secret-rotation-stage-5)
+  - [Application stuck in OutOfSync](#application-stuck-in-outsync-ci-updated-infra-hours-ago)
+  - [Drift demo: kubectl set image does nothing](#drift-demo-kubectl-set-image-does-nothing--argocd-stays-synced)
+  - [ArgoCD Synced but red pods](#argocd-synced-but-red-pods--health-progressing-stage-2)
+  - [selfHeal reverting your manual changes](#selfheal-reverting-your-manual-changes)
+- [Falco Issues](#falco-issues)
+  - [Falco not detecting events](#falco-not-detecting-events)
+  - [Falco UI showing no alerts](#falco-ui-showing-no-alerts)
+- [Networking Issues](#networking-issues)
+  - [Services not reachable via domain name](#services-not-reachable-via-domain-name)
+  - [Network policies blocking legitimate traffic](#network-policies-blocking-legitimate-traffic)
+- [General Debugging Workflow](#general-debugging-workflow)
+
+---
+
+## Host machine setup
+
+<a id="host-machine-setup"></a>
+
+**Do the lab manually first.** Stage 0 walks you through provisioning the cluster step by step. Helper scripts (`make setup`, `make doctor`, `scripts/configure-vm-network.sh`, and others) are optional shortcuts — use them only after you understand what they automate.
+
+### Which setup is yours?
+
+The lab is **written and tested for Mac + Multipass**. You can finish every stage on Linux or Windows too — just follow the row that matches your machine:
+
+| You are on… | Do this |
+|---|---|
+| **Mac** | Follow the guide as written. Run `make setup`, then `bash scripts/configure-vm-network.sh` if CI builds fail on DNS. |
+| **Linux** (MicroK8s on the host, no Multipass) | Skip `multipass` commands. Run scripts with `--inside-vm` on the host (for example, `bash scripts/configure-vm-network.sh --inside-vm`). **No `make snapshot`** — save progress with `make teardown && make setup` and re-walk stages ([LAB-GUIDE — Path B](../docs/LAB-GUIDE.md#saving-your-progress)). |
+| **Windows** | Install **WSL2 Ubuntu**. Run the **whole lab inside WSL** — not PowerShell. Follow the **Linux** row above from inside WSL. |
+
+**Open a URL in the browser**
+
+```bash
+# macOS
+open http://grafana.local
+
+# Linux or WSL2
+xdg-open http://grafana.local
+```
+
+**CI builds fail on DNS?** Run the network fix on the machine that has Docker and MicroK8s:
+
+```bash
+# Mac (from repo root — talks to the Multipass VM for you)
+bash scripts/configure-vm-network.sh
+
+# Linux or WSL2 (on that same machine)
+bash scripts/configure-vm-network.sh --inside-vm
+```
+
+Details: [CI build fails: DNS](#ci-build-fails-dns-server-misbehaving-or-could-not-resolve-host).
+
+### System requirements
+
+- **24 GB RAM minimum** (the VM needs 12 GB reserved; 32 GB+ recommended for Stages 7–7.5)
+- **6 CPU cores minimum** on the host (the VM uses 6 by default; 8 if you use `setup-cluster.local.env`)
+- **80 GB free disk space** on your host for the full lab through Stages 7–7.5 (`make setup` provisions an 80 GB VM disk by default). **60 GB is enough** if you plan to stop after Stage 4 — you will not need the extra room until the observability and tracing stacks in Stages 7–7.5. Those stages pull several large container images and retain metrics/logs on disk; the default VM size accounts for that so you are not resizing mid-lab. If you keep the VM running for days between sessions, run **`make doctor`** weekly — see [Disk health](#disk-health-long-running-lab-vm).
+- macOS, Linux (Ubuntu 20.04+), or Windows 10/11
+
+### Install tools on your host machine
+
+| Tool | What it does | macOS | Linux | Windows |
+|---|---|---|---|---|
+| Multipass | Creates lightweight Ubuntu VMs on your laptop | `brew install --cask multipass` | `sudo snap install multipass` | [multipass.run/install](https://multipass.run/install) |
+| kubectl | Talks to your Kubernetes cluster from your terminal | `brew install kubectl` | `sudo snap install kubectl --classic` | `winget install Kubernetes.kubectl` |
+| Helm | Package manager for Kubernetes (like apt/brew but for cluster apps) | `brew install helm` | `sudo snap install helm --classic` | `winget install Helm.Helm` |
+| Docker Desktop | Builds container images on your machine | [docker.com](https://docs.docker.com/desktop/) | [docker.com](https://docs.docker.com/engine/install/) | [docker.com](https://docs.docker.com/desktop/) |
+| jq | Formats JSON output so you can read it | `brew install jq` | `sudo apt install jq` | `winget install jqlang.jq` |
+
+> **Windows:** Use **WSL2 Ubuntu** for all lab commands. PowerShell cannot run `make` or `scripts/*.sh`.
+
+Verify everything before continuing:
+
+```bash
+multipass --version
+kubectl version --client --short
+helm version --short
+docker --version
+jq --version
+```
+
+If any command fails, fix it now. Every stage depends on these.
+
+### Optional: start with `make setup`
+
+After you understand Stage 0’s manual steps, you can provision the VM and cluster in one shot:
+
+```bash
+make          # shows all available commands
+make setup    # provisions the VM and cluster
+```
+
+After `make setup` finishes, it adds `KUBECONFIG` to your `~/.zshrc` so every future terminal knows where the cluster is. Your **current** terminal was already open before that happened, so run this once:
+
+```bash
+export KUBECONFIG=~/.kube/clearledger-config
+kubectl get nodes   # should show Ready
+```
+
+Any new terminal you open after this will work automatically. Then continue:
+
+```bash
+make stage-0  # opens Stage 0 and shows what you're building
+```
+
+---
+
+## Disk health (long-running lab VM)
+
+<a id="disk-health-long-running-lab-vm"></a>
+
+The lab runs on a **single-node MicroK8s VM** with a fixed disk (80 GB by default). Over days or weeks — especially after CI builds, Helm upgrades, and Stage 7 observability — container images, logs, and journald can fill the root filesystem. Pods then fail with `Evicted`, `ImagePullBackOff`, or mysterious `Pending` states that look like app bugs.
+
+`make setup` applies **preventive caps** automatically (idempotent — safe to re-run on a fresh VM):
+
+| Layer | Setting | Effect |
+|---|---|---|
+| Kubelet | `--container-log-max-size=10Mi`, `--container-log-max-files=3` | Rotates container logs instead of growing without bound |
+| Kubelet | `--image-gc-high-threshold=80`, `--image-gc-low-threshold=60` | Garbage-collects unused images when disk use crosses 80% |
+| journald | `SystemMaxUse=300M` in `/etc/systemd/journald.conf` | Caps systemd logs inside the VM |
+
+Configured in [`scripts/setup-cluster.sh`](../scripts/setup-cluster.sh) immediately after MicroK8s is enabled.
+
+### Commands
+
+```bash
+make doctor    # report only — VM disk %, top PVC namespaces, Prometheus TSDB size
+make reclaim   # reclaim safe cruft inside the VM (see below)
+```
+
+**`make doctor`** prints a **PASS / WARN / FAIL** verdict:
+
+| Verdict | Root disk used | Action |
+|---|---|---|
+| **PASS** | under 75% | No action needed |
+| **WARN** | 75–89% | Run `make reclaim`; plan to finish heavy stages or tear down soon |
+| **FAIL** | 90%+ | Run `make reclaim` immediately; if still FAIL, tear down and `make setup` |
+
+On WARN or FAIL, doctor prints: `Hint: run make reclaim`.
+
+**`make reclaim`** runs **inside the VM** and only touches safe targets:
+
+- Prunes **unused** container images (`microk8s ctr` — images still referenced by running pods are kept)
+- Vacuums journald down to **200M**
+- Prints **before/after** `df` for `/`
+
+It does **not** delete PVCs, Prometheus TSDB blocks, or any workload data.
+
+### When to use
+
+| Situation | Command |
+|---|---|
+| VM left running for several days between lab sessions | `make doctor` |
+| Before Stage 7 (Prometheus + Loki are disk-heavy) | `make doctor` — reclaim if WARN/FAIL |
+| After many Stage 1 CI runs (new images accumulate on the runner) | `make doctor` then `make reclaim` if needed |
+| Pods `Evicted` or node reports disk pressure | `make doctor` then `make reclaim` |
+| Doctor shows **WARN** or **FAIL** | `make reclaim` |
+
+### When **not** to use
+
+| Situation | Why |
+|---|---|
+| Doctor shows **PASS** | Reclaim frees little; unnecessary churn |
+| You expect reclaim to shrink **PVC / Postgres / Prometheus metrics** | Reclaim never touches PVCs or TSDB — only images and journald |
+| You are mid-checkpoint and have not read the error yet | Evicted pods may be a **disk** problem, but confirm with `make doctor` before assuming |
+| You need a **clean slate** | `make teardown` then `make setup` — reclaim is for keeping a long-running VM alive, not resetting the lab |
+| VM broken but you have a snapshot | `make snapshots` then `make restore STAGE=N` — see [LAB-GUIDE — Saving your progress](../docs/LAB-GUIDE.md#saving-your-progress) |
+
+### VM created before disk-safety was added
+
+If your VM predates this feature, `make doctor` and `make reclaim` still work. Kubelet and journald caps are applied only on **`make setup`** (new VM). To add caps to an **existing** VM without rebuilding, re-run the disk-safety block from [`scripts/setup-cluster.sh`](../scripts/setup-cluster.sh) (the `DISKSAFETY` heredoc after MicroK8s enable) — it is idempotent. Alternatively: `make teardown` and `make setup` for a fresh 80 GB VM.
+
+Acute disk pressure: [VM disk full or nearly full](#vm-disk-full-or-nearly-full).
+
+---
+
+## Where Am I Stuck? (Manual Decision Tree, No Scripts)
 
 Answer one question, run the commands, fix **before** advancing.
 
@@ -48,9 +291,33 @@ kubectl get nodes
 # Should show: clearledger   Ready
 ```
 
+### Snapshot wasn't created
+
+<a id="snapshot-wasnt-created"></a>
+
+`make snapshot` appeared to succeed but `make snapshots` does not list `clearledger.stageN`?
+
+Older versions of Multipass print a warning and exit without error — the snapshot was never created. Requires Multipass **1.13+**.
+
+```bash
+multipass version
+brew upgrade --cask multipass   # macOS
+```
+
+Listing is the only proof a checkpoint exists — always run `make snapshots` after `make snapshot`.
+
 ### VM disk full or nearly full
 
 <a id="vm-disk-full-or-nearly-full"></a>
+
+**Disk pressure but the cluster still responds** (`kubectl` works; pods may be `Evicted` or Helm is slow):
+
+```bash
+make doctor
+make reclaim          # if WARN/FAIL
+```
+
+If reclaim does not help → restore from a snapshot or `make teardown && make setup` ([LAB-GUIDE — Saving your progress](../docs/LAB-GUIDE.md#saving-your-progress)).
 
 Symptoms: pods `Evicted`, `FailedScheduling` with disk-pressure taints, Helm installs timing out, or `No space left on device` in logs.
 
@@ -522,7 +789,7 @@ if: github.ref == 'refs/heads/main' && github.event_name == 'push' && vars.ENABL
 Enable it later by adding a repository variable named `ENABLE_DAST` with value
 `true`.
 
-### Argo CD install fails: `applicationsets.argoproj.io` annotation too long
+### Argo CD Install Fails: applicationsets Annotation Too Long
 
 Symptom (near the end of `kubectl apply`):
 
@@ -818,8 +1085,8 @@ kubectl describe policyreport -n clearledger
 | Cannot find demo alert in UI | Hundreds of postgres rows bury it | **Cmd+F → `Shell Spawned`** or terminal: `kubectl logs -n falco -l app.kubernetes.io/name=falco -c falco --tail=500 \| grep 'Shell Spawned'` |
 | `make check-6` fails on NetworkPolicy | Netpol not applied yet (§6.4) | `kubectl apply -f infra/deferred-by-stage/stage-6-runtime-security/netpol/network-policies.yaml` then re-run |
 | `make fix-65-prereqs` → ArgoCD ComparisonError | Ran without `GITHUB_OWNER` — reset repoURL to placeholder | `export GITHUB_OWNER=your-user` then `kubectl apply -f stages/stage-2-gitops/argocd/clearledger-app.yaml` |
-| Auth `Init:0/1` Vault `permission denied` after snapshot | VM restart wiped Vault dev config | Re-run `setup.sh` + `seed-vault-secrets.sh`, delete auth/ledger pods — see LAB-GUIDE [Path D](#saving-your-progress) |
-| Auth `Init:0/1` Vault `permission denied` after Mac reboot | Same — K8s auth binding lost | Same Path D steps; `make restore` only if pods stay broken |
+| Auth `Init:0/1` Vault `permission denied` after snapshot | VM restart wiped Vault dev config | Re-run `setup.sh` + `seed-vault-secrets.sh`, delete auth/ledger pods — see [Mac reboot recovery](#mac-reboot-or-sleep--authledger-pods-sick-vault) |
+| Auth `Init:0/1` Vault `permission denied` after Mac reboot | Same — K8s auth binding lost | Same steps; `make restore` only if pods stay broken |
 | Scenario 4 `kubectl exec` hangs forever | `head -1` picked a **Terminating** pod | Use the `awk '$2=="2/2"'` pod picker in LAB-GUIDE §6.4 |
 | Scenario 4 `wget: not found` | Ledger image has no wget/curl | Use the **python3** command in LAB-GUIDE §6.4 |
 | Scenario 4 shows timeout / refused / BLOCKED | **Expected** — ledger → notification is blocked | Success; optional demo only |
@@ -923,6 +1190,47 @@ make check-7
 | Login fails after migration | `SEED_*` mismatch with Postgres | Re-run `seed-vault-secrets.sh` with correct `.env` |
 | ArgoCD OutOfSync on deleted secrets | Infra repo still has `secret.yaml` | Remove from `clearledger-infra` and push |
 | ArgoCD sync fails on `vault-secret-rotation` | Kyverno blocks the CronJob | Copy hardened `rotation-cronjob.yaml` from this repo — [details](#argocd-sync-failed-on-vault-secret-rotation-stage-5) |
+
+### Mac reboot or sleep — auth/ledger pods sick (Vault)
+
+<a id="mac-reboot-or-sleep--authledger-pods-sick-vault"></a>
+
+Common after closing the laptop or a Multipass hang (Stage 5+): `auth-service` / `ledger-service` show **Unknown** or stay **Init:0/1**; `vault-agent-init` logs show `permission denied` on `auth/kubernetes/login`. Postgres and frontend may still be **Running**. Vault’s in-memory dev config lost its Kubernetes auth binding — re-run Stage 5 setup, not a full VM restore.
+
+Try this **before** `make restore` if you have a good snapshot.
+
+**Multipass won’t respond** (`cannot connect to the multipass socket`, `multipass start` spins forever): reboot the Mac, open **Multipass** from Applications, wait 60s, then `multipass list`.
+
+**App pods sick but `kubectl` works:**
+
+```bash
+export KUBECONFIG=~/.kube/clearledger-config
+kubectl get pods -n clearledger
+
+# Stale pods from the crash — delete Unknown auth/ledger pods (skip if already recreated)
+kubectl delete pod -n clearledger -l app=auth-service
+kubectl delete pod -n clearledger -l app=ledger-service
+
+# Confirm Vault init is the blocker (expect permission denied if this is the issue)
+kubectl logs -n clearledger -l app=auth-service -c vault-agent-init --tail=10
+
+# Re-bind Vault K8s auth + re-seed secrets (requires stages/stage-5-secrets-management/.env)
+bash stages/stage-5-secrets-management/infra/vault/setup.sh
+bash stages/stage-5-secrets-management/infra/vault/seed-vault-secrets.sh
+
+# Restart app pods so vault-agent-init runs again
+kubectl delete pod -n clearledger -l app=auth-service
+kubectl delete pod -n clearledger -l app=ledger-service
+
+# Wait ~1 minute, then verify
+kubectl get pods -n clearledger          # auth + ledger should be 2/2 Running
+curl -s -o /dev/null -w "%{http_code}\n" http://clearledger.local/auth/health   # want 200
+SKIP_CHAOS_CHECK=1 make check-7
+```
+
+**Pass:** auth and ledger **2/2 Running**, `/auth/health` returns **200**, `make check-7` passes. Grafana panels may be empty until you re-run LAB-GUIDE §7.4 exercises (Loki may have lost recent logs) — that is normal.
+
+**Still broken?** `make snapshots` then `make restore STAGE=7` (or the newest good `clearledger.stageN` you have) — [LAB-GUIDE — Saving your progress](../docs/LAB-GUIDE.md#saving-your-progress).
 
 ### Vault agent not injecting secrets
 

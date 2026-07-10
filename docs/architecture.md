@@ -7,10 +7,10 @@
 Responsibilities: user registration, login, JWT issuance, token verification.
 
 **API endpoints:**
-- `POST /register` — create a new user
-- `POST /login` — authenticate and receive a JWT
-- `GET /verify` — validate a JWT (called by ledger-service on every request)
-- `GET /health` — health check
+- `POST /register`: create a new user
+- `POST /login`: authenticate and receive a JWT
+- `GET /verify`: validate a JWT (called by ledger-service on every request)
+- `GET /health`: health check
 
 **Dependencies:** PostgreSQL
 
@@ -23,10 +23,10 @@ Responsibilities: user registration, login, JWT issuance, token verification.
 Responsibilities: create transactions, return balance, list transaction history.
 
 **API endpoints:**
-- `POST /transactions` — create a credit or debit transaction
-- `GET /balance` — return current balance for the authenticated user
-- `GET /transactions` — list the last 100 transactions
-- `GET /health` — health check
+- `POST /transactions`: create a credit or debit transaction
+- `GET /balance`: return current balance for the authenticated user
+- `GET /transactions`: list the last 100 transactions
+- `GET /health`: health check
 
 **Dependencies:** PostgreSQL, Redis (pub/sub), auth-service (JWT verification)
 
@@ -42,8 +42,8 @@ ledger-service publishes a `large_transaction` event to the `ledger-events` Redi
 Responsibilities: subscribe to ledger events, maintain an alert log, expose alerts via API.
 
 **API endpoints:**
-- `GET /alerts` — return the last 50 transaction alerts
-- `GET /health` — health check
+- `GET /alerts`: return the last 50 transaction alerts
+- `GET /health`: health check
 
 **Dependencies:** Redis (subscriber)
 
@@ -53,6 +53,8 @@ Large transaction events become alerts stored in memory (replace with a database
 ---
 
 ## Data Flow
+
+![ClearLedger Data Flow](../assets/images/dataflow.png)
 
 ```
 User

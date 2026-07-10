@@ -2,11 +2,11 @@
 
 Take these screenshots after completing each stage.
 Replace the placeholders in screenshots/ with your actual captures.
-Then push to GitHub — the README embeds them automatically.
+Then push to GitHub; the README embeds them automatically.
 
 ---
 
-## Screenshot 1 — Web UI Dashboard (after Stage 0)
+## Screenshot 1: Web UI Dashboard (after Stage 0)
 
 Setup:
 
@@ -45,7 +45,7 @@ Save as: screenshots/01-ui-dashboard.png
 
 ---
 
-## Screenshot 2 — ArgoCD Synced and Healthy (after Stage 2)
+## Screenshot 2: ArgoCD Synced and Healthy (after Stage 2)
 
 Setup:
 
@@ -71,7 +71,7 @@ Save as: screenshots/02-argocd-synced.png
 
 ---
 
-## Screenshot 3 — Kyverno Blocking a Root Container (after Stage 4)
+## Screenshot 3: Kyverno Blocking a Root Container (after Stage 4)
 
 Setup:
 
@@ -109,7 +109,7 @@ Save as: screenshots/03-kyverno-block.png
 
 ---
 
-## Screenshot 4 — Falco CRITICAL Alert (after Stage 6)
+## Screenshot 4: Falco CRITICAL Alert (after Stage 6)
 
 Setup:
 
@@ -123,7 +123,7 @@ kubectl exec -n clearledger \
 
 Then open: http://falco.local (login **admin** / password **admin**)
 
-**What to look for:** Ignore **Notice** events such as “Contact K8S API Server From Container” from `argocd` — that is normal cluster noise. After `make demo-6`, refresh and capture a **Critical** row: **Shell Spawned in ClearLedger Container**, with `auth-service` in the output.
+**What to look for:** Ignore **Notice** events such as “Contact K8S API Server From Container” from `argocd` that is normal cluster noise. After `make demo-6`, refresh and capture a **Critical** row: **Shell Spawned in ClearLedger Container**, with `auth-service` in the output.
 
 What to capture: The Falco Sidekick UI showing:
 
@@ -140,7 +140,7 @@ Save as: screenshots/04-falco-alert.png
 
 ---
 
-## Screenshot 5 — Grafana Security Dashboard (after Stage 7)
+## Screenshot 5: Grafana Security Dashboard (after Stage 7)
 
 Open: http://grafana.local
 Navigate to: Dashboards → ClearLedger — Security Event Timeline
@@ -156,7 +156,7 @@ Save as: screenshots/05-grafana-security.png
 
 ---
 
-## Screenshot 6 — Pipeline All Green (after Stage 3)
+## Screenshot 6: Pipeline All Green (after Stage 3)
 
 Open: github.com/YOUR_USERNAME/clearledger/actions
 
@@ -180,7 +180,7 @@ Save as: screenshots/06-pipeline-green.png
 
 ---
 
-## Screenshot 7 — ClearLedger on AWS (Stage 8 only, optional)
+## Screenshot 7: ClearLedger on AWS (Stage 8 only, optional)
 
 After running: bash stages/stage-8-aws-migration/scripts/aws-spinup.sh
 

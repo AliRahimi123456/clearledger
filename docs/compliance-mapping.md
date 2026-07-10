@@ -1,7 +1,29 @@
-# ClearLedger Security Controls — Compliance Mapping
+# ClearLedger Security Controls: Compliance Mapping
 
 Every control implemented in this lab maps to at least one compliance framework.
 Use this table to explain your security posture to auditors, customers, and interviewers.
+
+---
+
+## Table of Contents
+
+- [Control Matrix](#control-matrix)
+  - [OWASP Project Mapping (DAST)](#owasp-project-mapping-dast)
+- [Framework Reference](#framework-reference)
+  - [PCI-DSS v4.0](#pci-dss-v40-payment-card-industry-data-security-standard)
+  - [SOC2 Trust Service Criteria](#soc2-trust-service-criteria)
+  - [CIS Kubernetes Benchmark 1.8](#cis-kubernetes-benchmark-18)
+  - [NIST 800-53 Rev 5](#nist-800-53-rev-5)
+  - [SLSA](#slsa-supply-chain-levels-for-software-artifacts)
+  - [Executive Order 14028](#executive-order-14028-us-cyber-executive-order)
+- [Audit Evidence Locations](#audit-evidence-locations)
+- [EU DORA — Regulation 2022/2554](#eu-digital-operational-resilience-act-dora--regulation-20222554)
+  - [Pillar 1: ICT Risk Management](#pillar-1--ict-risk-management-articles-516)
+  - [Pillar 2: ICT-Related Incident Management](#pillar-2--ict-related-incident-management-articles-1723)
+  - [Pillar 3: Digital Operational Resilience Testing](#pillar-3--digital-operational-resilience-testing-articles-2427)
+  - [Pillar 4: ICT Third-Party Risk Management](#pillar-4--ict-third-party-risk-management-articles-2844)
+  - [Pillar 5: Information Sharing](#pillar-5--information-sharing-article-45)
+  - [DORA vs Existing Frameworks](#dora-vs-existing-frameworks--overlap-reference)
 
 ---
 
@@ -78,16 +100,16 @@ Use this table to explain your security posture to auditors, customers, and inte
 ## Framework Reference
 
 ### PCI-DSS v4.0 (Payment Card Industry Data Security Standard)
-- **3.4, 3.5** — Protect stored cardholder data
-- **6.2** — Bespoke and custom software are protected from attacks
-- **6.3.x** — Security vulnerabilities are identified and addressed
-- **10.x** — Log and monitor all access to system components
+- **3.4, 3.5**: Protect stored cardholder data
+- **6.2**: Bespoke and custom software are protected from attacks
+- **6.3.x**: Security vulnerabilities are identified and addressed
+- **10.x**: Log and monitor all access to system components
 
 ### SOC2 Trust Service Criteria
-- **CC6.x** — Logical and Physical Access Controls
-- **CC7.x** — System Operations (monitoring, detection, response)
-- **CC8.1** — Change management includes security assessment
-- **A1.1** — Availability controls (resource limits)
+- **CC6.x**: Logical and Physical Access Controls
+- **CC7.x**: System Operations (monitoring, detection, response)
+- **CC8.1**: Change management includes security assessment
+- **A1.1**: Availability controls (resource limits)
 
 ### CIS Kubernetes Benchmark 1.8
 
@@ -95,24 +117,24 @@ Use this table to explain your security posture to auditors, customers, and inte
 |---|---|---|
 | CIS Kubernetes Benchmark | kube-bench | CIS K8s Benchmark v1.8 |
 
-- **5.2.4** — Minimize the admission of containers wishing to share the host process ID namespace
-- **5.2.5** — Minimize the admission of containers with allowPrivilegeEscalation
-- **5.2.6** — Minimize the admission of root containers
-- **5.2.7** — Minimize the admission of containers with the NET_RAW capability
-- **5.3.2** — Ensure that all Namespaces have Network Policies defined
+- **5.2.4**: Minimize the admission of containers wishing to share the host process ID namespace
+- **5.2.5**: Minimize the admission of containers with allowPrivilegeEscalation
+- **5.2.6**: Minimize the admission of root containers
+- **5.2.7**: Minimize the admission of containers with the NET_RAW capability
+- **5.3.2**: Ensure that all Namespaces have Network Policies defined
 
 ### NIST 800-53 Rev 5
-- **AC-6** — Least Privilege
-- **AU-2** — Event Logging
-- **IA-5** — Authenticator Management
-- **IR-6** — Incident Reporting
-- **RA-5** — Vulnerability Monitoring and Scanning
-- **SA-11** — Developer Testing and Evaluation
-- **SA-12** — Supply Chain Protection
-- **SC-6** — Resource Availability
-- **SC-7** — Boundary Protection
-- **SC-28** — Protection of Information at Rest
-- **SI-4** — System Monitoring
+- **AC-6**: Least Privilege
+- **AU-2**: Event Logging
+- **IA-5**: Authenticator Management
+- **IR-6**: Incident Reporting
+- **RA-5**: Vulnerability Monitoring and Scanning
+- **SA-11**: Developer Testing and Evaluation
+- **SA-12**: Supply Chain Protection
+- **SC-6**: Resource Availability
+- **SC-7**: Boundary Protection
+- **SC-28**: Protection of Information at Rest
+- **SI-4**: System Monitoring
 
 ### SLSA (Supply-chain Levels for Software Artifacts)
 - **SLSA Level 2** requirements met by: GitHub Actions CI (self-hosted runner), Cosign signing, SBOM with Syft
