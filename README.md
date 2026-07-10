@@ -199,7 +199,7 @@ Start here:
 
 ## If this helped
 
-**[Star the repo](https://github.com/Osomudeya/clearledger/stargazers)** if you are getting value from the lab — it helps others find it and tells me to keep building.
+**Star the repo** if you are getting value from the lab — it helps others find it and tells me to keep building.
 
 ### [DevOps Beyond Tutorials](https://osomudeya.kit.com/23db7ca59f)
 
