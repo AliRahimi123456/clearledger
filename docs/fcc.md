@@ -19,8 +19,6 @@ Everything in this article refers to files inside that repo.
 
 ---
 
-<a id="heading-prerequisites"></a>
-
 ## Prerequisites
 
 You need these tools installed on your machine before Stage 0:
@@ -59,18 +57,18 @@ The companion repo is at [github.com/Osomudeya/clearledger](https://github.com/O
 - [How to Manage Disk Space](#heading-how-to-manage-disk-space)
 - [How to Try the App Without Kubernetes](#heading-how-to-try-the-app-without-kubernetes)
 - [How to Configure Local Domain Names](#heading-how-to-configure-local-domain-names)
-- [Stage 0 — The Running System](#heading-stage-0--the-running-system)
-- [Stage 1 — CI Pipeline](#heading-stage-1--ci-pipeline-github-actions--self-hosted-runner)
-  - [Private repos — what syncs where](#heading-private-repos--what-syncs-where)
-- [Stage 2 — GitOps with ArgoCD](#heading-stage-2--gitops-with-argocd)
-- [Stage 3 — Security Gates](#heading-stage-3--security-gates)
-- [Stage 4 — Admission Control](#heading-stage-4--admission-control-kyverno)
-- [Stage 5 — Secrets Management](#heading-stage-5--secrets-management-vault)
-- [Stage 6 — Runtime Security](#heading-stage-6--runtime-security-falco)
-- [Stage 6.5 — Chaos Engineering (Optional)](#heading-stage-65--chaos-engineering-optional)
-- [Stage 7 — Security Observability](#heading-stage-7--security-observability)
-- [Stage 7.5 — OpenTelemetry (Optional)](#heading-stage-75--opentelemetry-optional)
-- [Stage 8 — AWS Migration](#heading-stage-8--aws-migration)
+- [Stage 0 — The Running System](#heading-stage-0-the-running-system)
+- [Stage 1 — CI Pipeline](#heading-stage-1-ci-pipeline-github-actions-self-hosted-runner)
+  - [Private repos — what syncs where](#heading-private-repos-what-syncs-where)
+- [Stage 2 — GitOps with ArgoCD](#heading-stage-2-gitops-with-argocd)
+- [Stage 3 — Security Gates](#heading-stage-3-security-gates)
+- [Stage 4 — Admission Control](#heading-stage-4-admission-control-kyverno)
+- [Stage 5 — Secrets Management](#heading-stage-5-secrets-management-vault)
+- [Stage 6 — Runtime Security](#heading-stage-6-runtime-security-falco)
+- [Stage 6.5 — Chaos Engineering (Optional)](#heading-stage-65-chaos-engineering-optional)
+- [Stage 7 — Security Observability](#heading-stage-7-security-observability)
+- [Stage 7.5 — OpenTelemetry (Optional)](#heading-stage-75-opentelemetry-optional)
+- [Stage 8 — AWS Migration](#heading-stage-8-aws-migration)
 - [Troubleshooting](#heading-troubleshooting)
 - [Compliance Reference](#heading-compliance-reference)
 - [Interview Preparation](#heading-interview-preparation)
@@ -78,8 +76,6 @@ The companion repo is at [github.com/Osomudeya/clearledger](https://github.com/O
 - [Conclusion](#heading-conclusion)
 
 ---
-
-<a id="heading-what-you-are-building"></a>
 
 ## What You Are Building
 
@@ -157,8 +153,6 @@ The guiding principle of this handbook is simple: every stage makes you feel the
 
 ---
 
-<a id="heading-how-to-work-through-this-lab"></a>
-
 ## How to Work Through This Lab
 
 This handbook makes you feel each problem before introducing the tool that solves it. Three habits will carry you through every stage.
@@ -186,8 +180,6 @@ This handbook makes you feel each problem before introducing the tool that solve
 Take screenshots at each **portfolio checkpoint**. These moments become your proof that the platform runs, blocks, detects, syncs, and observes real activity.
 
 ---
-
-<a id="heading-tools-you-will-meet"></a>
 
 ## Tools You Will Meet
 
@@ -222,8 +214,6 @@ Come back to this list when a new name appears and you wonder *why now*. Each en
 Each stage adds a new security layer. The tools are not interchangeable: scanners check code and images before deployment, ArgoCD keeps the cluster synced to Git, Vault handles secrets, Kyverno blocks unsafe workloads before they run, and Falco watches for suspicious behavior after they are running. That is why the order matters.
 ---
 
-<a id="heading-how-to-choose-your-path"></a>
-
 ## How to Choose Your Path
 
 Pick one path from your host RAM before you provision a cluster. Switching mid-lab after OOM kills or disk pressure wastes a day. Choose upfront.
@@ -237,8 +227,6 @@ Pick one path from your host RAM before you provision a cluster. Switching mid-l
 The default path in this guide assumes 24 GB+ RAM and the full local VM (Before You Start). If that is not you, start from the row that matches your machine.
 
 ---
-
-<a id="heading-how-to-save-your-progress"></a>
 
 ## How to Save Your Progress
 
@@ -322,8 +310,6 @@ If you run into problems such as disk space issues, failed snapshots, Mac sleep 
 
 ---
 
-<a id="heading-who-this-is-for"></a>
-
 ## Who This Is For
 
 **Junior DevOps (0–2 yrs):** do every stage in order. Do not skip the pain point sections. Expect Stage 0–2 to take a full day each, Stages 3–7 half a day each, Stage 8 a few hours. That is normal. Do not rush.
@@ -333,8 +319,6 @@ If you run into problems such as disk space issues, failed snapshots, Mac sleep 
 **Interview preparation:** complete through Stage 4, then read `docs/interview-prep.md`. The questions are based on exactly what is in this lab.
 
 ---
-
-<a id="heading-how-to-set-up-your-machine"></a>
 
 ## How to Set Up Your Machine
 
@@ -366,11 +350,9 @@ If any command fails, install the missing tool before continuing.
 
 ---
 
-<a id="heading-how-to-start-the-lab"></a>
-
 ## How to Start the Lab
 
-The main lab path starts at [Stage 0: the Running System](#heading-stage-0--the-running-system).
+The main lab path starts at [Stage 0: the Running System](#heading-stage-0-the-running-system).
 
 Use this one-command setup:
 
@@ -385,8 +367,6 @@ Expected: one node named `clearledger` with STATUS `Ready`.
 `make setup` provisions the Multipass VM, installs MicroK8s, applies disk-safety caps, and updates `/etc/hosts`. Takes 3–5 minutes.
 
 ---
-
-<a id="heading-how-to-manage-disk-space"></a>
 
 ## How to Manage Disk Space
 
@@ -409,8 +389,6 @@ make reclaim
 If `make doctor` still reports FAIL after reclaim, you may need `make teardown && make setup` and restore from a snapshot. Full guidance: [troubleshooting.md. VM disk full](troubleshooting.md#vm-disk-full-or-pods-evicted-disk-pressure).
 
 ---
-
-<a id="heading-how-to-try-the-app-without-kubernetes"></a>
 
 ## How to Try the App Without Kubernetes
 
@@ -456,8 +434,6 @@ BASE_URL=http://localhost:3000 bash scripts/dast/smoke.sh
 When you continue the main lab, deploy to Kubernetes as in Stage 0 and use **clearledger.local**: the UI and APIs behave the same. Only the hostname and backing infra change.
 
 ---
-
-<a id="heading-how-to-configure-local-domain-names"></a>
 
 ## How to Configure Local Domain Names
 
@@ -514,8 +490,6 @@ curl http://clearledger.local/auth/health
 ```
 
 ---
-
-<a id="heading-stage-0--the-running-system"></a>
 
 ## Stage 0 — The Running System
 
@@ -1195,8 +1169,6 @@ Stage 1 automates the build. Stage 2 fixes the deployment.
 
 ---
 
-<a id="heading-stage-1--ci-pipeline-github-actions--self-hosted-runner"></a>
-
 ## Stage 1 — CI Pipeline (GitHub Actions + Self-Hosted Runner)
 
 > In Stage 0 you built and deployed by hand. Stage 1 automates the build: a `git push` runs a pipeline that builds images, scans them, pushes to Docker Hub, and records the new tag in `clearledger-infra`.
@@ -1281,7 +1253,7 @@ GitHub — clearledger-infra (infra repo)
   ArgoCD watches this repo in Stage 2 (not yet)
 ```
 
-> **Stages 1–7 vs Stage 8: two pipelines, one repo.** This chapter uses `.github/workflows/ci.yaml` on your **self-hosted** runner (Docker Hub → `clearledger-infra`). Stage 8 adds a second workflow, `.github/workflows/ci-aws.yaml`, that runs on **GitHub-hosted** `ubuntu-latest` runners (ECR → in-repo kustomization). Fresh starters **do not** set anything extra (homelab CI is the default until you opt into AWS in §8. See [§8) CI routing and `CLEARLEDGER_CI_TARGET`](#ci-routing-stages-17-vs-stage-8).
+> **Stages 1–7 vs Stage 8: two pipelines, one repo.** This chapter uses `.github/workflows/ci.yaml` on your **self-hosted** runner (Docker Hub → `clearledger-infra`). Stage 8 adds a second workflow, `.github/workflows/ci-aws.yaml`, that runs on **GitHub-hosted** `ubuntu-latest` runners (ECR → in-repo kustomization). Fresh starters **do not** set anything extra (homelab CI is the default until you opt into AWS in §8. See [§8) CI routing and `CLEARLEDGER_CI_TARGET`](#heading-ci-routing-stages-17-vs-stage-8).
 
 ---
 
@@ -1296,7 +1268,7 @@ First, put the application repo somewhere GitHub Actions can see it.
 Go to GitHub → **New Repository**:
 
 - Repository name: **`clearledger`** (exact name, not `clearledger-infra`)
-- Visibility: **Public or Private**. Both work with the self-hosted runner and GitHub Actions. ArgoCD never reads this repo (see [Private repos: what syncs where](#heading-private-repos--what-syncs-where) in §1.3).
+- Visibility: **Public or Private**. Both work with the self-hosted runner and GitHub Actions. ArgoCD never reads this repo (see [Private repos: what syncs where](#heading-private-repos-what-syncs-where) in §1.3).
 - Do **not** initialize with a README or `.gitignore`
 
 The repo already has those files locally. If GitHub creates its own, your first push may fail because the histories do not match.
@@ -1564,8 +1536,6 @@ image: $DOCKER_USERNAME/clearledger-auth-service:abc123
 That line is a **deployment contract**: Git now says the cluster *should* run `abc123`. In Stage 1, the cluster does not change yet. You will prove that in §1.6. In **Stage 2**, ArgoCD watches `clearledger-infra`, compares Git to what is running, and syncs the cluster when they differ. The app repo is where work begins. The infra repo is what production is supposed to look like.
 
 
-<a id="heading-private-repos--what-syncs-where"></a>
-
 #### Private repos — what syncs where
 
 This lab uses two GitHub repos. **`clearledger`** is your main project repo: app code, CI pipeline, docs, policies, and lab files. This repo can be private.
@@ -1751,8 +1721,8 @@ Add these five secrets to the `clearledger` repo, not `clearledger-infra`:
 
 | Variable | Stage 1 | When to enable |
 |---|---|---|
-| `ENABLE_ARGOCD_SYNC` | Leave **unset** | **Stage 2** — after ArgoCD’s first sync is healthy (see [Enable CI → ArgoCD handoff](#enable-ci--argocd-handoff-close-the-stage-1-deployment-gap)) |
-| `ENABLE_DAST` | Leave **unset** | **Stage 3** — after the app is live at `clearledger.local` (see [Enable DAST](#enable-dast-optional--after-stage-2)) |
+| `ENABLE_ARGOCD_SYNC` | Leave **unset** | **Stage 2** — after ArgoCD’s first sync is healthy (see [Enable CI → ArgoCD handoff](#heading-how-to-enable-the-ci-to-argocd-handoff)) |
+| `ENABLE_DAST` | Leave **unset** | **Stage 3** — after the app is live at `clearledger.local` (see [Enable DAST](#heading-enable-dast-optional-after-stage-2)) |
 
 **Do not add either variable in Stage 1.** If you set them now, CI will try to refresh ArgoCD or run ZAP before the cluster is ready, and the pipeline output gets harder to read. The guide calls out the exact moment to turn each one on; you only need to remember that both exist.
 
@@ -2034,8 +2004,6 @@ All five pass → Stage 2.
 <!-- TODO: replace YOUR_LINKEDIN_HANDLE with your real LinkedIn profile slug and YOUR_NEWSLETTER_URL with your real newsletter URL before publishing -->
 
 ---
-
-<a id="heading-stage-2--gitops-with-argocd"></a>
 
 ## Stage 2 — GitOps with ArgoCD
 
@@ -2638,8 +2606,6 @@ You have now practised a rollback end-to-end. The `git revert` commit is permane
 
 ---
 
-<a id="heading-stage-3--security-gates"></a>
-
 ## Stage 3 — Security Gates
 
 Every push runs security checks. Some failures stop the pipeline right away. Others you learn from now and enforce in the cluster later (Stage 4).
@@ -2652,7 +2618,7 @@ Every push runs security checks. Some failures stop the pipeline right away. Oth
 - `ENABLE_ARGOCD_SYNC=true` on GitHub (you set this in Stage 2)
 - `ENABLE_DAST` still **unset** (turn on later in this stage if you want)
 - Argo CD at `http://argocd.local` shows **Synced**
-- Optional: skim [Stage 1 security posture](#stage-1-security-posture--what-blocks-vs-what-waits). Stage 1 already ran many of these tools
+- Optional: skim [Stage 1 security posture](#heading-stage-1-security-posture-what-blocks-vs-what-waits). Stage 1 already ran many of these tools
 
 **Done when:** `make check-3` passes and you triggered each gate once (§3.4). Then `make snapshot STAGE=3` and `make snapshots`.
 
@@ -2978,8 +2944,6 @@ make snapshot STAGE=3 && make snapshots
 
 ---
 
-<a id="heading-stage-4--admission-control-kyverno"></a>
-
 ## Stage 4 — Admission Control (Kyverno)
 
 > Even if CI passes, the cluster can still refuse.
@@ -2994,7 +2958,7 @@ CI scans your code and images before they reach GitOps, but it cannot watch ever
 
 **You are done with Stage 4** when all three break-it scenarios in §4.4 are denied and `make check-4` passes.
 
-**What changes from Stage 3 is enforcement, not scanning.** In CI, Checkov reported Kubernetes misconfigurations but did not block the pipeline; Kyverno now stops those same classes of problems at the cluster gate. Cosign has been signing your images since Stage 1; Kyverno now *requires* that signature before a ClearLedger image can deploy. This is where [Stage 1 evidence becomes enforcement](#stage-1-security-posture--what-blocks-vs-what-waits). See that section if you want the full map of what blocked in Stage 1 versus what waited for Stage 4.
+**What changes from Stage 3 is enforcement, not scanning.** In CI, Checkov reported Kubernetes misconfigurations but did not block the pipeline; Kyverno now stops those same classes of problems at the cluster gate. Cosign has been signing your images since Stage 1; Kyverno now *requires* that signature before a ClearLedger image can deploy. This is where [Stage 1 evidence becomes enforcement](#heading-stage-1-security-posture-what-blocks-vs-what-waits). See that section if you want the full map of what blocked in Stage 1 versus what waited for Stage 4.
 
 Start at **§4.1** to install Kyverno. If install, policies, break-it scenarios, or `make check-4` fail, read [troubleshooting.md. Stage 4](troubleshooting.md#stage-4-admission-control-troubleshooting) before changing Helm charts or policy YAML.
 
@@ -3084,7 +3048,7 @@ If pods stay in `ContainerCreating` for a long time, the node is still pulling i
 
 **Stability gate: Kyverno install only (before §4.2):**
 
-Controllers should be `1/1 Running`, restarts 0–2 and not climbing. See [Platform Stability](#platform-stability--from-stage-4-onward). Do not run `make check-4` yet (that script also validates the §4.3 policies).
+Controllers should be `1/1 Running`, restarts 0–2 and not climbing. See [Platform Stability](#heading-platform-stability-from-stage-4-onward). Do not run `make check-4` yet (that script also validates the §4.3 policies).
 
 ```bash
 kubectl get pods -n kyverno
@@ -3682,8 +3646,6 @@ You are **done with Stage 4** when all of these are true:
 
 ---
 
-<a id="heading-stage-5--secrets-management-vault"></a>
-
 ## Stage 5 — Secrets Management (Vault)
 
 > By the end of this stage, sensitive values no longer live in Git or in etcd-backed Kubernetes Secrets: Vault holds them centrally and injects them into pods only when they start.
@@ -4207,8 +4169,6 @@ If Vault injection or ArgoCD sync fails, see [troubleshooting.md: Vault Issues](
 
 ---
 
-<a id="heading-stage-6--runtime-security-falco"></a>
-
 ## Stage 6 — Runtime Security (Falco)
 
 > Stages 1–5 secured what gets deployed and how secrets are stored. Stage 6 watches what happens inside running containers after they start.
@@ -4221,7 +4181,7 @@ CI, Kyverno, and Vault all act before or at pod startup. Falco fills the gap the
 >
 > - [ ] `make check-5` passes: Vault is injecting secrets and app Secrets are gone from Git and the cluster
 > - [ ] Login and transactions still work at `http://clearledger.local`
-> - [ ] Platform pods are stable with low restarts ([platform stability](#platform-stability--from-stage-4-onward))
+> - [ ] Platform pods are stable with low restarts ([platform stability](#heading-platform-stability-from-stage-4-onward))
 >
 > **You are done** when you have triggered at least one Falco alert (§6.2 or §6.3), applied network policies (§6.4), and `make check-6` passes (§6.6).
 >
@@ -4239,7 +4199,7 @@ Each step depends on the one before it. **Do not run `make check-6` until §6.4*
 
 Start at **§6.1**. If anything fails, see [troubleshooting.md. Stage 6](troubleshooting.md#stage-6--runtime-security-falco).
 
-**Optional reading:** [How Stage 6 fits the full stack](#how-stage-6-fits-the-full-stack-stages-16): why Falco and netpol exist and how they differ from Stages 3–5.
+**Optional reading:** [How Stage 6 fits the full stack](#heading-how-stage-6-fits-the-full-stack-optional-reading): why Falco and netpol exist and how they differ from Stages 3–5.
 
 ### If you get stuck in Stage 6
 
@@ -4552,8 +4512,6 @@ All checks passed. Ready for the next stage.
 
 ---
 
-<a id="how-stage-6-fits-the-full-stack-stages-16"></a>
-
 ### How Stage 6 fits the full stack (optional reading)
 
 Each stage guards a different point in the lifecycle. Stages 1 through 5 work before or during pod startup. Stage 6 watches what happens **inside** a container that is already running.
@@ -4595,11 +4553,9 @@ Three different questions: Kyverno asks whether this pod may be created. Falco a
 
 ---
 
-<a id="heading-stage-65--chaos-engineering-optional"></a>
-
 ## Stage 6.5 — Chaos Engineering (Optional)
 
-> **Most learners skip this.** If Stage 6 is done and `make check-6` passes, jump straight to [Stage 7](#stage-7--security-observability). Nothing in Stages 7–8 requires Litmus.
+> **Most learners skip this.** If Stage 6 is done and `make check-6` passes, jump straight to [Stage 7](#heading-stage-7-security-observability). Nothing in Stages 7–8 requires Litmus.
 
 **If you want chaos/resilience (~1 hour):** LitmusChaos deletes one `auth-service` pod and proves `/auth/health` stays **200** while Kubernetes replaces it.
 
@@ -4607,12 +4563,12 @@ Three different questions: Kyverno asks whether this pod may be created. Falco a
 
 | Step | Section | What you do |
 |------|---------|-------------|
-| 1 | [§6.5.0](#650--before-you-start-fix-auth-service-restarts) | `make fix-65-prereqs` — auth pods **2/2 Ready** |
-| 2 | [§6.5.1](#651--install-litmuschaos-operator-ui-cluster-connection) | `bash ...install-litmus.sh` — UI shows **Active 1** |
-| 3 | [§6.5.2](#652--run-your-first-experiment-pod-delete) | UI: Pod-delete experiment + `curl` stays 200 |
-| 4 | [§6.5.7](#657--health-check) | `make check-65`, snapshot |
+| 1 | [§6.5.0](#heading-650-before-you-start-auth-pods-must-be-22) | `make fix-65-prereqs` — auth pods **2/2 Ready** |
+| 2 | [§6.5.1](#heading-651-install-litmuschaos-operator-ui-cluster-connection) | `bash ...install-litmus.sh` — UI shows **Active 1** |
+| 3 | [§6.5.2](#heading-652-run-your-first-experiment-pod-delete) | UI: Pod-delete experiment + `curl` stays 200 |
+| 4 | [§6.5.7](#heading-657-health-check) | `make check-65`, snapshot |
 
-**Optional:** [§6.5.3](#653--same-experiment-from-the-terminal-make-demo-65): same test via `make demo-65` (terminal path) instead of the UI wizard.
+**Optional:** [§6.5.3](#heading-653-same-experiment-from-the-terminal-make-demo-65-optional): same test via `make demo-65` (terminal path) instead of the UI wizard.
 
 ---
 
@@ -4718,7 +4674,7 @@ Click **Save/Create** to finish the wizard, then **Run** (not **Schedule**).
 | Terminal B | `health=200` even while one pod is down |
 | Litmus UI | Experiment **Running → Completed** |
 
-**Prefer terminal over UI?** Skip the wizard and run [§6.5.3](#653--same-experiment-from-the-terminal-make-demo-65) (`make demo-65`) instead.
+**Prefer terminal over UI?** Skip the wizard and run [§6.5.3](#heading-653-same-experiment-from-the-terminal-make-demo-65-optional) (`make demo-65`) instead.
 
 ---
 
@@ -4977,7 +4933,7 @@ kubectl delete chaosengine auth-service-pod-delete -n litmus
 make check-65
 ```
 
-**Expected:** see full sample in [§6.5.3a](#653a--real-output-examples-verified-on-the-lab-cluster) (`make check-65` block). Minimum:
+**Expected:** see full sample in [§6.5.3a](#heading-653a-real-output-examples-verified-on-the-lab-cluster) (`make check-65` block). Minimum:
 
 ```text
 ▶ Stage 6.5 — Chaos Engineering (LitmusChaos)
@@ -5017,8 +4973,6 @@ All checks passed. Ready for the next stage.
 
 ---
 
-<a id="heading-stage-7--security-observability"></a>
-
 ## Stage 7 — Security Observability
 
 > Security you cannot measure you cannot prove.
@@ -5027,7 +4981,7 @@ All checks passed. Ready for the next stage.
 
 This stage is **not** “install Grafana and move on.” **Stage 7 is not complete** until your dashboards show **real** Kyverno violations and Falco alerts that **you triggered** in §7.4: plus portfolio screenshots (§7.6). `make check-7` only proves the stack is up; it does **not** prove you can detect security events.
 
-**Before you start:** `make check-6` should pass (Stage 6.5 is optional. Skip is fine). Check the VM is not overloaded: `multipass exec clearledger -- uptime`. If you ran Stage 6.5, do [§7.0](#70--free-node-resources-scale-down-litmus) first to scale Litmus down. Plan about half a day. This is the heaviest stage on a single-node VM.
+**Before you start:** `make check-6` should pass (Stage 6.5 is optional. Skip is fine). Check the VM is not overloaded: `multipass exec clearledger -- uptime`. If you ran Stage 6.5, do [§7.0](#heading-70-free-node-resources-scale-down-litmus) first to scale Litmus down. Plan about half a day. This is the heaviest stage on a single-node VM.
 
 **Done when:** §7.6 is complete: dashboards show **your** Kyverno denial and Falco alert, not empty panels. Then `make check-7` (§7.7), `make snapshot STAGE=7`, and `make snapshots` (confirm `clearledger.stage7`).
 
@@ -5979,8 +5933,6 @@ After a Mac reboot or sleep, auth/ledger pods may show **Unknown** or **Init:0/1
 
 ---
 
-<a id="heading-stage-75--opentelemetry-optional"></a>
-
 ## Stage 7.5 — OpenTelemetry (Optional)
 
 **You can skip this whole stage.** Stage 7 (metrics + logs) is enough to finish the homelab and move to Stage 8.
@@ -6264,7 +6216,7 @@ Quick mental model: span attributes = what the step did. Resource attributes = w
 
 #### TraceQL alternative
 
-Prefer the text box? Switch to the **TraceQL** tab, paste:
+Prefer the text box? Switch to the **TraceQL** tab, and paste:
 
 ```traceql
 { resource.service.name = "ledger-service" }
@@ -6394,8 +6346,6 @@ Find a slow or failing trace ID (from logs, metrics, or an alert), open it in Te
 
 ---
 
-<a id="heading-stage-8--aws-migration"></a>
-
 ## Stage 8 — AWS Migration
 
 **Goal:** run the same ClearLedger app on AWS instead of your laptop VM.
@@ -6456,7 +6406,7 @@ Read §8.2 afterward so you know what ran.
 
 Do not skip §8.2–§8.5 if you only ran `make aws-up`. Otherwise you will not know what Terraform, ESO, or ArgoCD each did.
 
-Before your first Stage 8 push, read [§8: CI routing and `CLEARLEDGER_CI_TARGET`](#ci-routing-stages-17-vs-stage-8) and set `CLEARLEDGER_CI_TARGET=aws` only after Terraform succeeds, not while you are still on Stages 1–7.
+Before your first Stage 8 push, read [§8: CI routing and `CLEARLEDGER_CI_TARGET`](#heading-ci-routing-stages-17-vs-stage-8) and set `CLEARLEDGER_CI_TARGET=aws` only after Terraform succeeds, not while you are still on Stages 1–7.
 
 ---
 
@@ -6470,7 +6420,7 @@ The spinup script runs 15 steps in order:
 
 **Deploy (13–15)**: ArgoCD app `clearledger-aws` syncs `stages/stage-8-aws-migration/manifests/`; wait for ALB hostname; print URL and tear-down reminder.
 
-After the script finishes, open the printed **`http://<alb-dns>/`** in your browser (ClearLedger login UI), or follow [§8.3. When to open what](#when-to-open-what-checkpoint-map) for Argo CD and Grafana port-forwards.
+After the script finishes, open the printed **`http://<alb-dns>/`** in your browser (ClearLedger login UI), or follow [§8.3. When to open what](#heading-when-to-open-what-checkpoint-map) for Argo CD and Grafana port-forwards.
 
 Default app deploy uses **ESO** for secrets. CSI is also installed so you can try file mounts in §8.5 without extra setup.
 
@@ -6480,7 +6430,7 @@ Default app deploy uses **ESO** for secrets. CSI is also installed so you can tr
 
 ### 8.3 — Manual walkthrough
 
-Run these yourself at least once instead of `make aws-up`. Paths are from the repo root.
+Run the manual walkthrough steps yourself at least once instead of `make aws-up`. Paths are from the repo root.
 
 **Same 15 steps as the script — you are just typing them.** Steps 1–6 prepare AWS and your laptop (Terraform, images, GitOps manifest, `kubectl`). **Steps 7–12 install the platform on the cluster** (Argo CD, Kyverno, Falco, ESO, CSI, monitoring). Steps 13–15 deploy the app and print the ALB URL. Nothing here requires GitHub Actions unless you choose CI for images in step 4.
 
@@ -6490,17 +6440,17 @@ Run these yourself at least once instead of `make aws-up`. Paths are from the re
 
 Whether you use `make aws-up` or this manual walkthrough, the **same fifteen steps** run in the same order. You do not need every UI open at once — just know **when** to look and **what success looks like**.
 
-First, Terraform builds the AWS foundation. When step 2 finishes, open the **AWS Console** and confirm the cluster, registry, and database exist before any pods run: EKS `clearledger` is **Active**, ECR has four repos including `frontend` (empty is fine for now), RDS `clearledger-postgres` is **Available**. See [👀 AWS Console (after step 2)](#-aws-console-after-step-2) for the walkthrough.
+First, Terraform builds the AWS foundation. When step 2 finishes, open the **AWS Console** and confirm the cluster, registry, and database exist before any pods run: EKS `clearledger` is **Active**, ECR has four repos including `frontend` (empty is fine for now), RDS `clearledger-postgres` is **Available**. See [AWS Console (after step 2)](#heading-aws-console-after-step-2) for the walkthrough.
 
 Next come container images. After **step 4** (your manual `docker push`) — or after **CI — AWS (ECR + OIDC)** if you use that instead — check **ECR**: each repo should list your git SHA tag. That is what ArgoCD will pull when the app deploys.
 
-Around **step 7** you install Argo CD. Port-forward to the UI and confirm the login page loads. You will not see the app yet; you are only checking that GitOps is reachable. Details: [👀 Argo CD UI](#-argo-cd-ui-after-step-7).
+Around **step 7** you install Argo CD. Port-forward to the UI and confirm the login page loads. You will not see the app yet; you are only checking that GitOps is reachable. Details: [Argo CD UI](#heading-step-13-watch-argocd-sync-ui-cli).
 
 **Step 12** adds observability. Port-forward to **Grafana**, log in, and confirm the six ClearLedger dashboards are listed. Panels can stay empty until you generate events — same as Stage 7 on the homelab.
 
 Step 13 applies the `clearledger-aws` app. Go back to Argo CD → **Applications** → `clearledger-aws`. You want **Synced**, **Healthy**, and running pods for frontend, auth, ledger, and notification.
 
-Step 14 exposes the app on a public URL. Open **`http://<alb-dns>/`** in your browser — you should see the same ClearLedger login UI as homelab `clearledger.local`, served from the ALB with no `/etc/hosts` entry. Use `/auth/health` and the other health URLs when you want a quick API check from the terminal. See [👀 ALB — first time the app is public](#-alb--first-time-the-app-is-public).
+Step 14 exposes the app on a public URL. Open **`http://<alb-dns>/`** in your browser — you should see the same ClearLedger login UI as homelab `clearledger.local`, served from the ALB with no `/etc/hosts` entry. Use `/auth/health` and the other health URLs when you want a quick API check from the terminal. See [ALB — first time the app is public](#heading-step-15-open-the-app-in-your-browser).
 
 If you want extra confirmation, the optional check is **EC2 → Load Balancers → `clearledger`**: status **Active**, with healthy targets for frontend and the API services.
 
@@ -6550,7 +6500,9 @@ terraform output -raw kubeconfig_command
 cd ../../..
 ```
 
-**👀 AWS Console (after step 2)**. Confirm Terraform created resources before you touch the cluster:
+#### AWS Console (after step 2)
+
+Confirm Terraform created resources before you touch the cluster:
 
 1. **EKS** → Clusters → `clearledger` → **Status: Active**, **3 nodes**
 2. **ECR** → Repositories → `clearledger/auth-service`, `ledger-service`, `notification-service`, `frontend` (0 images until step 4 or CI)
@@ -6619,9 +6571,9 @@ aws ecr describe-images --repository-name clearledger/auth-service --region "${A
   --query 'imageDetails[*].imageTags' --output table
 ```
 
-**👀 ECR console (after step 4 or green CI)**: open each repository → **Images** tab. You should see tags matching your git commit SHA. If repos are empty, ArgoCD will show `ImagePullBackOff` later.
+**ECR console (after step 4 or green CI)**: open each repository → **Images** tab. You should see tags matching your git commit SHA. If repos are empty, ArgoCD will show `ImagePullBackOff` later.
 
-**👀 GitHub Actions (if using CI instead of manual push)**: repo → **Actions** → workflow **CI. AWS (ECR + OIDC)**. All jobs green; **Publish images → ECR** succeeded. This is the supply-chain proof before deploy.
+**GitHub Actions (if using CI instead of manual push)**: repo → **Actions** → workflow **CI. AWS (ECR + OIDC)**. All jobs green; **Publish images → ECR** succeeded. This is the supply-chain proof before deploy.
 
 **Step 5: GitOps source of truth**
 
@@ -6728,7 +6680,7 @@ kubectl get deploy -n argocd
 
 **Expected:** `argocd-server`, `argocd-repo-server`, `argocd-application-controller`, and so on: most pods **Running** / **1/1** or **2/2**. `argocd-server` Service exposes port 443.
 
-**👀 UI (optional now, required after step 13):** new terminal, leave running. Use any free local port (`8081` if `8080` is in use):
+**UI (optional now, required after step 13):** new terminal, leave running. Use any free local port (`8081` if `8080` is in use):
 
 ```bash
 kubectl port-forward svc/argocd-server -n argocd 8080:443
@@ -6913,7 +6865,7 @@ Watch Argo CD until `clearledger-aws` is **Synced** and **Healthy** — that is 
 
 ---
 
-#### 👀 Step 13 — Watch ArgoCD sync (UI + CLI)
+#### Step 13 — Watch ArgoCD sync (UI + CLI)
 
 Open the Argo CD browser tab you kept open (port-forward from step 7).
 
@@ -6938,7 +6890,7 @@ kubectl get pods -n clearledger -w
 
 ---
 
-#### 👀 Step 14 — Get your public app URL (ALB)
+#### Step 14 — Get your public app URL (ALB)
 
 AWS takes **2–5 minutes** after ArgoCD syncs to provision the load balancer.
 Run this and wait until the ADDRESS column fills in:
@@ -6958,11 +6910,11 @@ export ALB_DNS=$(kubectl get ingress clearledger-ingress -n clearledger \
 echo "Your app is live at: http://${ALB_DNS}"
 ```
 
-> **Still empty after 10 minutes?** See [ALB hostname never appears](#alb-hostname-never-appears) in §Troubleshooting.
+> **Still empty after 10 minutes?** See [troubleshooting.md](https://github.com/Osomudeya/clearledger/blob/main/docs/troubleshooting.md) for ALB/ingress recovery steps.
 
 ---
 
-#### 👀 Step 15 — Open the app in your browser
+#### Step 15 — Open the app in your browser
 
 Paste the ALB root URL into your browser — no DNS entry, no port-forward, no VPN:
 
@@ -6984,7 +6936,7 @@ Each should return JSON like `{"status":"ok","service":"auth-service"}`.
 
 ---
 
-#### 👀 Step 16 — Verify in the AWS Console (optional but recommended)
+#### Step 16 — Verify in the AWS Console (optional but recommended)
 
 This is what the deployed stack looks like from AWS side:
 
@@ -7232,7 +7184,7 @@ No AWS keys inside Kubernetes Secrets
 
 Terraform creates the role `clearledger-github-actions-ecr` and wires up the trust policies for both. The pipeline in `.github/workflows/ci-aws.yaml` assumes that role, pushes images to ECR, and updates `kustomization.yaml`. ArgoCD picks up the change and deploys the new images.
 
-### CI routing: Stages 1–7 vs Stage 8 {#ci-routing-stages-17-vs-stage-8}
+### CI routing: Stages 1–7 vs Stage 8
 
 The repo ships two workflow files. You do not need both running at the same time.
 
@@ -7494,8 +7446,6 @@ Your homelab VM is separate. If you plan to return to it, you should already hav
 
 ---
 
-<a id="heading-troubleshooting"></a>
-
 ## Troubleshooting
 
 **Pod stuck in Pending:**
@@ -7553,8 +7503,6 @@ If still FAIL after reclaim, tear down and recreate: `make teardown && make setu
 
 ---
 
-<a id="heading-compliance-reference"></a>
-
 ## Compliance Reference
 
 Every control maps to at least one framework. Full mapping: [`docs/compliance-mapping.md`](compliance-mapping.md)
@@ -7582,8 +7530,6 @@ Every control maps to at least one framework. Full mapping: [`docs/compliance-ma
 
 ---
 
-<a id="heading-interview-preparation"></a>
-
 ## Interview Preparation
 
 Full weak/strong answers: [`docs/interview-prep.md`](interview-prep.md)
@@ -7610,8 +7556,6 @@ Practice these as you finish each stage:
 
 ---
 
-<a id="heading-aws-cost-reference"></a>
-
 ## AWS Cost Reference
 
 Default Stage 8 sizes (eu-west-1, approximate):
@@ -7634,8 +7578,6 @@ make aws-down
 
 ---
 
-
-<a id="heading-conclusion"></a>
 
 ## Conclusion
 

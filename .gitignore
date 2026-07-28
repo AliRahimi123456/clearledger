@@ -43,3 +43,5 @@ stages/stage-3-security-gates/dast/__pycache__/
 
 # freeCodeCamp draft and lab guide — not part of the public repo
 docs/LAB-GUIDE.md
+docs/fcc.md
+docs/fcc copy.md
