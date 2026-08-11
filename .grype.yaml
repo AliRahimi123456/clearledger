@@ -5,3 +5,10 @@ ignore:
   # and upgrade base image at that point.
   - vulnerability: CVE-2026-7210
     reason: fix-requires-prerelease
+
+  - vulnerability: CVE-2026-11940
+    reason: fix-requires-prerelease
+  - vulnerability: CVE-2026-15308
+    reason: fix-requires-prerelease
+  - vulnerability: CVE-2026-11972
+    reason: fix-requires-prerelease
