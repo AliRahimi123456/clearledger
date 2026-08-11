@@ -3,3 +3,15 @@
 # Using a beta CPython in production is not acceptable.
 # Risk accepted: monitor python.org for stable 3.15 GA and upgrade at that point.
 CVE-2026-7210
+
+# GHSA-6v7p-g79w-8964: msgpack vulnerability bundled inside pip's own internal
+# vendored dependencies (pip/_vendor/msgpack) — not an installed application
+# package. Only used internally by pip's HTTP cache during image build; never
+# reachable by the running app. Risk accepted: not in the runtime attack surface.
+GHSA-6v7p-g79w-8964
+
+# CVE-2025-47273: setuptools path traversal, detected via pip's internal vendored
+# reference — the actual installed setuptools in site-packages is already 84.0.0
+# (patched), satisfying requirements.txt's setuptools>=78.1.1 pin already.
+# Risk accepted: not in the runtime attack surface.
+CVE-2025-47273
