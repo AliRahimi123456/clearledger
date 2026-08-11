@@ -27,9 +27,9 @@ spec:
         runAsGroup: 1000
       containers:
         - name: notification-service
-          # Replace DOCKER_USERNAME with your Docker Hub username.
+          # Replace rahimi123 with your Docker Hub username.
           # This is updated automatically by the CI pipeline after Stage 1.
-          image: DOCKER_USERNAME/clearledger-notification-service:v0.1.0
+          image: rahimi123/clearledger-notification-service:v0.1.0
           ports:
             - containerPort: 8000
           env:
