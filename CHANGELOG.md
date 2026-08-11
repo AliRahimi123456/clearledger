@@ -6,6 +6,14 @@ Versioning: Semantic Versioning (semver.org)
 
 ---
 
+## [Unreleased] — personal progress (this fork)
+
+### Added
+- Stage 0 completed and verified on WSL2-native MicroK8s (28/28 checks).
+- Stage 1: self-hosted GitHub Actions runner registered and running.
+
+---
+
 ## [1.0.0] — 2026
 
 ### Added
