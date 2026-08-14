@@ -51,7 +51,11 @@ spec:
                   entries:
                     - keys:
                         publicKeys: |-
-                          PASTE_YOUR_COSIGN_PUBLIC_KEY_HERE
+                          -----BEGIN PUBLIC KEY-----
+                          MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEfUGYC1SwB8VQVAa84ul7vQDcScgW
+                          vd8EKyTvbgX87CtAD49eESqebsAAvDraJwmzS04z0X3lEZ1LzmqkWPgcxA==
+                          -----END PUBLIC KEY-----
+
               conditions:
                 - all:
                     - key: "{{ predicate.builder.id }}"
