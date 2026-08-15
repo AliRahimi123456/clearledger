@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM python:3.8-slim
+FROM python:3.11-slim
 
 RUN groupadd -r appuser && useradd -r -g appuser appuser
 
