@@ -1,6 +1,6 @@
 # Stage 8 — AWS EKS manifests (GitOps source for ArgoCD clearledger-aws app)
 # Image tags are set by aws-spinup.sh (first boot) or ci-aws.yaml (ongoing deploys).
-# Before first deploy: REPLACE_ECR_REGISTRY and REPLACE_IMAGE_TAG are patched by aws-spinup.sh / §8.3 sed.
+# Before first deploy: 856986449724.dkr.ecr.eu-west-1.amazonaws.com and 739d3f5 are patched by aws-spinup.sh / §8.3 sed.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
@@ -25,14 +25,14 @@ resources:
 
 images:
   - name: clearledger/auth-service
-    newName: REPLACE_ECR_REGISTRY/clearledger/auth-service
-    newTag: REPLACE_IMAGE_TAG
+    newName: 856986449724.dkr.ecr.eu-west-1.amazonaws.com/clearledger/auth-service
+    newTag: 739d3f5
   - name: clearledger/ledger-service
-    newName: REPLACE_ECR_REGISTRY/clearledger/ledger-service
-    newTag: REPLACE_IMAGE_TAG
+    newName: 856986449724.dkr.ecr.eu-west-1.amazonaws.com/clearledger/ledger-service
+    newTag: 739d3f5
   - name: clearledger/notification-service
-    newName: REPLACE_ECR_REGISTRY/clearledger/notification-service
-    newTag: REPLACE_IMAGE_TAG
+    newName: 856986449724.dkr.ecr.eu-west-1.amazonaws.com/clearledger/notification-service
+    newTag: 739d3f5
   - name: clearledger/frontend
-    newName: REPLACE_ECR_REGISTRY/clearledger/frontend
-    newTag: REPLACE_IMAGE_TAG
+    newName: 856986449724.dkr.ecr.eu-west-1.amazonaws.com/clearledger/frontend
+    newTag: 739d3f5
