@@ -5,7 +5,7 @@
 #          in the cluster — the application code does not change.
 
 # ─────────────────────────────────────────────────────────────────────────────
-# IMPORTANT: Change CHANGE_ME_BEFORE_APPLY values before running terraform apply.
+# IMPORTANT: Replace the placeholder credential values below before running terraform apply.
 # These are the actual credentials that will be used by the running services.
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -26,7 +26,7 @@ resource "aws_secretsmanager_secret" "postgres" {
 
 resource "aws_secretsmanager_secret_version" "postgres" {
   secret_id = aws_secretsmanager_secret.postgres.id
-  # Change CHANGE_ME_BEFORE_APPLY to a strong password before terraform apply
+  # Set to a strong password before terraform apply
   secret_string = jsonencode({
     username = "clearledger"
     password = "CHANGE_ME_BEFORE_APPLY"
@@ -54,7 +54,7 @@ resource "aws_secretsmanager_secret" "auth_service" {
 
 resource "aws_secretsmanager_secret_version" "auth_service" {
   secret_id = aws_secretsmanager_secret.auth_service.id
-  # Change CHANGE_ME_BEFORE_APPLY values before terraform apply
+  # Set jwt_secret and database_url to real values before terraform apply
   # Generate jwt_secret with: openssl rand -base64 64
   secret_string = jsonencode({
     jwt_secret   = "CHANGE_ME_BEFORE_APPLY"

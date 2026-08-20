@@ -1,7 +1,8 @@
 # GitOps source for ArgoCD (clearledger-infra). CI updates image tags here only.
 # Deployments use placeholders (clearledger/*:gitops); Kustomize maps to registry + SHA.
 #
-# Stage 1.3: replace YOUR_DOCKERHUB_USERNAME below with your Docker Hub user before first push.
+# NOTE: this file's images: section is a template only — CI's update-manifests job keeps the
+# real, current newTag in clearledger-infra's copy. Never overwrite that copy with this one.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 

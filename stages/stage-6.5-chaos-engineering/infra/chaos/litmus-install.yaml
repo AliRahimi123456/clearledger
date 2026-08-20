@@ -5,3 +5,7 @@
 #
 # Installs: litmus namespace, RBAC, litmus-core (operator), kubernetes-chaos
 # (experiments), ChaosCenter UI (chaos helm release), and litmus-ingress.yaml.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: litmus
