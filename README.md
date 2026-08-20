@@ -17,6 +17,14 @@
 
 # ClearLedger DevSecOps Lab
 
+## About This Fork
+
+I completed all 8 stages of this lab end-to-end, including the AWS migration in Stage 8 — not just cloned it and left it sitting. I also built everything on WSL2/MicroK8s instead of the book's assumed Mac + Multipass setup, so a fair amount of translation and troubleshooting was needed just to get each stage running at all.
+
+Along the way I hit and root-caused a handful of real infrastructure bugs the book doesn't document: a GitHub OIDC provider that Terraform assumes already exists in your AWS account but never creates, a literal `PLACEHOLDER_RDS` hostname baked into Terraform's secrets file that nothing ever replaces, AWS's newer "Free Plan" account tier silently blocking EKS worker nodes and GuardDuty until upgraded, a vCPU quota increase request that AWS declined outright (had to free existing cluster capacity instead of adding a node), and an orphaned load balancer + security groups left behind by the AWS Load Balancer Controller that blocked a clean `terraform destroy` on teardown.
+
+Every one of these is written up with the actual root cause and fix in [`setup-journal/`](./setup-journal/) — the real debugging record from building this, not a polished happy-path walkthrough.
+
 ## What You Are Building
 
 ClearLedger is a three-service fintech transaction ledger:
